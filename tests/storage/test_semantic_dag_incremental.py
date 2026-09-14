@@ -64,6 +64,7 @@ class _FakeProcessor:
         self.summarized_files = []
         self.sync_calls = []
         self.vectorized_files = []
+        self.vectorized_dirs = []
 
     def _parse_overview_md(self, overview_content):
         results = {}
@@ -110,7 +111,7 @@ class _FakeProcessor:
         ctx=None,
         ingest_options=None,
     ):
-        return None
+        self.vectorized_dirs.append(uri)
 
     async def _sync_topdown_recursive(
         self, root_uri, target_uri, ctx=None, file_change_status=None, lock=None
@@ -132,7 +133,8 @@ class _FakeProcessor:
 
 
 @pytest.mark.asyncio
-async def test_direct_incremental_update_uses_changes_without_temp_sync(monkeypatch):
+@pytest.mark.parametrize("sidecar_state", ["valid", "malformed_overview", "malformed_abstract"])
+async def test_direct_incremental_update_uses_changes_without_temp_sync(monkeypatch, sidecar_state):
 
     root_uri = "viking://resources/root"
     tree = {
@@ -161,6 +163,9 @@ async def test_direct_incremental_update_uses_changes_without_temp_sync(monkeypa
             f"{root_uri}/.abstract.md": "old-abstract",
         },
     )
+    if sidecar_state != "valid":
+        filename = ".overview.md" if sidecar_state == "malformed_overview" else ".abstract.md"
+        fake_fs._file_contents[f"{root_uri}/{filename}"] = "---\n"
     monkeypatch.setattr("openviking.storage.queuefs.semantic_dag.get_viking_fs", lambda: fake_fs)
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_dag.get_openviking_config",
@@ -176,17 +181,26 @@ async def test_direct_incremental_update_uses_changes_without_temp_sync(monkeypa
         ctx=ctx,
         incremental_update=True,
         target_uri=root_uri,
-        changes={"modified": [f"{root_uri}/a.txt"]},
+        changes={"modified": [f"{root_uri}/a.txt"]} if sidecar_state == "valid" else {},
     )
 
     await executor.run(root_uri)
 
-    assert processor.summarized_files == [f"{root_uri}/a.txt"]
-    assert processor.vectorized_files == [f"{root_uri}/a.txt"]
+    expected_files = {
+        "valid": [f"{root_uri}/a.txt"],
+        "malformed_overview": [f"{root_uri}/a.txt", f"{root_uri}/b.txt"],
+        "malformed_abstract": [],
+    }[sidecar_state]
+    assert processor.summarized_files == expected_files
+    assert processor.vectorized_files == expected_files
+    assert processor.vectorized_dirs == [root_uri]
     assert processor.sync_calls == []
     overview = parse_abstract_overview(fake_fs._file_contents[f"{root_uri}/.overview.md"]).body
-    assert "- a.txt: summary" in overview
-    assert "- b.txt: old-b" in overview
+    expected_a = "old-a" if sidecar_state == "malformed_abstract" else "summary"
+    expected_b = "summary" if sidecar_state == "malformed_overview" else "old-b"
+    assert f"- a.txt: {expected_a}" in overview
+    assert f"- b.txt: {expected_b}" in overview
+    assert parse_abstract_overview(fake_fs._file_contents[f"{root_uri}/.abstract.md"]).body.strip()
 
 
 @pytest.mark.asyncio
