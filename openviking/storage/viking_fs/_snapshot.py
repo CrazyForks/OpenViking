@@ -216,6 +216,7 @@ class _SnapshotMixin:
         *,
         message: str,
         paths: Optional[List[str]] = None,
+        file_paths: Optional[List[str]] = None,
         branch: str = "main",
         author_name: Optional[str] = None,
         author_email: Optional[str] = None,
@@ -231,7 +232,13 @@ class _SnapshotMixin:
                 (default) enumerates the whole account tree. An empty list is
                 forwarded as an explicit empty path list (no-op commit). A
                 path that exists in neither the VFS nor the previous snapshot
-                logs a warning and is treated as a no-op deletion.
+                logs a warning and is treated as a no-op deletion of that
+                name and anything under it.
+            file_paths: Optional list of ``viking://`` URIs the caller knows
+                to be files. They are snapshotted like ``paths`` entries but
+                locked with an Exact lock, which never materializes the
+                target, so a deleted file stays absent while its deletion is
+                recorded.
             branch: Branch to advance. Defaults to ``"main"``.
             author_name / author_email: Override the default bot author.
             ctx: Request context (provides ``account_id``).
@@ -245,46 +252,65 @@ class _SnapshotMixin:
         """
         real_ctx = self._ctx_or_default(ctx)
         account = real_ctx.account_id
-        if real_ctx.role != Role.ROOT and paths is None:
+        if real_ctx.role != Role.ROOT and paths is None and file_paths is None:
             raise PermissionDeniedError(
                 "Snapshot commit requires explicit paths",
                 resource="viking://",
             )
-        if paths is None:
-            tree_paths: Optional[List[str]] = None
-        else:
-            tree_paths = [self._uri_to_tree_path(p, ctx=real_ctx) for p in paths]
+        # The git layer only needs the union; the split only matters for locking.
+        all_paths = (
+            None
+            if paths is None and file_paths is None
+            else list(dict.fromkeys([*(paths or []), *(file_paths or [])]))
+        )
         kwargs = {
             "account": account,
             "branch": branch,
             "message": message,
-            "paths": tree_paths,
+            "paths": (
+                None
+                if all_paths is None
+                else [self._uri_to_tree_path(p, ctx=real_ctx) for p in all_paths]
+            ),
             "author_name": author_name or self._DEFAULT_GIT_AUTHOR_NAME,
             "author_email": author_email or self._DEFAULT_GIT_AUTHOR_EMAIL,
         }
-        if real_ctx.role == Role.ROOT or not paths:
+        if real_ctx.role == Role.ROOT or not all_paths:
             return await self._async_agfs.run("git_commit", **kwargs)
 
         from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 
-        lock_paths: List[str] = []
+        # Tree locks for auto-scoped `paths`; a root swallows its descendants.
+        tree_lock_paths: List[str] = []
         for path in sorted(
-            {self._uri_to_path(uri, ctx=real_ctx) for uri in paths},
+            {self._uri_to_path(uri, ctx=real_ctx) for uri in paths or []},
             key=lambda value: (value.count("/"), value),
         ):
             if not any(
-                path == root or path.startswith(f"{root.rstrip('/')}/") for root in lock_paths
+                path == root or path.startswith(f"{root.rstrip('/')}/") for root in tree_lock_paths
             ):
-                lock_paths.append(path)
+                tree_lock_paths.append(path)
+        # Exact locks for declared files: a Tree lock on a missing target would
+        # create it as a directory. Files under a tree root are already covered.
+        exact_lock_paths = [
+            path
+            for path in sorted({self._uri_to_path(uri, ctx=real_ctx) for uri in file_paths or []})
+            if not any(
+                path == root or path.startswith(f"{root.rstrip('/')}/") for root in tree_lock_paths
+            )
+        ]
+        lock_requests = [{"path": path, "kind": "tree"} for path in tree_lock_paths] + [
+            {"path": path, "kind": "exact"} for path in exact_lock_paths
+        ]
         try:
-            lease = await self._async_agfs.pathlock_acquire_tree_batch(lock_paths)
+            lease = await self._async_agfs.pathlock_acquire_batch(lock_requests)
         except LockAcquisitionError as exc:
             raise ResourceBusyError(
                 "A snapshot path is being processed",
-                uri=paths[0],
+                uri=all_paths[0],
             ) from exc
         try:
-            scope_uris = await self._snapshot_scope_uris(paths, real_ctx)
+            scope_uris = await self._snapshot_scope_uris(all_paths, real_ctx)
             await self._ensure_access_many(scope_uris, real_ctx, action=AclAction.WRITE)
             return await self._async_agfs.run("git_commit", **kwargs)
         finally:
