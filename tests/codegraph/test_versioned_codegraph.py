@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 
@@ -12,10 +15,62 @@ from openviking.codegraph import (
     CatalogConflictError,
     CodeGraphBuilder,
     CodeGraphIndex,
+    FileAccessScope,
     LocalCodeGraphCatalog,
     SourceFile,
+    SupersededRevisionError,
     VersionedCodeGraph,
+    stable_file_key,
 )
+
+ACCOUNT_ID = "account-1"
+
+
+def _full_access(repo_id: str = "repo-a") -> FileAccessScope:
+    return FileAccessScope.unrestricted(
+        account_id=ACCOUNT_ID,
+        repo_id=repo_id,
+        acl_revision=1,
+    )
+
+
+def _restricted_access(*uris: str, repo_id: str = "repo-a") -> FileAccessScope:
+    return FileAccessScope.restricted(
+        account_id=ACCOUNT_ID,
+        repo_id=repo_id,
+        acl_revision=1,
+        allowed_file_keys=(stable_file_key(ACCOUNT_ID, repo_id, uri) for uri in uris),
+    )
+
+
+class _MemorySnapshotReader:
+    def __init__(self):
+        self._snapshots: dict[str, tuple[SourceFile, ...]] = {}
+
+    def seal(self, files: Sequence[SourceFile]) -> str:
+        sealed_files = tuple(
+            SourceFile(
+                relative_path=source.relative_path,
+                uri=source.uri,
+                content=source.content,
+                source_blob_oid=hashlib.sha256(source.content.encode("utf-8")).hexdigest(),
+            )
+            for source in sorted(files, key=lambda item: item.relative_path)
+        )
+        inventory = [
+            (source.relative_path, source.uri, source.source_blob_oid) for source in sealed_files
+        ]
+        snapshot_oid = hashlib.sha256(
+            json.dumps(inventory, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._snapshots[snapshot_oid] = sealed_files
+        return snapshot_oid
+
+    def read_source_files(self, source_snapshot_oid: str) -> Sequence[SourceFile]:
+        try:
+            return self._snapshots[source_snapshot_oid]
+        except KeyError:
+            raise KeyError(f"snapshot not found: {source_snapshot_oid}") from None
 
 
 def _build(
@@ -27,15 +82,69 @@ def _build(
     files: list[SourceFile],
     repo_id: str = "repo-a",
 ):
+    snapshot_reader = _MemorySnapshotReader()
+    source_snapshot_oid = snapshot_reader.seal(files)
     return CodeGraphBuilder().build(
+        account_id=ACCOUNT_ID,
         repo_id=repo_id,
         revision_id=revision,
         commit_sha=commit,
-        source_snapshot_oid=f"snapshot-{commit}",
+        source_snapshot_oid=source_snapshot_oid,
         graph_generation=generation,
-        source_files=files,
+        snapshot_reader=snapshot_reader,
         output_path=root / f"{generation}.sqlite3",
     )
+
+
+def test_builder_reads_source_from_requested_snapshot(tmp_path):
+    snapshot_reader = _MemorySnapshotReader()
+    old_snapshot_oid = snapshot_reader.seal(
+        [
+            SourceFile(
+                relative_path="service.py",
+                uri="viking://resources/repo-a/service.py",
+                content="def old_api():\n    return 1\n",
+            )
+        ]
+    )
+    snapshot_reader.seal(
+        [
+            SourceFile(
+                relative_path="service.py",
+                uri="viking://resources/repo-a/service.py",
+                content="def new_api():\n    return 2\n",
+            )
+        ]
+    )
+
+    manifest = CodeGraphBuilder().build(
+        account_id=ACCOUNT_ID,
+        repo_id="repo-a",
+        revision_id="revision-1",
+        commit_sha="commit-1",
+        source_snapshot_oid=old_snapshot_oid,
+        graph_generation="graph-1",
+        snapshot_reader=snapshot_reader,
+        output_path=tmp_path / "graph-1.sqlite3",
+    )
+    index = CodeGraphIndex(manifest.index_path)
+
+    assert [hit.qualified_name for hit in index.search("old_api", access_scope=_full_access())] == [
+        "old_api"
+    ]
+    assert index.search("new_api", access_scope=_full_access()) == []
+
+    with pytest.raises(KeyError, match="snapshot not found"):
+        CodeGraphBuilder().build(
+            account_id=ACCOUNT_ID,
+            repo_id="repo-a",
+            revision_id="revision-missing",
+            commit_sha="commit-missing",
+            source_snapshot_oid="missing-snapshot",
+            graph_generation="graph-missing",
+            snapshot_reader=snapshot_reader,
+            output_path=tmp_path / "graph-missing.sqlite3",
+        )
 
 
 def test_build_search_and_expand_resolved_call(tmp_path):
@@ -62,7 +171,7 @@ def helper(value: str) -> str:
     )
 
     index = CodeGraphIndex(manifest.index_path)
-    hits = index.search("greet")
+    hits = index.search("greet", access_scope=_full_access())
 
     assert hits
     method = next(hit for hit in hits if hit.qualified_name == "Greeter.greet")
@@ -70,7 +179,7 @@ def helper(value: str) -> str:
     assert method.canonical_signature == "(p:str)->str"
     assert method.start_line == 2
 
-    expansion = index.expand([method.node_id])
+    expansion = index.expand([method.node_id], access_scope=_full_access())
 
     assert {node.qualified_name for node in expansion.nodes} == {
         "Greeter.greet",
@@ -108,7 +217,9 @@ def parse(value: str) -> str: ...
 
     hits = [
         hit
-        for hit in CodeGraphIndex(manifest.index_path).search("parse", limit=10)
+        for hit in CodeGraphIndex(manifest.index_path).search(
+            "parse", access_scope=_full_access(), limit=10
+        )
         if hit.qualified_name == "parse"
     ]
 
@@ -145,7 +256,9 @@ def access(use_first: bool):
 
     hits = [
         hit
-        for hit in CodeGraphIndex(manifest.index_path).search("cleanup", limit=10)
+        for hit in CodeGraphIndex(manifest.index_path).search(
+            "cleanup", access_scope=_full_access(), limit=10
+        )
         if hit.qualified_name == "access.cleanup"
     ]
 
@@ -180,29 +293,98 @@ def private_secret():
         ],
     )
     index = CodeGraphIndex(manifest.index_path)
+    public_uri = "viking://resources/repo-a/a_public.py"
+    public_access = _restricted_access(public_uri)
+    deny_all = _restricted_access()
 
-    assert index.search("private_secret")
-    authorized_hits = index.search("private_secret", allowed_file_ids={1})
+    assert index.search("private_secret", access_scope=_full_access())
+    assert index.search("private_secret", access_scope=deny_all) == []
+    with pytest.raises(PermissionError, match="does not belong"):
+        index.search("private_secret", access_scope=_full_access("repo-b"))
+    authorized_hits = index.search("private_secret", access_scope=public_access)
     assert authorized_hits
-    assert {hit.file_id for hit in authorized_hits} == {1}
+    assert {hit.file_key for hit in authorized_hits} == {
+        stable_file_key(ACCOUNT_ID, "repo-a", public_uri)
+    }
     assert "private_secret" not in {hit.qualified_name for hit in authorized_hits}
 
     unfiltered_public = next(
-        hit for hit in index.search("public_entry") if hit.qualified_name == "public_entry"
+        hit
+        for hit in index.search("public_entry", access_scope=_full_access())
+        if hit.qualified_name == "public_entry"
     )
-    unfiltered_expansion = index.expand([unfiltered_public.node_id])
+    unfiltered_expansion = index.expand(
+        [unfiltered_public.node_id],
+        access_scope=_full_access(),
+    )
     assert len(unfiltered_expansion.edges) == 1
     assert unfiltered_expansion.edges[0].resolution == "best_effort"
 
     public = next(
         hit
-        for hit in index.search("public_entry", allowed_file_ids={1})
+        for hit in index.search("public_entry", access_scope=public_access)
         if hit.qualified_name == "public_entry"
     )
-    expansion = index.expand([public.node_id], allowed_file_ids={1})
+    expansion = index.expand([public.node_id], access_scope=public_access)
 
     assert {node.qualified_name for node in expansion.nodes} == {"public_entry"}
     assert expansion.edges == ()
+
+
+def test_acl_file_key_survives_file_id_renumbering(tmp_path):
+    public_uri = "viking://resources/repo-a/a_public.py"
+    access_scope = _restricted_access(public_uri)
+    graph1 = _build(
+        tmp_path,
+        revision="revision-1",
+        commit="commit-1",
+        generation="graph-1",
+        files=[
+            SourceFile(
+                relative_path="a_public.py",
+                uri=public_uri,
+                content="def public_api():\n    return 1\n",
+            )
+        ],
+    )
+    graph2 = _build(
+        tmp_path,
+        revision="revision-2",
+        commit="commit-2",
+        generation="graph-2",
+        files=[
+            SourceFile(
+                relative_path="0_private.py",
+                uri="viking://resources/repo-a/0_private.py",
+                content="def private_api():\n    return 0\n",
+            ),
+            SourceFile(
+                relative_path="a_public.py",
+                uri=public_uri,
+                content="def public_api():\n    return 2\n",
+            ),
+        ],
+    )
+
+    old_hit = CodeGraphIndex(graph1.index_path).search(
+        "public_api",
+        access_scope=access_scope,
+    )
+    new_hit = CodeGraphIndex(graph2.index_path).search(
+        "public_api",
+        access_scope=access_scope,
+    )
+
+    assert [hit.file_id for hit in old_hit] == [1]
+    assert [hit.file_id for hit in new_hit] == [2]
+    assert old_hit[0].file_key == new_hit[0].file_key
+    assert (
+        CodeGraphIndex(graph2.index_path).search(
+            "private_api",
+            access_scope=access_scope,
+        )
+        == []
+    )
 
 
 def test_catalog_keeps_old_read_view_after_new_revision_is_published(tmp_path):
@@ -232,23 +414,36 @@ def test_catalog_keeps_old_read_view_after_new_revision_is_published(tmp_path):
             )
         ],
     )
-    catalog = LocalCodeGraphCatalog(tmp_path / "catalog.sqlite3", account_id="account-1")
+    catalog = LocalCodeGraphCatalog(tmp_path / "catalog.sqlite3", account_id=ACCOUNT_ID)
     service = VersionedCodeGraph(catalog)
+    access_scope = _full_access()
 
-    published1 = catalog.publish(manifest1, expected_epoch=0)
+    published1 = catalog.publish(manifest1, expected_epoch=0, base_revision_id=None)
     view1 = service.acquire_view()
 
     assert published1.published_epoch == 1
-    assert [hit.qualified_name for hit in service.search("repo-a", "old_api")[2]] == ["old_api"]
+    assert [
+        hit.qualified_name
+        for hit in service.search("repo-a", "old_api", access_scope=access_scope)[2]
+    ] == ["old_api"]
 
     # Building graph-2 alone does not change the published catalog.
-    assert service.search("repo-a", "new_api")[2] == []
+    assert service.search("repo-a", "new_api", access_scope=access_scope)[2] == []
 
-    published2 = catalog.publish(manifest2, expected_epoch=1)
-    latest_view, latest_revision, latest_hits = service.search("repo-a", "new_api")
+    published2 = catalog.publish(
+        manifest2,
+        expected_epoch=1,
+        base_revision_id="revision-1",
+    )
+    latest_view, latest_revision, latest_hits = service.search(
+        "repo-a",
+        "new_api",
+        access_scope=access_scope,
+    )
     old_view, old_revision, old_hits = service.search(
         "repo-a",
         "old_api",
+        access_scope=access_scope,
         view=view1,
     )
 
@@ -261,14 +456,62 @@ def test_catalog_keeps_old_read_view_after_new_revision_is_published(tmp_path):
     assert [hit.qualified_name for hit in old_hits] == ["old_api"]
 
     with pytest.raises(CatalogConflictError, match="expected 1, actual 2"):
-        catalog.publish(manifest1, expected_epoch=1)
+        catalog.publish(
+            manifest1,
+            expected_epoch=1,
+            base_revision_id="revision-2",
+        )
 
-    rollback = catalog.publish(manifest1, expected_epoch=2)
+    rollback = catalog.publish(
+        manifest1,
+        expected_epoch=2,
+        base_revision_id="revision-2",
+    )
     rollback_view = catalog.acquire_view()
 
     assert rollback.published_epoch == 3
     assert catalog.resolve("repo-a", latest_view).commit_sha == "commit-2"
     assert catalog.resolve("repo-a", rollback_view).commit_sha == "commit-1"
+
+
+def test_late_build_cannot_overwrite_newer_repository_revision(tmp_path):
+    manifests = {
+        revision: _build(
+            tmp_path,
+            revision=revision,
+            commit=commit,
+            generation=generation,
+            files=[
+                SourceFile(
+                    relative_path="service.py",
+                    uri="viking://resources/repo-a/service.py",
+                    content=f"def {symbol}():\n    return 1\n",
+                )
+            ],
+        )
+        for revision, commit, generation, symbol in (
+            ("revision-1", "commit-1", "graph-1", "base_api"),
+            ("revision-2", "commit-2", "graph-2", "late_api"),
+            ("revision-3", "commit-3", "graph-3", "new_api"),
+        )
+    }
+    catalog = LocalCodeGraphCatalog(tmp_path / "catalog.sqlite3", account_id=ACCOUNT_ID)
+
+    catalog.publish(manifests["revision-1"], expected_epoch=0, base_revision_id=None)
+    catalog.publish(
+        manifests["revision-3"],
+        expected_epoch=1,
+        base_revision_id="revision-1",
+    )
+
+    with pytest.raises(SupersededRevisionError, match="actual 'revision-3'"):
+        catalog.publish(
+            manifests["revision-2"],
+            expected_epoch=2,
+            base_revision_id="revision-1",
+        )
+
+    assert catalog.resolve("repo-a", catalog.acquire_view()).revision_id == "revision-3"
 
 
 def test_sealed_generation_cannot_be_overwritten(tmp_path):
@@ -326,11 +569,11 @@ def test_catalog_cas_serializes_concurrent_repository_publications(tmp_path):
             )
         ],
     )
-    catalog = LocalCodeGraphCatalog(tmp_path / "catalog.sqlite3", account_id="account-1")
+    catalog = LocalCodeGraphCatalog(tmp_path / "catalog.sqlite3", account_id=ACCOUNT_ID)
 
     def publish(manifest):
         try:
-            return catalog.publish(manifest, expected_epoch=0)
+            return catalog.publish(manifest, expected_epoch=0, base_revision_id=None)
         except CatalogConflictError as exc:
             return exc
 
@@ -345,7 +588,7 @@ def test_catalog_cas_serializes_concurrent_repository_publications(tmp_path):
 
     winner_repo = successes[0].repo_id
     loser = manifest_b if winner_repo == "repo-a" else manifest_a
-    catalog.publish(loser, expected_epoch=1)
+    catalog.publish(loser, expected_epoch=1, base_revision_id=None)
     view = catalog.acquire_view()
 
     assert view.epoch == 2

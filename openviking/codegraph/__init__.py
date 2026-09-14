@@ -6,17 +6,21 @@ from openviking.codegraph.catalog import (
     CatalogConflictError,
     InvalidRevisionError,
     LocalCodeGraphCatalog,
+    SupersededRevisionError,
     VersionedCodeGraph,
 )
 from openviking.codegraph.models import (
     CodeGraphHit,
+    FileAccessScope,
     GraphExpansion,
     GraphManifest,
     ReadView,
     RevisionRef,
     SourceFile,
+    stable_file_key,
 )
 from openviking.codegraph.python_extractor import SymbolCollisionError
+from openviking.codegraph.snapshot import SourceSnapshotReader
 from openviking.codegraph.sqlite_index import (
     CodeGraphBuilder,
     CodeGraphIndex,
@@ -28,6 +32,7 @@ __all__ = [
     "CodeGraphBuilder",
     "CodeGraphHit",
     "CodeGraphIndex",
+    "FileAccessScope",
     "GraphExpansion",
     "GraphManifest",
     "InvalidCodeGraphError",
@@ -36,6 +41,9 @@ __all__ = [
     "ReadView",
     "RevisionRef",
     "SourceFile",
+    "SourceSnapshotReader",
+    "SupersededRevisionError",
     "SymbolCollisionError",
     "VersionedCodeGraph",
+    "stable_file_key",
 ]

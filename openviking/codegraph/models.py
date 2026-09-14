@@ -4,13 +4,73 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Iterable, Literal, Optional
 
 GraphNodeKind = Literal["file", "class", "function", "method"]
 GraphEdgeKind = Literal["defines", "calls"]
 EdgeResolution = Literal["resolved", "best_effort", "ambiguous", "unresolved"]
+
+
+def stable_file_key(account_id: str, repo_id: str, canonical_uri: str) -> str:
+    """Return the stable ACL identity for a source path."""
+    if not account_id or not repo_id or not canonical_uri:
+        raise ValueError("account_id, repo_id, and canonical_uri are required")
+    payload = "\0".join(("file-v1", account_id, repo_id, canonical_uri))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class FileAccessScope:
+    """Current authorization result passed to a CodeGraph query."""
+
+    account_id: str
+    repo_id: str
+    acl_revision: int
+    allowed_file_keys: frozenset[str]
+    allow_all: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.account_id or not self.repo_id:
+            raise ValueError("account_id and repo_id are required")
+        if self.acl_revision < 0:
+            raise ValueError("acl_revision must be non-negative")
+        if self.allow_all and self.allowed_file_keys:
+            raise ValueError("allow_all cannot be combined with allowed_file_keys")
+
+    @classmethod
+    def restricted(
+        cls,
+        *,
+        account_id: str,
+        repo_id: str,
+        acl_revision: int,
+        allowed_file_keys: Iterable[str],
+    ) -> "FileAccessScope":
+        return cls(
+            account_id=account_id,
+            repo_id=repo_id,
+            acl_revision=acl_revision,
+            allowed_file_keys=frozenset(allowed_file_keys),
+        )
+
+    @classmethod
+    def unrestricted(
+        cls,
+        *,
+        account_id: str,
+        repo_id: str,
+        acl_revision: int,
+    ) -> "FileAccessScope":
+        return cls(
+            account_id=account_id,
+            repo_id=repo_id,
+            acl_revision=acl_revision,
+            allowed_file_keys=frozenset(),
+            allow_all=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -78,6 +138,7 @@ class ExtractedFile:
 
 @dataclass(frozen=True)
 class GraphManifest:
+    account_id: str
     repo_id: str
     revision_id: str
     commit_sha: str
@@ -94,6 +155,7 @@ class GraphManifest:
 class CodeGraphHit:
     node_id: str
     file_id: int
+    file_key: str
     file_uri: str
     file_path: str
     kind: str
@@ -117,6 +179,7 @@ class GraphExpansion:
 
 @dataclass(frozen=True)
 class RevisionRef:
+    account_id: str
     repo_id: str
     revision_id: str
     commit_sha: str

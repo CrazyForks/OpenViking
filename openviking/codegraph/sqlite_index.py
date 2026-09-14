@@ -11,24 +11,27 @@ import sqlite3
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 from urllib.parse import quote
 
 from openviking.codegraph.models import (
     CodeGraphHit,
+    FileAccessScope,
     GraphEdge,
     GraphExpansion,
     GraphManifest,
     PendingCall,
     SourceFile,
     SymbolNode,
+    stable_file_key,
 )
 from openviking.codegraph.python_extractor import (
     GRAPH_ID_SCHEMA_VERSION,
     extract_python_file,
 )
+from openviking.codegraph.snapshot import SourceSnapshotReader
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
 _SCHEMA = """
 CREATE TABLE metadata (
@@ -38,6 +41,7 @@ CREATE TABLE metadata (
 
 CREATE TABLE files (
     file_id INTEGER PRIMARY KEY,
+    file_key TEXT NOT NULL UNIQUE,
     file_uri TEXT NOT NULL UNIQUE,
     file_path TEXT NOT NULL UNIQUE,
     source_blob_oid TEXT NOT NULL,
@@ -222,21 +226,32 @@ class CodeGraphBuilder:
     def build(
         self,
         *,
+        account_id: str,
         repo_id: str,
         revision_id: str,
         commit_sha: str,
         source_snapshot_oid: str,
         graph_generation: str,
-        source_files: Sequence[SourceFile],
+        snapshot_reader: SourceSnapshotReader,
         output_path: Path,
     ) -> GraphManifest:
-        if not repo_id or not revision_id or not graph_generation:
-            raise ValueError("repo_id, revision_id, and graph_generation are required")
+        if (
+            not account_id
+            or not repo_id
+            or not revision_id
+            or not source_snapshot_oid
+            or not graph_generation
+        ):
+            raise ValueError(
+                "account_id, repo_id, revision_id, source_snapshot_oid, "
+                "and graph_generation are required"
+            )
         if output_path.exists():
             raise FileExistsError(f"graph generation already exists: {output_path}")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
+        source_files = snapshot_reader.read_source_files(source_snapshot_oid)
         normalized_files = sorted(
             (
                 SourceFile(
@@ -273,6 +288,7 @@ class CodeGraphBuilder:
             all_edges.extend(_resolve_pending_calls(all_nodes, all_calls))
             self._write_database(
                 temp_path,
+                account_id=account_id,
                 repo_id=repo_id,
                 revision_id=revision_id,
                 commit_sha=commit_sha,
@@ -293,6 +309,7 @@ class CodeGraphBuilder:
             temp_path.unlink(missing_ok=True)
 
         return GraphManifest(
+            account_id=account_id,
             repo_id=repo_id,
             revision_id=revision_id,
             commit_sha=commit_sha,
@@ -309,6 +326,7 @@ class CodeGraphBuilder:
     def _write_database(
         path: Path,
         *,
+        account_id: str,
         repo_id: str,
         revision_id: str,
         commit_sha: str,
@@ -327,6 +345,7 @@ class CodeGraphBuilder:
             metadata = {
                 "schema_version": str(SCHEMA_VERSION),
                 "graph_id_schema_version": str(GRAPH_ID_SCHEMA_VERSION),
+                "account_id": account_id,
                 "repo_id": repo_id,
                 "revision_id": revision_id,
                 "commit_sha": commit_sha,
@@ -342,12 +361,13 @@ class CodeGraphBuilder:
             conn.executemany(
                 """
                 INSERT INTO files(
-                    file_id, file_uri, file_path, source_blob_oid, content_hash
-                ) VALUES (?, ?, ?, ?, ?)
+                    file_id, file_key, file_uri, file_path, source_blob_oid, content_hash
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         file_id,
+                        stable_file_key(account_id, repo_id, source.uri),
                         source.uri,
                         source.relative_path,
                         node_by_file[source.relative_path].source_blob_oid,
@@ -474,16 +494,20 @@ class CodeGraphIndex:
             )
         return metadata
 
-    @staticmethod
     def _register_acl_filter(
+        self,
         conn: sqlite3.Connection,
-        allowed_file_ids: Optional[Iterable[int]],
+        access_scope: FileAccessScope,
     ) -> None:
-        allowed = None if allowed_file_ids is None else frozenset(allowed_file_ids)
+        expected_account = self._metadata.get("account_id")
+        expected_repo = self._metadata.get("repo_id")
+        if access_scope.account_id != expected_account or access_scope.repo_id != expected_repo:
+            raise PermissionError("file access scope does not belong to this graph")
+        allowed = access_scope.allowed_file_keys
         conn.create_function(
             "ov_file_allowed",
             1,
-            lambda file_id: 1 if allowed is None or int(file_id) in allowed else 0,
+            lambda file_key: 1 if access_scope.allow_all or str(file_key) in allowed else 0,
             deterministic=True,
         )
 
@@ -492,6 +516,7 @@ class CodeGraphIndex:
         return CodeGraphHit(
             node_id=str(row["node_id"]),
             file_id=int(row["file_id"]),
+            file_key=str(row["file_key"]),
             file_uri=str(row["file_uri"]),
             file_path=str(row["file_path"]),
             kind=str(row["kind"]),
@@ -510,9 +535,9 @@ class CodeGraphIndex:
         self,
         query: str,
         *,
+        access_scope: FileAccessScope,
         limit: int = 20,
         offset: int = 0,
-        allowed_file_ids: Optional[Iterable[int]] = None,
     ) -> list[CodeGraphHit]:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -524,17 +549,17 @@ class CodeGraphIndex:
 
         conn = self._connect()
         try:
-            self._register_acl_filter(conn, allowed_file_ids)
+            self._register_acl_filter(conn, access_scope)
             rows = conn.execute(
                 """
                 SELECT
-                    n.*, f.file_uri, f.file_path,
+                    n.*, f.file_key, f.file_uri, f.file_path,
                     bm25(node_fts, 5.0, 4.0, 2.0, 2.0, 1.0) AS rank
                 FROM node_fts
                 JOIN nodes n ON n.ordinal = node_fts.rowid
                 JOIN files f ON f.file_id = n.file_id
                 WHERE node_fts MATCH ?
-                  AND ov_file_allowed(n.file_id) = 1
+                  AND ov_file_allowed(f.file_key) = 1
                 ORDER BY rank, n.qualified_name
                 LIMIT ? OFFSET ?
                 """,
@@ -548,10 +573,10 @@ class CodeGraphIndex:
         self,
         seed_ids: Sequence[str],
         *,
+        access_scope: FileAccessScope,
         max_depth: int = 2,
         max_fanout: int = 20,
         max_nodes: int = 50,
-        allowed_file_ids: Optional[Iterable[int]] = None,
     ) -> GraphExpansion:
         if max_depth < 0 or max_fanout <= 0 or max_nodes <= 0:
             raise ValueError("invalid graph traversal budget")
@@ -560,7 +585,7 @@ class CodeGraphIndex:
 
         conn = self._connect()
         try:
-            self._register_acl_filter(conn, allowed_file_ids)
+            self._register_acl_filter(conn, access_scope)
             nodes: dict[str, CodeGraphHit] = {}
             frontier: deque[tuple[str, int]] = deque()
             truncated = False
@@ -568,10 +593,10 @@ class CodeGraphIndex:
             for node_id in dict.fromkeys(seed_ids):
                 row = conn.execute(
                     """
-                    SELECT n.*, f.file_uri, f.file_path
+                    SELECT n.*, f.file_key, f.file_uri, f.file_path
                     FROM nodes n
                     JOIN files f ON f.file_id = n.file_id
-                    WHERE n.node_id = ? AND ov_file_allowed(n.file_id) = 1
+                    WHERE n.node_id = ? AND ov_file_allowed(f.file_key) = 1
                     """,
                     (node_id,),
                 ).fetchone()
@@ -606,16 +631,19 @@ class CodeGraphIndex:
                         target.source_blob_oid,
                         target.content_hash,
                         target.snippet,
-                        files.file_uri,
-                        files.file_path
+                        target_file.file_key,
+                        target_file.file_uri,
+                        target_file.file_path
                     FROM edges e
                     JOIN nodes source ON source.node_id = e.source_id
                     JOIN nodes target ON target.node_id = e.target_id
-                    JOIN files ON files.file_id = target.file_id
+                    JOIN files source_file ON source_file.file_id = source.file_id
+                    JOIN files target_file ON target_file.file_id = target.file_id
+                    JOIN files evidence_file ON evidence_file.file_id = e.evidence_file_id
                     WHERE e.source_id = ?
-                      AND ov_file_allowed(source.file_id) = 1
-                      AND ov_file_allowed(target.file_id) = 1
-                      AND ov_file_allowed(e.evidence_file_id) = 1
+                      AND ov_file_allowed(source_file.file_key) = 1
+                      AND ov_file_allowed(target_file.file_key) = 1
+                      AND ov_file_allowed(evidence_file.file_key) = 1
                     ORDER BY e.confidence DESC, e.kind, target.qualified_name
                     LIMIT ?
                     """,

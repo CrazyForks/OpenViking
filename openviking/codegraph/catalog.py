@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 from openviking.codegraph.models import (
     CodeGraphHit,
+    FileAccessScope,
     GraphExpansion,
     GraphManifest,
     ReadView,
@@ -51,6 +52,10 @@ ON bindings(repo_id, valid_from, valid_to);
 
 class CatalogConflictError(RuntimeError):
     """Raised when publication is based on an obsolete catalog epoch."""
+
+
+class SupersededRevisionError(CatalogConflictError):
+    """Raised when the target repository changed after a build started."""
 
 
 class InvalidRevisionError(RuntimeError):
@@ -115,10 +120,12 @@ class LocalCodeGraphCatalog:
     def acquire_view(self) -> ReadView:
         return ReadView(account_id=self.account_id, epoch=self.current_epoch())
 
-    @staticmethod
-    def _validate_manifest(manifest: GraphManifest) -> None:
+    def _validate_manifest(self, manifest: GraphManifest) -> None:
+        if manifest.account_id != self.account_id:
+            raise InvalidRevisionError("manifest belongs to a different account")
         index = CodeGraphIndex(manifest.index_path)
         expected = {
+            "account_id": manifest.account_id,
             "repo_id": manifest.repo_id,
             "revision_id": manifest.revision_id,
             "commit_sha": manifest.commit_sha,
@@ -135,8 +142,14 @@ class LocalCodeGraphCatalog:
         if mismatches:
             raise InvalidRevisionError(f"manifest does not match sealed graph: {mismatches}")
 
-    def publish(self, manifest: GraphManifest, *, expected_epoch: int) -> RevisionRef:
-        """Publish one repository revision using an epoch compare-and-swap."""
+    def publish(
+        self,
+        manifest: GraphManifest,
+        *,
+        expected_epoch: int,
+        base_revision_id: Optional[str],
+    ) -> RevisionRef:
+        """Publish one revision if the catalog epoch and repository base still match."""
 
         self._validate_manifest(manifest)
         conn = self._connect()
@@ -144,6 +157,23 @@ class LocalCodeGraphCatalog:
             conn.execute("BEGIN IMMEDIATE")
             actual_row = conn.execute("SELECT value FROM metadata WHERE key = 'epoch'").fetchone()
             actual_epoch = int(actual_row["value"]) if actual_row else -1
+
+            current = conn.execute(
+                """
+                SELECT revision_id
+                FROM bindings
+                WHERE repo_id = ? AND valid_to = ?
+                """,
+                (manifest.repo_id, MAX_EPOCH),
+            ).fetchall()
+            if len(current) > 1:
+                raise RuntimeError(f"multiple current revisions for repo {manifest.repo_id!r}")
+            current_revision_id = str(current[0]["revision_id"]) if current else None
+            if current_revision_id != base_revision_id:
+                raise SupersededRevisionError(
+                    f"repository {manifest.repo_id!r} changed: "
+                    f"expected base {base_revision_id!r}, actual {current_revision_id!r}"
+                )
             if actual_epoch != expected_epoch:
                 raise CatalogConflictError(
                     f"catalog epoch conflict: expected {expected_epoch}, actual {actual_epoch}"
@@ -179,16 +209,6 @@ class LocalCodeGraphCatalog:
                     f"revision_id {manifest.revision_id!r} is already bound to other data"
                 )
 
-            current = conn.execute(
-                """
-                SELECT revision_id
-                FROM bindings
-                WHERE repo_id = ? AND valid_to = ?
-                """,
-                (manifest.repo_id, MAX_EPOCH),
-            ).fetchall()
-            if len(current) > 1:
-                raise RuntimeError(f"multiple current revisions for repo {manifest.repo_id!r}")
             if current:
                 conn.execute(
                     """
@@ -217,6 +237,7 @@ class LocalCodeGraphCatalog:
             conn.close()
 
         return RevisionRef(
+            account_id=self.account_id,
             repo_id=manifest.repo_id,
             revision_id=manifest.revision_id,
             commit_sha=manifest.commit_sha,
@@ -251,6 +272,7 @@ class LocalCodeGraphCatalog:
         if row is None:
             raise KeyError(f"repository {repo_id!r} is not present at epoch {view.epoch}")
         return RevisionRef(
+            account_id=self.account_id,
             repo_id=str(row["repo_id"]),
             revision_id=str(row["revision_id"]),
             commit_sha=str(row["commit_sha"]),
@@ -275,18 +297,18 @@ class VersionedCodeGraph:
         repo_id: str,
         query: str,
         *,
+        access_scope: FileAccessScope,
         view: Optional[ReadView] = None,
         limit: int = 20,
         offset: int = 0,
-        allowed_file_ids: Optional[Iterable[int]] = None,
     ) -> tuple[ReadView, RevisionRef, list[CodeGraphHit]]:
         selected_view = view or self.acquire_view()
         revision = self.catalog.resolve(repo_id, selected_view)
         hits = CodeGraphIndex(revision.index_path).search(
             query,
+            access_scope=access_scope,
             limit=limit,
             offset=offset,
-            allowed_file_ids=allowed_file_ids,
         )
         return selected_view, revision, hits
 
@@ -295,18 +317,18 @@ class VersionedCodeGraph:
         repo_id: str,
         seed_ids: Sequence[str],
         *,
+        access_scope: FileAccessScope,
         view: ReadView,
         max_depth: int = 2,
         max_fanout: int = 20,
         max_nodes: int = 50,
-        allowed_file_ids: Optional[Iterable[int]] = None,
     ) -> tuple[RevisionRef, GraphExpansion]:
         revision = self.catalog.resolve(repo_id, view)
         expansion = CodeGraphIndex(revision.index_path).expand(
             seed_ids,
+            access_scope=access_scope,
             max_depth=max_depth,
             max_fanout=max_fanout,
             max_nodes=max_nodes,
-            allowed_file_ids=allowed_file_ids,
         )
         return revision, expansion
