@@ -22,6 +22,7 @@ from openviking.storage.abstract_overview import (
     read_abstract_overview_pending_snapshot,
     write_abstract_overview,
 )
+from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry import bind_telemetry, get_current_telemetry
 from openviking.utils.ingest_options import IngestOptions
@@ -380,16 +381,21 @@ class SemanticDagExecutor:
                 uri for kind, uri in sampled_entries if kind == "directory"
             }
             sampled_file_paths = {uri for kind, uri in sampled_entries if kind == "file"}
-            pending_snapshot = (
-                await read_abstract_overview_pending_snapshot(
-                    viking_fs=self._viking_fs,
-                    dir_uri=dir_uri,
-                    ctx=self._ctx,
-                    lock=self._lock,
-                )
-                if self._aggregate_directory
-                else 0
-            )
+            pending_snapshot = 0
+            if self._aggregate_directory:
+                try:
+                    pending_snapshot = await read_abstract_overview_pending_snapshot(
+                        viking_fs=self._viking_fs,
+                        dir_uri=dir_uri,
+                        ctx=self._ctx,
+                        lock=self._lock,
+                    )
+                except LockAcquisitionError:
+                    if self._generation_trigger != "content_write":
+                        raise
+                    # Content writes run one directory; retain their file work.
+                    self._aggregate_directory = False
+                    logger.info("Skipping busy parent semantic refresh: %s", dir_uri)
             file_index = {path: idx for idx, path in enumerate(file_paths)}
             child_index = {path: idx for idx, path in enumerate(children_dirs)}
             # Recursive/initial work still maintains every file. Incremental
@@ -913,7 +919,7 @@ class SemanticDagExecutor:
             if self._closed:
                 return
 
-            # Write directly, protected by the outer semantic lock.
+            # Persist sidecars before publishing their directory vectors.
             if should_write:
                 try:
                     wrote = await self._write_directory_semantics(
@@ -931,6 +937,7 @@ class SemanticDagExecutor:
                 except AbstractOverviewFormatError:
                     raise
                 except Exception:
+                    need_vectorize = False
                     logger.info(f"[SemanticDag] {dir_uri} write failed, skipping")
 
         except AbstractOverviewFormatError:
