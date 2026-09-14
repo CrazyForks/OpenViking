@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -244,6 +245,19 @@ class MarkdownParser(BaseParser):
 
         if path.exists():
             content = self._read_file(path)
+            if (kwargs.get("_source_meta") or {}).get("http_markdown_images"):
+                from openviking.parse.http_markdown import materialize_http_images
+
+                with tempfile.TemporaryDirectory(prefix="ov_md_images_") as image_dir:
+                    image_dir = Path(image_dir)
+                    content = await materialize_http_images(content, image_dir)
+                    return await self.parse_content(
+                        content,
+                        source_path=str(path),
+                        instruction=instruction,
+                        base_dir=image_dir,
+                        **kwargs,
+                    )
             # Pass base_dir for resolving relative image paths
             return await self.parse_content(
                 content,
@@ -1418,7 +1432,10 @@ class MarkdownParser(BaseParser):
 
         # Build virtual section list (pre-heading content as first virtual section)
         sections = []
-        first_heading_start = headings[0][0]
+        min_level = min(h[3] for h in headings)
+        # A deeper introductory heading (e.g. H3 before the first H2) is not
+        # emitted below; retain that whole prefix, including its images.
+        first_heading_start = next(h[0] for h in headings if h[3] == min_level)
         if first_heading_start > 0:
             pre_content = content[:first_heading_start].strip()
             if pre_content:
@@ -1434,7 +1451,6 @@ class MarkdownParser(BaseParser):
                 )
 
         # Add real sections (top-level only for this pass)
-        min_level = min(h[3] for h in headings)
         i = 0
         while i < len(headings):
             if headings[i][3] == min_level:

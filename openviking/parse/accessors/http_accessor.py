@@ -498,6 +498,25 @@ class HTTPAccessor(DataAccessor):
                 is_temporary=True,
             )
 
+        if url_type == URLType.DOWNLOAD_MD:
+            from openviking.parse.http_markdown import resolve_http_images
+
+            path = Path(temp_path)
+            try:
+                original = path.read_bytes().decode("utf-8")
+                content = resolve_http_images(
+                    original, meta.get("download_url") or self._convert_to_raw_url(source_str)
+                )
+                if content != original:
+                    path.write_bytes(content.encode("utf-8"))
+                meta["http_markdown_images"] = True
+            except UnicodeDecodeError:
+                # Leave other encodings to the existing parser decoding policy.
+                pass
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+
         # Build metadata
         meta.update(
             {
@@ -610,6 +629,8 @@ class HTTPAccessor(DataAccessor):
                     response_headers=response.headers,
                     content=response.content,
                 )
+                if meta["resolved_url_type"] == URLType.DOWNLOAD_MD:
+                    meta["download_url"] = str(response.url)
                 url_type = meta["resolved_url_type"]
                 ext = meta["extension"]
 
