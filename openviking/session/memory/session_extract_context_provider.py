@@ -20,6 +20,7 @@ from openviking.session.memory.memory_isolation_handler import (
 )
 from openviking.session.memory.memory_type_registry import (
     MemoryTypeRegistry,
+    get_default_registry,
 )
 from openviking.session.memory.tools import (
     add_tool_call_pair_to_messages,
@@ -617,8 +618,7 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         return schemas
 
     def _get_registry(self) -> MemoryTypeRegistry:
-        """内部获取 registry（自动在初始化时加载）"""
+        """获取共享的默认记忆 registry。"""
         if self._registry is None:
-            # MemoryTypeRegistry 在 __init__ 时自动加载 schemas
-            self._registry = MemoryTypeRegistry(load_schemas=True)
+            self._registry = get_default_registry()
         return self._registry
