@@ -654,6 +654,10 @@ class BotCompileService:
             }
         )
         task_config.sandbox.mode = SandboxMode.PER_SESSION
+        if target_type == "resource":
+            task_config.agents = task_config.agents.model_copy(
+                update={"subagent_max_concurrency": self.limits.source_concurrency}
+            )
         workspace_parent = self.config.bot_data_path / "compile_workspaces" / task_id
         sandbox_manager = SandboxManager(task_config, workspace_parent, task_config.workspace_path)
         workspace = sandbox_manager.get_workspace_path(session_key)
@@ -765,6 +769,7 @@ class BotCompileService:
                 subagent_max_concurrency=(
                     task_config.agents.subagent_max_concurrency if subagents is not None else 0
                 ),
+                merge_max_concurrency=self.limits.merge_concurrency if resource_target else 0,
                 skill_text=skill_text,
                 source_batches=source_batches,
             )
@@ -1864,6 +1869,7 @@ class BotCompileService:
         request: SanitizedCompileRequest,
         skill_text: str,
         subagent_max_concurrency: int = 0,
+        merge_max_concurrency: int = 0,
         draft_root: str | None = None,
         source_batches: list[list[CompileSourceRange]] | None = None,
     ) -> tuple[str, str]:
@@ -1939,8 +1945,10 @@ class BotCompileService:
                 "spawn(source_batch=<number>, task='Compile assigned batch'); "
                 "the runtime attaches original source ranges and instructions. Do not reinventory sources, preload bodies, "
                 "infer source topics from filenames, or add inventory/summary-only tasks. "
-                f"Both source and merge phases share {subagent_max_concurrency} workers and "
-                f"{2 * subagent_max_concurrency} queue slots including uncollected results. "
+                f"Source tasks use {subagent_max_concurrency} workers; "
+                f"merge tasks use {merge_max_concurrency or subagent_max_concurrency} workers. "
+                "Each phase admits up to twice its worker count across running tasks, queued tasks "
+                "and uncollected results. "
                 "Batch spawn calls within available capacity; while assignments remain, "
                 "wait_subagents(block=true) and refill queue_capacity. After all are admitted, "
                 "wait_subagents(wait_all=true). Avoid per-spawn polling. "
@@ -1957,8 +1965,11 @@ class BotCompileService:
                     "temporary files and all index.md/_index.md, including in partial drafts. "
                     "Paths only locate candidates, never decide final groups. Check aliases, different titles "
                     "and cross-directory overlap using metadata and necessary content reads before grouping. "
-                    "Merge duplicate or complementary knowledge serving the same page purpose; a shared product "
-                    "alone does not justify merging introductions, rules, procedures and FAQs into one large task. "
+                    "Determine page boundaries from the meaning, scope and overlap of the content. Merge duplicate or "
+                    "complementary information when it forms a coherent page with a clear scope, preserving distinct "
+                    "facts, conditions, exceptions and sources. Keep separate pages when their scopes are distinct "
+                    "and each has independent value. A shared subject alone does not justify merging; differences in "
+                    "titles, paths, sources or artifact types alone do not justify splitting. "
                     "Use merge_compile_drafts(groups=[{name, task, draft_ids, existing_pages, output_pages, reuse}, ...]) "
                     "to save topic assignments incrementally. Names identify stable canonical topics; "
                     "existing_pages lists selected target URIs for runtime loading and budgeting. "
@@ -1968,7 +1979,7 @@ class BotCompileService:
                     "allowed values, citation rules and relevant configuration values. State these explicitly; "
                     "do not rely solely on drafts, say only 'merge according to the Skill', or copy the full Skill. "
                     "Before execution, give shared output pages one owner or merge overlapping "
-                    "groups; never hide duplication with renaming/suffixes or broad product-wide tasks. "
+                    "groups; never hide duplication with renaming/suffixes or force distinct purposes into one page. "
                     "For scripted grouping, load the drafts mapping from the returned state_path "
                     "(merge-state.json) and use its exact ID-to-path pairs. Never reconstruct IDs "
                     "by scanning directories, sorting filenames or inventing sequence numbers. "
@@ -2003,7 +2014,7 @@ class BotCompileService:
                     "After all merges complete, create or update affected navigation pages from final output; "
                     "read existing ones and retain unrelated entries, following the Skill. "
                     "Check Skill naming, directories, frontmatter, ownership and links once, then submit. "
-                    "On validation failure, make one targeted repair within at most three remaining model turns; "
+                    "On validation failure, make one targeted repair within at most eight remaining model turns; "
                     "a second invalid submission ends repair. Each repair round includes the validation "
                     "error and remaining repair budget. If repair does not succeed, runtime commits every "
                     "file in the final output directory, completing links in valid Wiki pages and "

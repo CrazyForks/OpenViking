@@ -296,9 +296,10 @@ def validate_resource_file(path: str, payload: bytes) -> bool:
 
 
 def _markdown_link(label: str, target: str) -> str:
-    """Escape a display label and URI without changing the underlying filename."""
+    """Escape labels, whitespace and unsafe ASCII while preserving Unicode and URI delimiters."""
     label = " ".join(label.split()).replace("\\", "\\\\").replace("[", r"\[").replace("]", r"\]")
-    return f"[{label}]({quote(target, safe='/:@#?=&%+,-._~')})"
+    target = re.sub(r"[\x00-\x7f\s]+", lambda m: quote(m[0], safe="/:@#?=&%+,-._~"), target)
+    return f"[{label}]({target})"
 
 
 def _body_markdown_links(body: str) -> list[MarkdownLink]:
@@ -397,7 +398,8 @@ def _repair_relative_links(
             continue
         corrected = posixpath.relpath(candidate, posixpath.dirname(source_path) or ".")
         corrected = corrected if "/" in corrected else "./" + corrected
-        corrected = quote(corrected, safe="/,-._~") + target[len(raw_path) :]
+        corrected = re.sub(r"[\x00-\x7f\s]+", lambda m: quote(m[0], safe="/,-._~"), corrected)
+        corrected += target[len(raw_path) :]
         # Replace only the destination, retaining the original label and optional tooltip.
         start = body.index("](", link.start, link.end) + 2
         body = (

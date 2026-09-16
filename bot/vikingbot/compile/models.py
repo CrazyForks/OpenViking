@@ -35,10 +35,13 @@ class CompileLimits(BaseModel):
     # Per-source-task Unicode characters, including repeated headings and table headers.
     source_batch_chars: int = Field(default=80_000, ge=1)
     # Final Resource validation gets one repair attempt within the existing loop budget.
-    repair_iterations: int = 3
+    repair_iterations: int = 8
     agent_iterations: int = 120
     # Per-child model/tool rounds, including draft checks and submission; parent budget is separate.
     subagent_iterations: int = Field(default=70, ge=1)
+    # Parallel Resource children per phase, excluding the parent; queue capacity is twice the limit.
+    source_concurrency: int = Field(default=6, ge=1)
+    merge_concurrency: int = Field(default=10, ge=1)
     concurrent_tasks: int = 10
     accepted_tasks: int = 40
     accepted_tasks_per_principal: int = 10

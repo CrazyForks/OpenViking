@@ -227,6 +227,7 @@ class CompileMergeTool(Tool):
         load_existing: Callable[[str], Awaitable[bytes | None]],
     ):
         self.manager = manager
+        self.max_concurrency = limits.merge_concurrency
         # This bounds the entire batch assignment, including checkpoint bodies and JSON.
         self.input_chars = min(
             limits.merge_input_chars, limits.initial_prompt_chars, limits.agent_context_chars
@@ -855,6 +856,7 @@ class CompileMergeTool(Tool):
                     owners[path.casefold()] = name
             if errors:
                 return json.dumps(self._feedback(**changes, errors=errors), ensure_ascii=False)
+            self.manager.set_max_concurrency(self.max_concurrency)
             prepared = deque()
             for name in ready:
                 group = self.groups[name]

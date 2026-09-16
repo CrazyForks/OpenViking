@@ -62,6 +62,19 @@ class SubagentManager:
         self._completed_results: dict[str, dict[str, Any]] = {}
         self._closed = False
 
+    def set_max_concurrency(self, limit: int) -> None:
+        """Replace worker and queue capacity with a positive limit at an idle phase boundary.
+
+        Raise ValueError for a nonpositive limit or pending work/uncollected results;
+        existing tasks must finish before the worker semaphore can be replaced.
+        """
+        if limit < 1:
+            raise ValueError("Subagent concurrency must be positive")
+        if any(not task.done() for task in self._running_tasks.values()) or self._completed_results:
+            raise ValueError("Collect all subagent results before changing concurrency")
+        self._max_concurrency = limit
+        self._worker_slots = asyncio.Semaphore(limit)
+
     async def spawn(
         self,
         task: str,
