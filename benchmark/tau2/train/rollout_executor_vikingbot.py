@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import posixpath
 import re
@@ -2304,8 +2305,13 @@ async def _load_auto_experience_reminder(
     """
     from vikingbot.openviking_mount.ov_server import VikingClient
 
+    raw_threshold = os.environ.get("TAU2_AUTO_EXPERIENCE_MIN_SCORE", "").strip()
+    min_score = float(raw_threshold) if raw_threshold else None
+    if min_score is not None and (not math.isfinite(min_score) or not 0 <= min_score <= 1):
+        raise ValueError("TAU2_AUTO_EXPERIENCE_MIN_SCORE must be a finite number in [0, 1]")
     audit = trace if trace is not None else {}
-    audit.update(query=query, top_k=2, retrieved_uris=[], injected_uris=[], status="pending")
+    audit.update(query=query, top_k=2, min_score=min_score, retrieved_uris=[],
+                 candidate_scores=[], rejected_uris=[], injected_uris=[], status="pending")
     if not query.strip():
         audit["status"] = "empty_query"
         return None
@@ -2324,9 +2330,34 @@ async def _load_auto_experience_reminder(
                 and "/memories/experiences/" in uri
             )
             if in_scope and uri not in uris:
+                audit["retrieved_uris"].append(uri)
+                raw_score = item.get("score")
+                try:
+                    score = float(raw_score) if raw_score is not None else None
+                except (TypeError, ValueError):
+                    score = None
+                if score is not None and not math.isfinite(score):
+                    score = None
+                audit["candidate_scores"].append({"uri": uri, "score": score})
+                if min_score is not None and (score is None or score < min_score):
+                    audit["rejected_uris"].append(uri)
+                    continue
                 uris.append(uri)
-        audit["retrieved_uris"] = uris
-        contents = await asyncio.gather(*(client.read_content(uri, level="read") for uri in uris))
+        # read_content converts transport failures to empty strings. Retry the
+        # same immutable body before any Agent action, never rerun a trajectory.
+        audit["read_attempts"] = {}
+
+        async def read_body(uri: str) -> str:
+            for attempt in range(1, 4):
+                audit["read_attempts"][uri] = attempt
+                content = await client.read_content(uri, level="read")
+                if content and content.strip():
+                    return content
+                if attempt < 3:
+                    await asyncio.sleep(0.25 * attempt)
+            raise RuntimeError(f"Auto experience retrieval returned unreadable content: {uri}")
+
+        contents = await asyncio.gather(*(read_body(uri) for uri in uris))
         bodies: list[str] = []
         for uri, content in zip(uris, contents, strict=True):
             if not content or not content.strip():

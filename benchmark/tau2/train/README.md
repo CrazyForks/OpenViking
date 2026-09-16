@@ -272,6 +272,13 @@ reach the rollout agent:
 
 #### Automatic first-query Experience injection
 
+Optional `TAU2_AUTO_EXPERIENCE_MIN_SCORE=0.3` on the rollout service filters the
+top-2 search results by their returned `score` before reading/injecting bodies.
+Scores equal to the threshold pass; lower or missing/non-finite scores do not.
+If only one or zero results qualify, inject one or none. Unset preserves the
+previous unfiltered behavior. Rollout audit metadata records the threshold,
+candidate scores and rejected URIs; these fields are not injected into the prompt.
+
 ```bash
 bash benchmark/tau2/train/restart_vikingbot_train_eval.sh \
   --loader-mode auto_experience \

@@ -11,6 +11,7 @@ import benchmark.tau2.train.rollout_executor_vikingbot as module
 
 @pytest.fixture
 def memory_client(monkeypatch):
+    monkeypatch.delenv("TAU2_AUTO_EXPERIENCE_MIN_SCORE", raising=False)
     from vikingbot.openviking_mount.ov_server import VikingClient
 
     client = SimpleNamespace(
@@ -21,6 +22,32 @@ def memory_client(monkeypatch):
     )
     monkeypatch.setattr(VikingClient, "create", AsyncMock(return_value=client))
     return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scores,expected", [([0.3, 0.2999], 1), ([0.9, 0.4], 2), ([0.1, 0.2], 0), ([None, float("nan")], 0)])
+async def test_auto_experience_minimum_score(monkeypatch, memory_client, scores, expected):
+    monkeypatch.setenv("TAU2_AUTO_EXPERIENCE_MIN_SCORE", "0.3")
+    root = "viking://user/test/memories/experiences/"
+    memory_client.search.return_value = {"memories": [{"uri": root + str(i) + ".md", "score": score} for i, score in enumerate(scores)]}
+    memory_client.read_content.return_value = "## Situation\nvisible body"
+    trace = {}
+    reminder = await module._load_auto_experience_reminder("original query", trace=trace)
+    assert trace["min_score"] == 0.3
+    assert len(trace["injected_uris"]) == expected
+    assert len(trace["rejected_uris"]) == 2 - expected
+    assert memory_client.read_content.await_count == expected
+    assert bool(reminder) == bool(expected)
+    assert not reminder or "candidate_scores" not in reminder
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1", "invalid"])
+async def test_auto_experience_invalid_threshold(monkeypatch, memory_client, value):
+    monkeypatch.setenv("TAU2_AUTO_EXPERIENCE_MIN_SCORE", value)
+    with pytest.raises(ValueError):
+        await module._load_auto_experience_reminder("query")
+    memory_client.search.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -103,6 +130,19 @@ async def test_auto_experience_blank_query_does_not_search(memory_client):
     assert await module._load_auto_experience_reminder(" ", trace=trace) is None
     assert trace["status"] == "empty_query"
     memory_client.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_experience_retries_empty_read_before_injection(memory_client):
+    uri = "viking://user/test/memories/experiences/one.md"
+    memory_client.search.return_value = {"memories": [{"uri": uri, "score": 0.8}]}
+    memory_client.read_content.side_effect = ["", "## Situation\noriginal body"]
+    trace = {}
+    result = await module._load_auto_experience_reminder("query", trace=trace)
+    assert "original body" in result
+    assert memory_client.search.await_count == 1
+    assert memory_client.read_content.await_count == 2
+    assert trace["read_attempts"] == {uri: 2}
 
 
 @pytest.mark.asyncio
