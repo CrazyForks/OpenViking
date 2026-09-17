@@ -13,11 +13,13 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 
 from loguru import logger
+from pydantic import TypeAdapter
 
 from openviking.core.namespace import classify_uri, relative_uri_path, uri_parts
 from openviking.utils.path_safety import (
@@ -103,6 +105,12 @@ _COMPILE_PRE_COMPACT_PROMPT = (
     "Briefly state file paths, source coverage and remaining gaps alongside the writes. "
     "Reuse existing drafts and do not read new sources during this save turn."
 )
+
+
+def _compile_time(value: Any) -> datetime:
+    """Parse ISO/Unix timestamps; naive values use UTC and invalid values raise ValueError."""
+    parsed = TypeAdapter(datetime).validate_python(value)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
 def _merge_usage(*values: Mapping[str, Any]) -> dict[str, int]:
@@ -456,7 +464,8 @@ class BotCompileService:
         *,
         connection: Mapping[str, Any],
     ) -> SanitizedCompileRequest:
-        if request.args:
+        args = request.args or {}
+        if args.keys() - {"last_compile_time"}:
             raise CompileFailure(
                 "INVALID_ARGUMENT",
                 "VikingBot Compile does not implement provider-specific args.",
@@ -469,6 +478,9 @@ class BotCompileService:
             )
         client = await VikingClient.create(connection=connection, config=self.config)
         try:
+            cutoff = (
+                _compile_time(args["last_compile_time"]) if "last_compile_time" in args else None
+            )
             sources: list[str] = []
             for raw_uri in raw_sources:
                 attrs = await client.attrs(raw_uri)
@@ -518,6 +530,7 @@ class BotCompileService:
                 "instruction": instruction or DEFAULT_COMPILE_INSTRUCTION,
                 "instruction_provided": bool(instruction),
                 "skill": canonical_skill,
+                "last_compile_time": cutoff,
             }
         )
 
@@ -679,6 +692,27 @@ class BotCompileService:
                 )
             await self._set_state(task_id, status="running", stage="collecting_context")
             client = await VikingClient.create(connection=connection, config=self.config)
+            source_files = None
+            source_request = request
+            if request.last_compile_time is not None:
+                source_files = await self._list_source_files(
+                    client, request.from_, cutoff=request.last_compile_time
+                )
+                if not source_files:
+
+                    def complete_without_sources(task: CompileTask) -> None:
+                        """Finish an incremental no-op without model calls or target writes."""
+                        if task.status == "cancelling":
+                            return
+                        task.status = task.stage = "completed"
+                        task.error = None
+                        task.result = CompileResult(
+                            from_=request.from_, to=request.to, skill=request.skill
+                        )
+
+                    await self.store.update(task_id, complete_without_sources)
+                    return
+                source_request = request.model_copy(update={"from_": source_files})
             skill_text = await client.read_raw(f"{request.skill}/SKILL.md")
             if not skill_text.strip():
                 raise ValueError("Compile Skill is empty")
@@ -687,7 +721,9 @@ class BotCompileService:
             sandbox = await sandbox_manager.get_sandbox(session_key)
             is_skill_target = target_type == "skill"
             resource_target = target_type == "resource"
-            source_roots = {f"src_{index}": uri for index, uri in enumerate(request.from_, start=1)}
+            source_roots = {
+                f"src_{index}": uri for index, uri in enumerate(source_request.from_, start=1)
+            }
             catalog_uris: set[str] = set()
             file_catalog_uris: set[str] = set()
 
@@ -750,14 +786,14 @@ class BotCompileService:
             )
             submit_tool = registry.get("submit_wiki_bundle")
             source_batches = (
-                await self._prepare_source_batches(client, request.from_)
+                await self._prepare_source_batches(client, request.from_, files=source_files)
                 if registry.get("spawn") is not None
                 else None
             )
             subagents = self._configure_compile_subagents(
                 request_loop,
                 registry,
-                request=request,
+                request=source_request,
                 connection=connection,
                 usage=child_usage,
                 skill_text=skill_text,
@@ -765,7 +801,7 @@ class BotCompileService:
                 load_merge_target=load_merge_target,
             )
             system_prompt, user_prompt = self._build_prompts(
-                request=request,
+                request=source_request,
                 subagent_max_concurrency=(
                     task_config.agents.subagent_max_concurrency if subagents is not None else 0
                 ),
@@ -1569,14 +1605,13 @@ class BotCompileService:
             )
         return files, paths
 
-    async def _prepare_source_batches(
-        self, client: VikingClient, roots: list[str]
-    ) -> list[list[CompileSourceRange]]:
-        """Read each visible source once and prepare complete in-memory source ranges.
+    async def _list_source_files(
+        self, client: VikingClient, roots: list[str], *, cutoff: datetime | None = None
+    ) -> list[str]:
+        """List unique sources, excluding files strictly older than the UTC cutoff.
 
-        Overlapping roots are deduplicated before eight-way bounded reads. Listing
-        and read failures remain explicit; no source is silently skipped. The source
-        text stays in task memory and original URIs remain the citation targets.
+        Unknown file times are retained; directory times never prune descendants.
+        Listing failures propagate. Empty sources raise only without a cutoff.
         """
         limit = self.limits.source_inventory_entries
 
@@ -1599,11 +1634,23 @@ class BotCompileService:
                     raise ValueError(f"Source inventory returned an out-of-scope URI: {uri}")
                 if entry.get("isDir", entry.get("is_dir", False)):
                     continue
+                if cutoff is not None:
+                    try:
+                        if _compile_time(entry.get("modTime", entry.get("mtime"))) < cutoff:
+                            continue
+                    except ValueError:
+                        pass
                 files.add(uri)
-        if not files:
+        if not files and cutoff is None:
             raise ValueError("Compile sources contain no files")
+        return sorted(files)
+
+    async def _prepare_source_batches(
+        self, client: VikingClient, roots: list[str], *, files: list[str] | None = None
+    ) -> list[list[CompileSourceRange]]:
+        """Read selected files (or inventory roots) eight at a time; read errors propagate."""
         sources: list[tuple[str, str]] = []
-        ordered = sorted(files)
+        ordered = files if files is not None else await self._list_source_files(client, roots)
         for start in range(0, len(ordered), 8):
             uris = ordered[start : start + 8]
             contents = await asyncio.gather(*(client.read_raw(uri) for uri in uris))
@@ -1923,6 +1970,11 @@ class BotCompileService:
                 "and retrieve missing/truncated parts. Check after writes and submit after checks.",
             )
         )
+        if request.last_compile_time is not None:
+            system += (
+                "\nThe from list is filtered by last_compile_time. Use only these source files "
+                "or their prepared ranges; do not scan parents or read excluded sources."
+            )
         if target_type == "resource":
             if draft_root is None:
                 system += (

@@ -79,6 +79,8 @@ class SanitizedCompileRequest(BaseModel):
     instruction: str
     instruction_provided: bool = False
     skill: str
+    # Inclusive source modification cutoff in UTC; None compiles all source files.
+    last_compile_time: datetime | None = None
 
 
 class WikiPageDraft(BaseModel):
