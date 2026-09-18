@@ -13,6 +13,7 @@ pub mod encryption_wrapper;
 pub mod errors;
 pub mod filesystem;
 pub mod glob;
+pub(crate) mod grep;
 pub mod internal_names;
 pub mod mountable;
 pub mod multibackend_wrapper;

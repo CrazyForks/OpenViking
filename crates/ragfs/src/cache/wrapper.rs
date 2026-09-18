@@ -7,6 +7,8 @@ use crate::core::filesystem::{
     apply_read_dir_options, compile_grep_regex, is_excluded_path, normalize_prefix_path,
     paginate_entries, relative_depth, relative_match_file,
 };
+use crate::core::grep::GrepLineCollector;
+use crate::core::types::GrepContextLine;
 use crate::core::{
     FileInfo, FileSystem, GlobPage, GrepMatch, GrepOptions, GrepResult, ListSortBy,
     MultiWriteWrappedFS, Result, SortOrder, TreeEntry, WriteFlag,
@@ -387,25 +389,34 @@ impl CachedFileSystem {
             .await?;
         let content_str = String::from_utf8_lossy(&content);
         let rel_file = relative_match_file(base_path, path);
-        let mut matches = Vec::new();
-        let lines: Vec<_> = content_str.lines().collect();
+        let mut result = GrepResult {
+            matches: Vec::with_capacity(remaining_limit.min(64)),
+            count: 0,
+        };
+        let mut collector = GrepLineCollector::new(
+            rel_file.clone(),
+            before_context,
+            after_context,
+            remaining_limit,
+            &mut result,
+        );
 
-        for (line_index, line) in lines.iter().enumerate() {
-            if matches.len() >= remaining_limit {
+        for (line_index, line) in content_str.lines().enumerate() {
+            let is_match = re.is_match(line);
+            if !collector.consume_line(
+                &rel_file,
+                GrepContextLine {
+                    line: (line_index + 1) as u64,
+                    content: line.to_string(),
+                },
+                is_match,
+            ) {
                 break;
-            }
-            if re.is_match(line) {
-                matches.push(GrepMatch::from_lines(
-                    rel_file.clone(),
-                    &lines,
-                    line_index,
-                    before_context,
-                    after_context,
-                ));
             }
         }
 
-        Ok(matches)
+        drop(collector);
+        Ok(result.matches)
     }
 
     async fn cache_get(&self, key: &str) -> CacheResult<Option<Bytes>> {
