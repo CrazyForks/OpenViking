@@ -545,6 +545,7 @@ The repository includes `deploy/docker/deploy_langfuse.sh` for local deployment.
 
 ## More Documentation
 
+- [LoopX Long Tasks: Setup and Runtime Boundaries (中文)](docs/zh/concepts/07-long-tasks.md)
 - [VikingBot Architecture](docs/en/concepts/01-architecture.md)
 - [Agent Capabilities](docs/en/concepts/02-agent-capabilities.md)
 - [Channels, Gateway, and Operations](docs/en/concepts/03-channels-and-gateway.md)

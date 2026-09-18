@@ -139,7 +139,11 @@ build = [
     "wheel",
     "build",
 ]
-# vikingbot - all features included
+# Long tasks require Python 3.11+; the Bot validates this when explicitly enabled.
+longtask = [
+  "loopx==1.0.5; python_version >= '3.11'",
+]
+# vikingbot
 bot = [
   "pydantic-settings>=2.0.0",
   "websockets>=12.0",

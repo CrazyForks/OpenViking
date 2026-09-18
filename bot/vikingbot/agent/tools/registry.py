@@ -24,6 +24,8 @@ class ToolExecutionResult:
     result: Any
     effective_params: dict[str, Any]
     skill_uris: tuple[str, ...] = ()
+    success: bool = True
+    execution_started: bool = False
 
 
 class ToolRegistry:
@@ -197,7 +199,7 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             return ToolExecutionResult(
-                result=f"Error: Tool '{name}' not found", effective_params=dict(params)
+                result=f"Error: Tool '{name}' not found", effective_params=dict(params), success=False
             )
 
         tool_context = ToolContext(
@@ -217,6 +219,7 @@ class ToolRegistry:
         tool_span = None
         start_time = time.time()
         result = None
+        execution_started = False
         effective_params = dict(params)
         skill_uris: tuple[str, ...] = ()
         response_id = get_current_response_id()
@@ -250,6 +253,7 @@ class ToolRegistry:
                             default=str,
                         )
                         logger.info("[TOOL_PREPARED]: {}({})", name, prepared_args[:600])
+                execution_started = True
                 result = await tool.execute(tool_context, **effective_params)
                 if skill_runtime is not None:
                     skill_uris = skill_runtime.skill_uris_for_tool(
@@ -302,12 +306,17 @@ class ToolRegistry:
             result=result,
         )
         result = hook_result.get("result")
+        success = result is not None and not isinstance(result, Exception) and not (
+            isinstance(result, str) and result.lstrip().startswith(("Error:", "Error "))
+        )
         if isinstance(result, Exception):
             result = f"Error executing {name}: {str(result)}"
         return ToolExecutionResult(
             result=result,
             effective_params=effective_params,
             skill_uris=skill_uris,
+            success=success,
+            execution_started=execution_started,
         )
 
     async def execute(

@@ -542,6 +542,7 @@ Gateway 的 Bot API 前缀为 `/bot/v1`：
 
 ## 更多文档
 
+- [LoopX 长任务：安装、启用与运行边界](docs/zh/concepts/07-long-tasks.md)
 - [VikingBot 架构](docs/zh/concepts/01-architecture.md)
 - [Agent 能力体系](docs/zh/concepts/02-agent-capabilities.md)
 - [渠道、Gateway 与运行管理](docs/zh/concepts/03-channels-and-gateway.md)
