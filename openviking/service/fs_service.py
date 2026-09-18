@@ -1027,6 +1027,8 @@ class FSService:
         level_limit: int = 10,
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
+        before_context: int = 0,
+        after_context: int = 0,
     ) -> Dict:
         """Content search."""
         viking_fs = self._ensure_initialized()
@@ -1044,6 +1046,8 @@ class FSService:
             "ctx": ctx,
             "tag_filter": tag_filter,
             "include_tags": include_tags or bool(normalized_tags),
+            "before_context": before_context,
+            "after_context": after_context,
         }
         if _may_include_memory_content(uri):
             kwargs["content_transform"] = _visible_grep_content
