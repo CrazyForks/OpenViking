@@ -8,8 +8,8 @@ use crate::core::filesystem::{
     paginate_entries, relative_depth, relative_match_file,
 };
 use crate::core::{
-    FileInfo, FileSystem, GlobPage, GrepMatch, GrepResult, ListSortBy, MultiWriteWrappedFS, Result,
-    SortOrder, TreeEntry, WriteFlag,
+    FileInfo, FileSystem, GlobPage, GrepMatch, GrepOptions, GrepResult, ListSortBy,
+    MultiWriteWrappedFS, Result, SortOrder, TreeEntry, WriteFlag,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -192,19 +192,19 @@ impl CachedFileSystem {
         &self,
         path: &str,
         pattern: &str,
-        recursive: bool,
-        case_insensitive: bool,
-        node_limit: Option<usize>,
-        exclude_path: Option<&str>,
-        level_limit: Option<usize>,
+        options: GrepOptions<'_>,
     ) -> Result<GrepResult> {
         enum GrepTask {
             Visit { path: String, is_dir: Option<bool> },
         }
 
-        let re = compile_grep_regex(pattern, case_insensitive)?;
+        let re = compile_grep_regex(pattern, options.case_insensitive)?;
         let base_path = normalize_prefix_path(path);
-        let normalized_exclude = exclude_path.map(normalize_prefix_path);
+        let normalized_exclude = options.exclude_path.map(normalize_prefix_path);
+        let options = GrepOptions {
+            exclude_path: normalized_exclude.as_deref(),
+            ..options
+        };
         let mut result = GrepResult::new();
         let generation_cache = Mutex::new(HashMap::new());
         let mut file_batch = Vec::new();
@@ -218,7 +218,10 @@ impl CachedFileSystem {
             is_dir,
         }) = stack.pop()
         {
-            if node_limit.is_some_and(|limit| result.count >= limit) {
+            if options
+                .node_limit
+                .is_some_and(|limit| result.count >= limit)
+            {
                 break;
             }
 
@@ -237,20 +240,23 @@ impl CachedFileSystem {
                     &mut file_batch,
                     &base_path,
                     &re,
-                    node_limit,
+                    options,
                     &mut result,
                     &generation_cache,
                 )
                 .await?;
-                if node_limit.is_some_and(|limit| result.count >= limit) {
+                if options
+                    .node_limit
+                    .is_some_and(|limit| result.count >= limit)
+                {
                     break;
                 }
 
-                if !recursive && current_path != base_path {
+                if !options.recursive && current_path != base_path {
                     continue;
                 }
 
-                if let Some(limit) = level_limit {
+                if let Some(limit) = options.level_limit {
                     let rel = relative_match_file(&base_path, &current_path);
                     if relative_depth(&rel) >= limit {
                         continue;
@@ -272,7 +278,7 @@ impl CachedFileSystem {
                     });
                 }
             } else {
-                if let Some(limit) = level_limit {
+                if let Some(limit) = options.level_limit {
                     let rel = relative_match_file(&base_path, &current_path);
                     if relative_depth(&rel) > limit {
                         continue;
@@ -285,7 +291,7 @@ impl CachedFileSystem {
                         &mut file_batch,
                         &base_path,
                         &re,
-                        node_limit,
+                        options,
                         &mut result,
                         &generation_cache,
                     )
@@ -298,7 +304,7 @@ impl CachedFileSystem {
             &mut file_batch,
             &base_path,
             &re,
-            node_limit,
+            options,
             &mut result,
             &generation_cache,
         )
@@ -312,23 +318,36 @@ impl CachedFileSystem {
         file_batch: &mut Vec<String>,
         base_path: &str,
         re: &Regex,
-        node_limit: Option<usize>,
+        options: GrepOptions<'_>,
         result: &mut GrepResult,
         generation_cache: &Mutex<HashMap<String, u64>>,
     ) -> Result<()> {
-        if file_batch.is_empty() || node_limit.is_some_and(|limit| result.count >= limit) {
+        if file_batch.is_empty()
+            || options
+                .node_limit
+                .is_some_and(|limit| result.count >= limit)
+        {
             file_batch.clear();
             return Ok(());
         }
 
-        let remaining_limit = node_limit
+        let remaining_limit = options
+            .node_limit
             .map(|limit| limit.saturating_sub(result.count))
             .unwrap_or(usize::MAX);
         let files = std::mem::take(file_batch);
         let mut indexed = stream::iter(files.into_iter().enumerate())
             .map(|(index, path)| async move {
                 let matches = self
-                    .grep_cached_file(&path, base_path, re, remaining_limit, generation_cache)
+                    .grep_cached_file(
+                        &path,
+                        base_path,
+                        re,
+                        remaining_limit,
+                        options.before_context,
+                        options.after_context,
+                        generation_cache,
+                    )
                     .await;
                 (index, matches)
             })
@@ -339,7 +358,10 @@ impl CachedFileSystem {
         indexed.sort_by_key(|(index, _)| *index);
         for (_, matches) in indexed {
             for item in matches? {
-                if node_limit.is_some_and(|limit| result.count >= limit) {
+                if options
+                    .node_limit
+                    .is_some_and(|limit| result.count >= limit)
+                {
                     return Ok(());
                 }
                 result.matches.push(item);
@@ -356,6 +378,8 @@ impl CachedFileSystem {
         base_path: &str,
         re: &Regex,
         remaining_limit: usize,
+        before_context: usize,
+        after_context: usize,
         generation_cache: &Mutex<HashMap<String, u64>>,
     ) -> Result<Vec<GrepMatch>> {
         let content = self
@@ -364,17 +388,20 @@ impl CachedFileSystem {
         let content_str = String::from_utf8_lossy(&content);
         let rel_file = relative_match_file(base_path, path);
         let mut matches = Vec::new();
+        let lines: Vec<_> = content_str.lines().collect();
 
-        for (line_num, line) in content_str.lines().enumerate() {
+        for (line_index, line) in lines.iter().enumerate() {
             if matches.len() >= remaining_limit {
                 break;
             }
             if re.is_match(line) {
-                matches.push(GrepMatch {
-                    file: rel_file.clone(),
-                    line: (line_num + 1) as u64,
-                    content: line.to_string(),
-                });
+                matches.push(GrepMatch::from_lines(
+                    rel_file.clone(),
+                    &lines,
+                    line_index,
+                    before_context,
+                    after_context,
+                ));
             }
         }
 
@@ -1211,39 +1238,15 @@ impl FileSystem for CachedFileSystem {
         &self,
         path: &str,
         pattern: &str,
-        recursive: bool,
-        case_insensitive: bool,
-        node_limit: Option<usize>,
-        exclude_path: Option<&str>,
-        level_limit: Option<usize>,
+        options: GrepOptions<'_>,
     ) -> Result<GrepResult> {
         if self.policy.traversal_mode() == CacheTraversalMode::CachedTraversal
             && !self.wraps_multiwrite()
         {
-            return self
-                .grep_via_cache(
-                    path,
-                    pattern,
-                    recursive,
-                    case_insensitive,
-                    node_limit,
-                    exclude_path,
-                    level_limit,
-                )
-                .await;
+            return self.grep_via_cache(path, pattern, options).await;
         }
 
-        self.backend
-            .grep(
-                path,
-                pattern,
-                recursive,
-                case_insensitive,
-                node_limit,
-                exclude_path,
-                level_limit,
-            )
-            .await
+        self.backend.grep(path, pattern, options).await
     }
 
     async fn tree_directory(

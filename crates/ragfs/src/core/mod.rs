@@ -42,7 +42,7 @@ pub use stats::{FilesystemStats, FsOperation, OperationStats, OperationTimer, St
 pub use stats_wrapper::StatsWrappedFS;
 pub use types::{
     BackendItemConfig, BackendRole, BackendSyncState, BackendsConfig, ConfigParameter, ConfigValue,
-    EncryptionConfig, FileInfo, GlobEntry, GlobPage, GrepMatch, GrepResult, ListSortBy,
-    OperationItemConfig, PluginConfig, RedirectEntry, RedirectMeta, RedirectPolicy, SortOrder,
-    SyncLogEntry, SyncLogMeta, SyncOp, SyncType, TreeEntry, WriteFlag,
+    EncryptionConfig, FileInfo, GlobEntry, GlobPage, GrepMatch, GrepOptions, GrepResult,
+    ListSortBy, OperationItemConfig, PluginConfig, RedirectEntry, RedirectMeta, RedirectPolicy,
+    SortOrder, SyncLogEntry, SyncLogMeta, SyncOp, SyncType, TreeEntry, WriteFlag,
 };
