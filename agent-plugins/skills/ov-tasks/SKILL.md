@@ -56,6 +56,10 @@ why; user answers land here), `Progress` (verified only, with evidence),
 The file is the truth. If it disagrees with the live repo, trust the repo,
 fix the file, and say so in `Log`.
 
+Write the body in the task's main language: the language the user gave the
+task in, or the one an existing task already uses. Header keys and status
+values stay English.
+
 ## One turn
 
 Every turn is bounded: pick, claim, one slice, verify, write back, stop.
