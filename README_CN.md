@@ -315,7 +315,7 @@ ov chat   # 在另一个终端运行
 - **文档**：[docs.openviking.ai](https://docs.openviking.ai/) · [FAQ](https://docs.openviking.ai/zh/faq/faq)
 - **博客**：[blog.openviking.ai](https://blog.openviking.ai/)
 - **团队**：[关于我们](https://docs.openviking.ai/zh/about/01-about-us)
-- **交流**：📱 [飞书群](https://docs.openviking.ai/zh/about/01-about-us#飞书群) · 💬 [微信群](https://docs.openviking.ai/zh/about/01-about-us#微信群) · 🎮 [Discord](https://discord.com/invite/eHvx8E9XF3) · 🐦 [X](https://x.com/openvikingai)
+- **交流**：[![飞书社区群](docs/images/community/badge-lark-zh.svg)](https://docs.openviking.ai/zh/about/01-about-us#飞书群) [![微信社区群](docs/images/community/badge-wechat-zh.svg)](https://docs.openviking.ai/zh/about/01-about-us#微信群) [![Discord 加入交流](docs/images/community/badge-discord-zh.svg)](https://discord.com/invite/eHvx8E9XF3) [![X 关注动态](docs/images/community/badge-x-zh.svg)](https://x.com/openvikingai)
 - **贡献**：修 bug、加新功能都欢迎——见 [CONTRIBUTING_CN.md](CONTRIBUTING_CN.md)
 
 <a href="https://github.com/volcengine/OpenViking/graphs/contributors">

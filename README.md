@@ -315,7 +315,7 @@ To propose a partnership, [open an issue](https://github.com/volcengine/OpenViki
 - **Docs**: [docs.openviking.ai](https://docs.openviking.ai/) · [FAQ](https://docs.openviking.ai/en/faq/faq)
 - **Blog**: [blog.openviking.ai](https://blog.openviking.ai/)
 - **Team**: [About us](https://docs.openviking.ai/en/about/01-about-us)
-- **Chat**: 📱 [Lark Group](https://docs.openviking.ai/en/about/01-about-us#lark-group) · 💬 [WeChat](https://docs.openviking.ai/en/about/01-about-us#wechat-group) · 🎮 [Discord](https://discord.com/invite/eHvx8E9XF3) · 🐦 [X](https://x.com/openvikingai)
+- **Chat**: [![Lark Group](docs/images/community/badge-lark.svg)](https://docs.openviking.ai/en/about/01-about-us#lark-group) [![WeChat Group](docs/images/community/badge-wechat.svg)](https://docs.openviking.ai/en/about/01-about-us#wechat-group) [![Discord](docs/images/community/badge-discord.svg)](https://discord.com/invite/eHvx8E9XF3) [![X](docs/images/community/badge-x.svg)](https://x.com/openvikingai)
 - **Contribute**: bug fixes and new features are both welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
 
 <a href="https://github.com/volcengine/OpenViking/graphs/contributors">

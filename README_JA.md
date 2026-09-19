@@ -315,7 +315,7 @@ ov chat   # 別のターミナルで実行
 - **ドキュメント**: [docs.openviking.ai](https://docs.openviking.ai/) · [FAQ](https://docs.openviking.ai/en/faq/faq)
 - **ブログ**: [blog.openviking.ai](https://blog.openviking.ai/)
 - **チーム**: [About us](https://docs.openviking.ai/en/about/01-about-us)
-- **チャット**: 📱 [Larkグループ](https://docs.openviking.ai/en/about/01-about-us#lark-group) · 💬 [WeChat](https://docs.openviking.ai/en/about/01-about-us#wechat-group) · 🎮 [Discord](https://discord.com/invite/eHvx8E9XF3) · 🐦 [X](https://x.com/openvikingai)
+- **チャット**: [![Lark グループ](docs/images/community/badge-lark-ja.svg)](https://docs.openviking.ai/en/about/01-about-us#lark-group) [![WeChat グループ](docs/images/community/badge-wechat-ja.svg)](https://docs.openviking.ai/en/about/01-about-us#wechat-group) [![Discord 参加する](docs/images/community/badge-discord-ja.svg)](https://discord.com/invite/eHvx8E9XF3) [![X フォロー](docs/images/community/badge-x-ja.svg)](https://x.com/openvikingai)
 - **コントリビュート**: バグ修正も新機能も歓迎します — [CONTRIBUTING_JA.md](CONTRIBUTING_JA.md) を参照してください
 
 <a href="https://github.com/volcengine/OpenViking/graphs/contributors">
