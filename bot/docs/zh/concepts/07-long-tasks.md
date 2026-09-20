@@ -63,7 +63,7 @@ docker build --build-arg INSTALL_LONGTASK=true --build-arg UV_LOCK_STRATEGY=lock
 - **LoopX**：保存 Goal、Todo、执行身份、门禁和结算；Bot 只调用公开 CLI，不改其私有状态。
 - **Bot**：保存任务归属、预算、工具调用记录、暂停权限和通知。不会再建一套 Goal/Todo 状态机。
 - **OpenViking**：沿用 Bot 管理的身份、稳定任务 Session、上下文读取和会话同步；不作为任务状态数据库。
-- **完成判断**：模型检查验收条件并引用真实工具记录；Host 提交给 LoopX，读到 `terminal_no_followup` 才通知完成。工具返回记录不等于业务验收通过；命令退出码、产物内容仍需检查，本实现不是通用业务验收器。
+- **完成判断**：模型检查验收条件并引用真实工具记录；Host 提交给 LoopX，读到 `terminal_no_followup` 才通知完成。命令是否成功按沙箱返回的结构化退出状态判断，不从输出文本猜测；非零或未知退出状态不能作为成功证据。工具成功不等于产物满足业务验收，本实现不是通用业务验收器。
 
 中间 Todo 的顺序是“完成并建立下一步 → 写回 → 结算”；最后一个 Todo 按 LoopX 协议先写回、结算，再关闭。整个过程使用同一个 turn ID。
 
@@ -84,6 +84,8 @@ docker build --build-arg INSTALL_LONGTASK=true --build-arg UV_LOCK_STRATEGY=lock
 
 正常结束一轮后，任务可在进程重启后继续排队。若中断时有未完成的模型调用、工具调用或结算，任务暂停；必须检查操作记录和外部结果，不会自动重放。当前不提供自动消除这类“不确定结果”的功能。
 
+模型只回复文字、未提交结果时，保留原 LoopX 轮次 ID；下一次尝试重新检查 LoopX 后继续该轮，不冒充已收尾。执行中暂停也保留原轮次，用户恢复时继续；只有没有未决操作才允许执行。每次尝试仍计入 Bot 的总轮次和无进展预算，成功提交后才清除原轮次 ID。
+
 创建 LoopX 任务途中中断也不能直接恢复重建，需先检查已产生的状态，避免重复创建。
 
 数据位于 `<storage.workspace>/bot/longtasks/`：`host.db` 保存 Host 记录，`runtime/` 保存 LoopX 运行数据，`workspaces/` 保存任务工作目录，`submissions/` 保存公开 CLI 的提交输入。备份时应一起保留。
@@ -97,6 +99,7 @@ docker build --build-arg INSTALL_LONGTASK=true --build-arg UV_LOCK_STRATEGY=lock
 - 不提供写入个人记忆的 `openviking_memory_commit`：它要求用户 peer 身份。长任务过程由 Bot 管理的任务 Session 自动同步，不冒用发起人的身份。
 - 独立工作目录不是安全沙箱；隔离能力沿用 Bot 的 sandbox 配置。`direct` 仍具有宿主机用户权限，只适用于可信调用者。
 - 通知经现有 Bot 消息总线发送；持久化的是入队记录，不是飞书等渠道的最终送达回执。状态查询不依赖通知是否送达。
+- 后台通知使用独立 `notification` 事件，飞书等推送渠道正常发送；OpenAPI / Bot API 不把它塞进当前聊天请求，不会关闭其他回答的响应流。API 调用方通过 `long_task(..., action="status")` 查询任务结果。
 - LoopX 返回当前 Host 不支持的专项修复流程时明确暂停，不跳过门禁，也不自动切换到其他运行方式。
 
 ## 验证

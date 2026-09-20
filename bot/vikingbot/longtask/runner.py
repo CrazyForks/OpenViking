@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vikingbot.agent.tools.base import ToolContext
-from vikingbot.bus.events import OutboundMessage
+from vikingbot.bus.events import OutboundEventType, OutboundMessage
 from vikingbot.config.schema import SandboxMode, SessionKey
 from vikingbot.longtask.host_store import HostStore
 from vikingbot.longtask.loopx_client import LoopXClient, LoopXError, validate_installation
@@ -171,10 +171,8 @@ class LongTaskService:
                     raise ValueError(
                         "Task round budget exhausted; start a new explicitly scoped task"
                     )
-                # The owner can resume a known-ended slice. Unknown operations
-                # above remain blocked; this never replays an uncertain write.
-                self.store.update(task_id, inflight=None)
-                row = self.store.get(task_id)
+                # Resume the original admitted LoopX turn until it has a legal
+                # closeout. Ending a model slice does not settle that turn.
             if not row["initialized"] and row["inflight"] is None:
                 if action == "resume":
                     self.store.update(
@@ -266,7 +264,6 @@ class LongTaskService:
                     except Exception as exc:
                         current = self.store.get(task_id)
                         if not current["authorized"] and not self.store.unresolved(task_id):
-                            self.store.update(task_id, inflight=None)
                             continue
                         self.store.update(task_id, authorized=0, reason=str(exc))
                         self.store.notify(task_id, f"长任务 {task_id} 已暂停：{exc}")
@@ -285,6 +282,7 @@ class LongTaskService:
                 OutboundMessage(
                     session_key=SessionKey.model_validate_json(row["origin"]),
                     content=delivery["content"],
+                    event_type=OutboundEventType.NOTIFICATION,
                     metadata=metadata,
                 )
             )
@@ -293,7 +291,9 @@ class LongTaskService:
     async def _tick(self, task_id: str) -> None:
         row = self.store.assert_authorized(task_id)
         client = self._client(task_id)
-        turn_id = uuid.uuid4().hex
+        if self.store.unresolved(task_id):
+            raise RuntimeError("Unresolved operations require reconciliation before execution")
+        turn_id = row["inflight"] or uuid.uuid4().hex
         if not row["initialized"]:
             self.store.update(task_id, inflight=turn_id)
             sandbox = self._sandbox(task_id)
@@ -356,7 +356,6 @@ class LongTaskService:
                 self.store.update(
                     task_id,
                     no_progress=no_progress,
-                    inflight=None,
                     last_result=result["text"],
                     next_wake=time.time() + 30,
                 )

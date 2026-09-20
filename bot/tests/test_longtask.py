@@ -26,6 +26,186 @@ def test_longtask_disabled_by_default():
     assert Config().longtask.enabled is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command", ["printf x >> artifact.txt; exit 1", "printf '%12000s' x; exit 2"]
+)
+async def test_failed_exec_cannot_be_completion_evidence(tmp_path, command):
+    from vikingbot.agent.tools.shell import ExecTool
+    from vikingbot.longtask.runner import Turn
+    from vikingbot.longtask.tools import JournaledToolRegistry, SubmitLongTaskTurnTool
+
+    service = _service(tmp_path)
+    service.store = HostStore(service.root / "host.db")
+    task_id = (await service.create(_context(), "Verify artifact", "req"))["task_id"]
+    service.store.update(task_id, initialized=1)
+    turn = Turn(service, task_id, "turn")
+    registry = JournaledToolRegistry(service.config, turn)
+    registry.register(ExecTool())
+    sandbox = service._sandbox(task_id)
+    try:
+        with pytest.raises(RuntimeError, match="inspect operation"):
+            await registry.execute_detailed(
+                "exec",
+                {"command": command},
+                session_key=service._session_key(task_id),
+                sandbox_manager=sandbox,
+            )
+        assert not turn.successful_tools
+        operation = service.store.unresolved(task_id)[0]
+        with pytest.raises(ValueError, match="successful tool"):
+            await SubmitLongTaskTurnTool(turn).execute(
+                _context(),
+                summary="done",
+                evidence="exec",
+                goal_complete=True,
+                validation_operation_id=operation,
+            )
+        with pytest.raises(ValueError, match="reconciliation"):
+            await service.control(_context(), task_id, "resume")
+    finally:
+        await sandbox.cleanup_all()
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("VIKINGBOT_LOOPX_TEST") != "1", reason="Requires real LoopX")
+@pytest.mark.parametrize("complete_after_retry", [False, True])
+async def test_real_loopx_text_only_retries_original_turn(tmp_path, complete_after_retry):
+    service = _service(tmp_path)
+    await service.initialize()
+    task_id = (await service.create(_context(), "Inspect and verify artifacts", "req"))["task_id"]
+    turns = []
+
+    async def execute(turn, row, decision):
+        turns.append(turn.turn_id)
+        if complete_after_retry and len(turns) == 2:
+            operation = service.store.begin_operation(task_id, turn.turn_id, "tool", {"read": True})
+            service.store.end_operation(operation, {"verified": True})
+            turn.proposal = {
+                "summary": "Verified",
+                "evidence": "Readback verified",
+                "goal_complete": True,
+                "validation_operation_id": operation,
+            }
+        return {"text": "Checking", "usage": {}, "iterations": 1}
+
+    service._execute = execute
+    try:
+        await service._tick(task_id)
+        assert service.store.get(task_id)["inflight"] == turns[0]
+        await service._tick(task_id)
+        if complete_after_retry:
+            assert service.store.get(task_id)["inflight"] is None
+            await service._tick(task_id)
+            assert service.store.get(task_id)["terminal"]
+        else:
+            with pytest.raises(RuntimeError, match="no-progress round limit"):
+                await service._tick(task_id)
+            assert service.store.get(task_id)["no_progress"] == 3
+            assert service.store.get(task_id)["rounds"] == 3
+        assert len(set(turns)) == 1
+        assert not service.store.unresolved(task_id)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("VIKINGBOT_LOOPX_TEST") != "1", reason="Requires real LoopX")
+@pytest.mark.parametrize("restart", [False, True])
+async def test_real_loopx_pause_inside_turn_resumes_same_turn(tmp_path, restart):
+    import asyncio
+
+    service = _service(tmp_path)
+    await service.initialize()
+    task_id = (await service.create(_context(), "Inspect and verify artifacts", "req"))["task_id"]
+    entered, release = asyncio.Event(), asyncio.Event()
+    turns = []
+
+    async def execute(turn, row, decision):
+        turns.append(turn.turn_id)
+        entered.set()
+        await release.wait()
+        await turn.before_model(2)
+
+    service._execute = execute
+    runner = asyncio.create_task(service.run())
+    pause = None
+    try:
+        await asyncio.wait_for(entered.wait(), 60)
+        pause = asyncio.create_task(service.control(_context(), task_id, "pause"))
+        while service.store.get(task_id)["authorized"]:
+            await asyncio.sleep(0)
+        release.set()
+        await pause
+        runner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+        assert service.store.get(task_id)["inflight"] == turns[0]
+        if restart:
+            await service.close()
+            service = _service(tmp_path)
+            await service.initialize()
+            assert not service.store.get(task_id)["authorized"]
+        await service.control(_context(), task_id, "resume")
+
+        async def complete(turn, row, decision):
+            turns.append(turn.turn_id)
+            operation = service.store.begin_operation(task_id, turn.turn_id, "tool", {"read": True})
+            service.store.end_operation(operation, {"verified": True})
+            turn.proposal = {
+                "summary": "Verified",
+                "evidence": "Readback verified",
+                "goal_complete": True,
+                "validation_operation_id": operation,
+            }
+            return {"text": "", "usage": {}, "iterations": 1}
+
+        service._execute = complete
+        await service._tick(task_id)
+        await service._tick(task_id)
+        assert service.store.get(task_id)["terminal"]
+        assert len(turns) == 2 and len(set(turns)) == 1
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+        if pause is not None:
+            await asyncio.gather(pause, return_exceptions=True)
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_type", ["cli", "bot_api"])
+async def test_background_notification_does_not_finish_chat_request(tmp_path, channel_type):
+    from vikingbot.bus.events import OutboundEventType, OutboundMessage
+    from vikingbot.channels.openapi import OpenAPIChannel, PendingResponse
+
+    service = _service(tmp_path)
+    service.store = HostStore(service.root / "host.db")
+    key = SessionKey(type=channel_type, channel_id="bot", chat_id="chat")
+    context = ToolContext(sender_id="owner", session_key=key)
+    task_id = (await service.create(context, "Previous task", "req"))["task_id"]
+    service.store.notify(task_id, "Previous task completed")
+    await service._deliver()
+    notification = await service.agent.bus.consume_outbound()
+    assert notification.event_type == OutboundEventType.NOTIFICATION
+    assert notification.is_user_message and not notification.is_normal_message
+
+    channel = object.__new__(OpenAPIChannel)
+    pending = PendingResponse()
+    channel._pending = {"chat": pending}
+    channel._bot_pending = {"bot": {"chat": pending}}
+    await channel.send(notification)
+    assert not pending.event.is_set()
+    assert pending.stream_queue.empty()
+    await channel.send(OutboundMessage(session_key=key, content="Actual chat answer"))
+    assert pending.final_content == "Actual chat answer"
+    assert pending.event.is_set()
+    assert (await pending.stream_queue.get()).data["content"] == "Actual chat answer"
+    assert await pending.stream_queue.get() is None
+    await service.close()
+
+
 def test_store_dedup_and_conflicting_intent(tmp_path):
     store = HostStore(tmp_path / "host.db")
     first, created = store.create("user", "chat", "request", "goal", {})

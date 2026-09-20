@@ -9,7 +9,7 @@ from loguru import logger
 
 from vikingbot.config.schema import SandboxConfig, SessionKey
 from vikingbot.sandbox.backends import register_backend
-from vikingbot.sandbox.base import SandboxBackend
+from vikingbot.sandbox.base import CommandResult, SandboxBackend
 
 
 @register_backend("direct")
@@ -30,7 +30,7 @@ class DirectBackend(SandboxBackend):
         self._running = True
         # logger.info("Direct backend started")
 
-    async def execute(self, command: str, timeout: int = 60, **kwargs: Any) -> str:
+    async def execute_result(self, command: str, timeout: int = 60, **kwargs: Any) -> CommandResult:
         """Execute a command directly on the host."""
         if not self._running:
             raise RuntimeError("Direct backend not started")
@@ -68,7 +68,8 @@ class DirectBackend(SandboxBackend):
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 process.kill()
-                return f"Error: Command timed out after {timeout} seconds"
+                await process.wait()
+                return CommandResult(f"Error: Command timed out after {timeout} seconds", None)
 
             output_parts = []
 
@@ -92,7 +93,7 @@ class DirectBackend(SandboxBackend):
             if len(result) > max_len:
                 result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
 
-            return result
+            return CommandResult(result, process.returncode)
 
         except Exception as e:
             logger.error(f"[Direct] Error: {e}")
