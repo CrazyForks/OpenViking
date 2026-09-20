@@ -303,6 +303,7 @@ class OfflinePolicyOptimizationPipeline:
     ) -> PipelineEvaluationResult:
         all_analyses: list[RolloutAnalysis] = []
         snapshot_ids: list[str] = []
+        invalid_evaluations = []
 
         started_at = time.monotonic()
         async for cases in case_loader.batches(ctx.case_load_context):
@@ -315,6 +316,15 @@ class OfflinePolicyOptimizationPipeline:
             )
             snapshot_ids.append(snapshot_id)
             all_analyses.extend(_analyses_from_rollout_evaluations(rollouts))
+            invalid_evaluations.extend(
+                {
+                    "case": r.case.name,
+                    **r.metadata,
+                    "trial": r.case.input.get("eval_trial", r.case.input.get("trial", 0)),
+                }
+                for r in rollouts
+                if r.metadata.get("evaluation_valid") is False
+            )
         cost_seconds = time.monotonic() - started_at
 
         return PipelineEvaluationResult(
@@ -326,6 +336,8 @@ class OfflinePolicyOptimizationPipeline:
                 "score": average_score(all_analyses),
                 "analysis_count": len(all_analyses),
                 "evaluation_only": True,
+                "invalid_evaluations": invalid_evaluations,
+                "invalid_evaluation_count": len(invalid_evaluations),
                 "cost_seconds": cost_seconds,
             },
         )
@@ -627,6 +639,8 @@ def _rollout_stage(*, epoch: int, training: bool) -> str:
 def _analyses_from_rollout_evaluations(rollouts) -> list[RolloutAnalysis]:
     analyses: list[RolloutAnalysis] = []
     for idx, rollout in enumerate(rollouts):
+        if rollout.metadata.get("evaluation_valid") is False:
+            continue
         if rollout.evaluation is None:
             raise ValueError(
                 "pipeline eval requires RolloutExecutor to provide rollout.evaluation; "

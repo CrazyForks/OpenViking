@@ -87,6 +87,9 @@ class BatchTrainEvalConfig:
     train_index: int | str | list[int] | tuple[int, ...] | None = None
     eval_index: int | str | list[int] | tuple[int, ...] | None = None
     benchmark_service_url: str | None = None
+    viking_selection: dict[str, Any] = field(default_factory=dict)
+    viking_config_fingerprint: str = ""
+    remote_execution_timeout_seconds: float = 3600.0
     casehub_dataset_ids: list[str] = field(default_factory=list)
     casehub_case_ids: list[str] = field(default_factory=list)
     casehub_eval_dataset_ids: list[str] = field(default_factory=list)
@@ -198,8 +201,12 @@ class BatchTrainEvalConfig:
             self.casehub_eval_dataset_ids,
             label="casehub_eval_dataset_ids",
         )
-        if self.dataset == "ark4-0" and not self.casehub_dataset_ids:
-            raise ValueError("casehub_dataset_ids is required for dataset ark4-0")
+        if self.dataset == "ark4-0" and (
+            self.casehub_dataset_ids or self.casehub_case_ids or self.casehub_eval_dataset_ids
+        ):
+            raise ValueError(
+                "ark4-0 now uses Viking directly; use --viking-train/eval-set-id, not CaseHub flags"
+            )
         if self.casehub_case_ids and not self.casehub_dataset_ids:
             raise ValueError("casehub_dataset_ids is required when casehub_case_ids is set")
         if self.keep_recent_results < 0:
@@ -310,6 +317,8 @@ class BatchTrainEvalReport:
     server_url: str = ""
     benchmark_service_url: str | None = None
     benchmark_task_id: str | None = None
+    benchmark_task_ids: list[int] = field(default_factory=list)
+    viking_selection: dict[str, Any] = field(default_factory=dict)
     casehub_dataset_ids: list[str] = field(default_factory=list)
     casehub_case_ids: list[str] = field(default_factory=list)
     casehub_eval_dataset_ids: list[str] = field(default_factory=list)
@@ -361,6 +370,8 @@ class BatchTrainEvalReport:
             "server_url": self.server_url,
             "benchmark_service_url": self.benchmark_service_url,
             "benchmark_task_id": self.benchmark_task_id,
+            "benchmark_task_ids": self.benchmark_task_ids,
+            "viking_selection": self.viking_selection,
             "casehub_dataset_ids": self.casehub_dataset_ids,
             "casehub_case_ids": self.casehub_case_ids,
             "casehub_eval_dataset_ids": self.casehub_eval_dataset_ids,
@@ -482,7 +493,14 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             casehub_dataset_ids=_lifecycle_casehub_dataset_ids(config),
             casehub_case_ids=config.casehub_case_ids,
             task_casehub_dataset_ids=config.casehub_dataset_ids,
+            **({"viking_selection": config.viking_selection} if config.viking_selection else {}),
+            **({"required_backend": "viking_direct"} if config.dataset == "ark4-0" else {}),
         )
+        if benchmark_run is not None and benchmark_run.get("backend") == "viking_direct":
+            config.viking_config_fingerprint = benchmark_run["config_fingerprint"]
+            config.remote_execution_timeout_seconds = float(
+                benchmark_run["execution_timeout_seconds"]
+            )
         benchmark_run_id = policy_trainer.run_id if benchmark_run is not None else None
         benchmark_task_id = (
             str(benchmark_run.get("task_id") or "") or None if benchmark_run is not None else None
@@ -730,6 +748,7 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             server_url=client_url(client),
             benchmark_service_url=config.benchmark_service_url,
             benchmark_task_id=benchmark_task_id,
+            viking_selection=(benchmark_run.get("selections", {}) if benchmark_run else {}),
             casehub_dataset_ids=list(config.casehub_dataset_ids),
             casehub_case_ids=list(config.casehub_case_ids),
             casehub_eval_dataset_ids=list(config.casehub_eval_dataset_ids),
@@ -817,6 +836,8 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
                     f"platform task {benchmark_task_id or benchmark_run_id} was not completed"
                 )
             completion = await benchmark_lifecycle.complete(run_id=benchmark_run_id)
+            report.benchmark_task_ids = completion.get("task_ids", [])
+            _write_report(report, config)
             print(
                 f"benchmark task completed: "
                 f"{completion.get('task_id') or benchmark_task_id or benchmark_run_id}"
@@ -1049,6 +1070,7 @@ def _build_pipeline(
         service_url=_require_benchmark_service_url(config),
         concurrency=config.concurrency,
         continue_on_rollout_failure=config.continue_on_rollout_failure,
+        execution_timeout_seconds=config.remote_execution_timeout_seconds,
         show_progress=True,
         progress_label="rollout",
         options=rollout_options,
@@ -1606,6 +1628,14 @@ def _train_rollout_cache_dir(config: BatchTrainEvalConfig) -> Path:
 
 def _train_rollout_cache_key_prefix(config: BatchTrainEvalConfig) -> str:
     payload = {
+        **(
+            {
+                "viking_selection": config.viking_selection,
+                "viking_config_fingerprint": config.viking_config_fingerprint,
+            }
+            if config.viking_selection or config.viking_config_fingerprint
+            else {}
+        ),
         "dataset": config.dataset,
         "domain": config.domain,
         "split": config.train_split,
@@ -1630,6 +1660,14 @@ def _train_rollout_cache_key_prefix(config: BatchTrainEvalConfig) -> str:
 def _baseline_cache_key(config: BatchTrainEvalConfig) -> str:
     effective_eval_index = _effective_eval_index(config)
     payload = {
+        **(
+            {
+                "viking_selection": config.viking_selection,
+                "viking_config_fingerprint": config.viking_config_fingerprint,
+            }
+            if config.viking_selection or config.viking_config_fingerprint
+            else {}
+        ),
         "dataset": config.dataset,
         "domain": config.domain,
         "split": config.eval_split,

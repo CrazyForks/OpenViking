@@ -49,8 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--config",
         default=str(SCRIPT_DIR / "adapter_config.local.json"),
         help=(
-            "Combined adapter JSON config "
-            "(default: adapter_config.local.json next to this script)"
+            "Combined adapter JSON config (default: adapter_config.local.json next to this script)"
         ),
     )
     return parser.parse_args()
@@ -153,8 +152,19 @@ def _combined_openviking_target(
     runtime_params = _object(rollout.get("runtime_params"), "rollout.runtime_params")
     memory = _object(runtime_params.get("memory"), "rollout.runtime_params.memory")
     rollout_target = str(memory.get("openviking_target") or "").strip()
+    direct_memory = (
+        root.get("viking", {})
+        .get("sandbox_config", {})
+        .get("extra_payload", {})
+        .get("extra_data", {})
+        .get("extra", {})
+        .get("memory", {})
+    )
+    direct_target = str(direct_memory.get("openviking_target") or "").strip()
     kubevpn_target = str(kubevpn.get("openviking_target") or "").strip()
-    targets = [value for value in (kubevpn_target, proxy_target, rollout_target) if value]
+    targets = [
+        value for value in (kubevpn_target, proxy_target, rollout_target, direct_target) if value
+    ]
     if not targets:
         raise ValueError(
             "rollout.runtime_params.memory.openviking_target is required when kubevpn is configured"

@@ -109,7 +109,7 @@ _TRAINING_CASE_SPEC_PROTOCOL = "openviking.batch_train.case_spec.v1"
 _TRAINING_CASE_SPEC_HEADER = "# OpenViking Batch Training CaseSpec v1"
 _TRAINING_OUTCOME_EVALUATION_HEADER = "# OpenViking OutcomeEvaluation"
 _TRAINING_FAST_PATH_MEMORY_TYPES = frozenset({"cases", "trajectories", "experiences"})
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_JSON_FENCE_OPEN_RE = re.compile(r"```(?:json)?\s*", re.IGNORECASE)
 _TRAJECTORY_LINK_TYPE_BY_OUTCOME = {
     "success": "successful_trajectory",
     "failure": "failed_trajectory",
@@ -1473,16 +1473,8 @@ def _training_evaluation_from_messages(
 
 
 def _training_evaluation_from_message(text: str) -> RubricEvaluation | None:
-    match = _JSON_FENCE_RE.search(text)
-    raw_payload = (
-        match.group(1).strip()
-        if match
-        else text.removeprefix(_TRAINING_OUTCOME_EVALUATION_HEADER).strip()
-    )
-    if not raw_payload:
-        return None
     try:
-        payload = JsonUtils.loads(raw_payload)
+        payload = _training_control_json(text, _TRAINING_OUTCOME_EVALUATION_HEADER)
     except Exception as exc:
         logger.warning("Ignoring invalid OutcomeEvaluation payload: %s", exc)
         return None
@@ -1528,15 +1520,31 @@ def _is_embedded_rollout_evaluation_message(message: Message) -> bool:
     return "task_success:" in text and "task_reward:" in text and "evaluation report:" in text
 
 
+def _training_control_json(text: str, header: str) -> Any:
+    """Decode machine-generated metadata without truncating embedded fences.
+
+    Rubrics and feedback can contain Markdown fences inside JSON strings. Let
+    the JSON decoder locate the document end before validating the outer fence;
+    never repair a truncated control payload into apparently valid metadata.
+    """
+    body = text.removeprefix(header).strip()
+    if body.startswith(("{", "[")):
+        return json.loads(body)
+    opener = _JSON_FENCE_OPEN_RE.search(body)
+    if opener is None:
+        return json.loads(body)
+    raw = body[opener.end() :].lstrip()
+    payload, end = json.JSONDecoder().raw_decode(raw)
+    if raw[end:].strip() != "```":
+        raise ValueError("Training metadata must end with its outer JSON fence")
+    return payload
+
+
 def _parse_training_case_spec_payload(text: str) -> dict[str, Any]:
-    match = _JSON_FENCE_RE.search(text)
-    raw_payload = (
-        match.group(1).strip() if match else text.removeprefix(_TRAINING_CASE_SPEC_HEADER).strip()
-    )
-    if not raw_payload:
+    if not text.removeprefix(_TRAINING_CASE_SPEC_HEADER).strip():
         raise ValueError("Training CaseSpec fast path payload is empty")
     try:
-        payload = JsonUtils.loads(raw_payload)
+        payload = _training_control_json(text, _TRAINING_CASE_SPEC_HEADER)
     except Exception as exc:
         raise ValueError("Training CaseSpec fast path payload is not valid JSON") from exc
     if not isinstance(payload, dict):

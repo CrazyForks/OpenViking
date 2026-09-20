@@ -15,6 +15,46 @@ from openviking.session.train.components.remote import RemoteBenchmarkLifecycle
 
 
 @pytest.mark.asyncio
+async def test_direct_viking_rejects_old_adapter_before_starting_task(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        return httpx.Response(200, json={"status": "ok"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    with pytest.raises(RuntimeError, match="restart the adapter"):
+        await RemoteBenchmarkLifecycle("http://adapter.test").start(
+            run_id="r", dataset="ark4-0", domain="ark", required_backend="viking_direct"
+        )
+    assert calls == ["GET"]
+
+
+@pytest.mark.asyncio
+async def test_direct_viking_complete_waits_for_remote_finalization(monkeypatch):
+    responses = iter([{"status": "finalizing"}, {"status": "completed", "task_ids": [4001]}])
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=next(responses))
+            ),
+            **kwargs,
+        ),
+    )
+    monkeypatch.setattr("openviking.session.train.components.remote.asyncio.sleep", AsyncMock())
+    result = await RemoteBenchmarkLifecycle("http://adapter.test").complete(run_id="run-test")
+    assert result == {"status": "completed", "task_ids": [4001]}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("epochs", [0, 5])
 async def test_lifecycle_sends_training_plan(monkeypatch, epochs):
     bodies = []

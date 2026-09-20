@@ -1,4 +1,5 @@
 __pycache__/
+.adapter-state/
 *.py[cod]
 *.local.json
 *.local.log

@@ -29,9 +29,7 @@ def _parse_server_header(value: str) -> tuple[str, str]:
     elif equals_index > 0:
         name, header_value = raw.split("=", 1)
     else:
-        raise argparse.ArgumentTypeError(
-            "server header must use NAME=VALUE or NAME:VALUE"
-        )
+        raise argparse.ArgumentTypeError("server header must use NAME=VALUE or NAME:VALUE")
 
     name = name.strip()
     header_value = header_value.strip()
@@ -124,6 +122,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Benchmark runtime service URL, e.g. http://127.0.0.1:1944",
     )
+    for phase in ("train", "eval"):
+        parser.add_argument(f"--viking-{phase}-set-id", type=int, default=None)
+        parser.add_argument(f"--viking-{phase}-version", default=None)
+        parser.add_argument(f"--viking-{phase}-row-id", type=int, action="append", default=[])
     parser.add_argument(
         "--casehub-dataset-id",
         action="append",
@@ -131,7 +133,7 @@ def parse_args() -> argparse.Namespace:
         metavar="DATASET_ID",
         help=(
             "CaseHub dataset used by this benchmark run. Repeat for multiple datasets. "
-            "Required by the Ark adapter."
+            "Not supported by the direct Viking Ark adapter."
         ),
     )
     parser.add_argument(
@@ -381,6 +383,7 @@ async def main_async() -> int:
             casehub_dataset_ids=args.casehub_dataset_id,
             casehub_case_ids=args.casehub_case_id,
             casehub_eval_dataset_ids=args.casehub_eval_dataset_id,
+            viking_selection=_viking_selection(args),
             baseline_force_recompute=args.force_baseline_recompute,
             eval_each_epoch=args.eval_each_epoch,
             skip_final_eval=args.skip_final_eval,
@@ -400,6 +403,22 @@ async def main_async() -> int:
     if args.resume_final_eval:
         return 0
     return 1 if any(epoch.get("errors") for epoch in report.train_epochs) else 0
+
+
+def _viking_selection(args):
+    selection = {}
+    for phase in ("train", "eval"):
+        set_id = getattr(args, f"viking_{phase}_set_id")
+        version = getattr(args, f"viking_{phase}_version")
+        rows = getattr(args, f"viking_{phase}_row_id")
+        if set_id is None and version is None and not rows:
+            continue
+        if set_id is None or set_id <= 0 or not version:
+            raise ValueError(
+                f"--viking-{phase}-set-id and --viking-{phase}-version are required together"
+            )
+        selection[phase] = {"experiment_set_id": set_id, "version": version, "row_ids": rows}
+    return selection
 
 
 def _resolve_direct_experience_content(

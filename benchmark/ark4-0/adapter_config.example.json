@@ -1,47 +1,53 @@
 {
   "service": {
-    "port": 8765
+    "port": 8765,
+    "dataset": "ark-viking-local-smoke-20260907"
   },
-  "training_task": {
-    "workflow_id": "ark_viking_external_training",
-    "agent_id": "ark",
-    "lane_key": "evolving",
-    "rollout_resource_id": "rm_lane_lane_057cf57ea34b4e6",
-    "viking_experiment_sets": [
-      {"experiment_set_id": 371, "version": "V1", "role": "train"},
-      {"experiment_set_id": 372, "version": "V1", "role": "eval"}
-    ]
-  },
-  "rollout": {
-    "timeout_seconds": 7200,
-    "poll_interval_seconds": 3,
-    "runtime_params": {
-      "task_timeout": 4800,
-      "memory": {
-        "enabled": true,
-        "mode": "read_only",
-        "general_recall_enabled": true,
-        "openviking_target": "evolving-dutao"
-      }
+  "viking": {
+    "base_url": "https://viking-exp.byted.org",
+    "api_token": "YOUR_VIKING_API_TOKEN",
+    "template_task_id": 3327,
+    "group_concurrency": {
+      "group_2": 20,
+      "group_3": 20,
+      "group_4": 20
     },
-    "extra_header": {
-      "x-tt-sandbox": "{\"multi-agents-md-id\":\"stg-default-agentmd-20260901\"}"
+    "train": {
+      "experiment_set_id": 300,
+      "version": "V11"
+    },
+    "eval": {
+      "experiment_set_id": 300,
+      "version": "V11"
+    },
+    "task_time_limit_seconds": 14400,
+    "sandbox_config": {
+      "env": "stg",
+      "collect_traces": true,
+      "extra_headers": {
+        "from-ark-console": "true",
+        "x-tt-env": "ai_search_homepage_stg",
+        "x-tt-sandbox": "{\"multi-agents-md-id\":\"stg-default-agentmd-20260901\",\"env\":{\"VAKA_REQUEST_SOURCE\":\"ark-lx\"}}",
+        "x-vaka-request-source": "ark-lx",
+        "x-tt-backend": "evolving"
+      },
+      "extra_payload": {
+        "extra_data": {
+          "extra": {
+            "memory": {
+              "enabled": false
+            }
+          }
+        }
+      }
     }
   },
   "memory_proxy": {
-    "enabled": true,
-    "openviking_url": "http://127.0.0.1:1934",
-    "openviking_config_file": "/absolute/path/to/openviking.conf",
-    "openviking_api_key_json_path": "server.root_api_key"
+    "enabled": false
   },
   "kubevpn": {
-    "kubeconfig": "/Users/bytedance/work/space/OV-train/evolution/.kube/config_stg",
-    "namespace": "ai-search-rec"
-  },
-  "platform": {
-    "gateway_base_url": "https://replace-with-inspect-gateway",
-    "api_key": "replace-with-platform-api-key",
-    "project_id": "00000000000000000000000000000001",
-    "vaka_request_source": "ark-lx"
+    "kubeconfig": "/absolute/path/to/kubeconfig",
+    "namespace": "ai-search-rec",
+    "openviking_target": "evolving-dutao"
   }
 }

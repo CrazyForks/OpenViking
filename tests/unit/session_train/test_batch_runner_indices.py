@@ -44,7 +44,6 @@ def test_pipeline_sends_benchmark_run_id_with_every_rollout():
         dataset="ark4-0",
         domain="ark",
         benchmark_service_url="http://127.0.0.1:1944",
-        casehub_dataset_ids=["dataset-1"],
     )
 
     pipeline = _build_pipeline(

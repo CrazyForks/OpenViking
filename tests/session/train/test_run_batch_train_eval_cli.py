@@ -98,7 +98,7 @@ def test_server_headers_are_repeatable(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_casehub_selection_is_repeatable_and_reaches_batch_config(monkeypatch) -> None:
+async def test_viking_selection_is_repeatable_and_reaches_batch_config(monkeypatch) -> None:
     captured: BatchTrainEvalConfig | None = None
 
     async def capture(config: BatchTrainEvalConfig) -> SimpleNamespace:
@@ -116,26 +116,31 @@ async def test_casehub_selection_is_repeatable_and_reaches_batch_config(monkeypa
             "ark4-0",
             "--domain",
             "ark",
-            "--casehub-dataset-id",
-            "dataset-1",
-            "--casehub-case-id",
-            "case-1",
-            "--casehub-case-id",
-            "case-2",
-            "--casehub-eval-dataset-id",
-            "dataset-eval",
+            "--viking-train-set-id",
+            "300",
+            "--viking-train-version",
+            "V11",
+            "--viking-train-row-id",
+            "10",
+            "--viking-train-row-id",
+            "11",
+            "--viking-eval-set-id",
+            "372",
+            "--viking-eval-version",
+            "V1",
         ],
     )
 
     assert await main_async() == 0
     assert captured is not None
-    assert captured.casehub_dataset_ids == ["dataset-1"]
-    assert captured.casehub_case_ids == ["case-1", "case-2"]
-    assert captured.casehub_eval_dataset_ids == ["dataset-eval"]
+    assert captured.viking_selection == {
+        "train": {"experiment_set_id": 300, "version": "V11", "row_ids": [10, 11]},
+        "eval": {"experiment_set_id": 372, "version": "V1", "row_ids": []},
+    }
 
 
-def test_casehub_case_requires_dataset() -> None:
-    with pytest.raises(ValueError, match="casehub_dataset_ids is required"):
+def test_ark_rejects_retired_casehub_flags() -> None:
+    with pytest.raises(ValueError, match="Viking directly"):
         BatchTrainEvalConfig(
             dataset="ark4-0",
             domain="ark",
