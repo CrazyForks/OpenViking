@@ -1,5 +1,9 @@
 """Execution status is independent of text, truncation, and presentation hooks."""
 
+import asyncio
+import json
+import signal
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,6 +16,119 @@ from vikingbot.sandbox.backends.direct import DirectBackend
 from vikingbot.sandbox.backends.opensandbox import OpenSandboxBackend
 from vikingbot.sandbox.backends.srt import SrtBackend
 from vikingbot.sandbox.base import CommandResult
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["sleep 2; echo done", "sleep 2 & exit 0"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_direct_terminates_descendants_on_timeout_or_cancel(
+    tmp_path, monkeypatch, command, cancel
+):
+    backend = DirectBackend(Config().sandbox, "test", tmp_path)
+    await backend.start()
+    created = asyncio.Event()
+    processes = []
+    create = asyncio.create_subprocess_shell
+
+    async def capture(*args, **kwargs):
+        assert kwargs["start_new_session"] is True
+        process = await create(*args, **kwargs)
+        processes.append(process)
+        created.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", capture)
+    started = time.monotonic()
+    task = asyncio.create_task(backend.execute_result(command, timeout=0.05))
+    try:
+        if cancel:
+            await asyncio.wait_for(created.wait(), 1)
+            await asyncio.sleep(0.02)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await task
+            assert not result.success and result.exit_code is None
+        assert time.monotonic() - started < 1.5
+        assert processes[0].returncode is not None
+        # Check the group, not just the shell. Ignore terminated zombies waiting
+        # for their parent/init to reap them (common in Linux test containers).
+        ps = await asyncio.create_subprocess_exec(
+            "ps", "-axo", "pgid=,stat=", stdout=asyncio.subprocess.PIPE
+        )
+        output, _ = await ps.communicate()
+        assert not any(
+            int(group) == processes[0].pid and not state.startswith("Z")
+            for group, state in (line.split() for line in output.decode().splitlines())
+        )
+    finally:
+        await backend.stop()
+
+
+@pytest.mark.asyncio
+async def test_direct_process_recovery_wait_is_bounded(monkeypatch):
+    from vikingbot.sandbox.backends import direct
+
+    killed = []
+    monkeypatch.setattr(direct.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(direct, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.02)
+    pending = asyncio.Event()
+    process = SimpleNamespace(pid=123, communicate=AsyncMock(side_effect=pending.wait))
+    started = time.monotonic()
+    await DirectBackend._terminate_process_group(process)
+    assert time.monotonic() - started < 0.5
+    assert killed == [(123, signal.SIGKILL)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 7, None])
+async def test_opensandbox_real_sdk_command_status_contract(exit_code):
+    """Use the installed SDK's real SSE and status clients, not a method stub.
+
+    Run this test with opensandbox==0.1.5 to exercise the declared minimum.
+    Only HTTP transport is replaced; no remote service or command is started.
+    """
+    pytest.importorskip("opensandbox")
+    import httpx
+    from opensandbox.adapters.command_adapter import CommandsAdapter
+    from opensandbox.config import ConnectionConfig
+    from opensandbox.models.sandboxes import SandboxEndpoint
+
+    requests = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path == "/command":
+            events = [
+                {"type": "init", "text": "cmd-1", "timestamp": 1},
+                {"type": "stdout", "text": "done", "timestamp": 2},
+                {"type": "execution_complete", "timestamp": 3, "execution_time": 1},
+            ]
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text="".join(f"data: {json.dumps(event)}\n\n" for event in events),
+            )
+        assert request.method == "GET" and request.url.path == "/command/status/cmd-1"
+        return httpx.Response(200, json={"id": "cmd-1", "running": False, "exit_code": exit_code})
+
+    transport = httpx.MockTransport(respond)
+    adapter = CommandsAdapter(
+        ConnectionConfig(transport=transport), SandboxEndpoint(endpoint="sdk.test")
+    )
+    backend = object.__new__(OpenSandboxBackend)
+    backend._sandbox = SimpleNamespace(commands=adapter)
+    try:
+        result = await backend.execute_result("echo done")
+        assert result.output.startswith("done")
+        assert result.exit_code == exit_code
+        assert result.success is (exit_code == 0)
+        assert requests == [("POST", "/command"), ("GET", "/command/status/cmd-1")]
+    finally:
+        await adapter._httpx_client.aclose()
+        await adapter._sse_client.aclose()
+        await transport.aclose()
 
 
 @pytest.mark.asyncio
