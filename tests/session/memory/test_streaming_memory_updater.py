@@ -7,7 +7,7 @@ import asyncio
 import json
 import re
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,10 +17,12 @@ from openviking.server.identity import RequestContext, Role
 from openviking.session.memory.dataclass import (
     MemoryField,
     MemoryFile,
+    MemoryOperationSkipCode,
     MemoryOperationSource,
     MemoryTypeSchema,
     ResolvedOperation,
     ResolvedOperations,
+    SkippedMemoryOperation,
     StoredLink,
 )
 from openviking.session.memory.memory_type_registry import MemoryTypeRegistry
@@ -33,11 +35,14 @@ from openviking.session.memory.streaming_memory_updater import (
     StreamingMemoryUpdater,
     StreamingMemoryUpdaterConfig,
     StreamingMemoryUpdateResult,
+    _compact_case_proposal_context,
     build_candidate_merge_proposals,
     build_memory_merge_proposals,
     classify_memory_merge_mode,
     create_memory_merge_plan_model,
     enforce_merge_group_peer_id,
+    filter_valid_links,
+    get_streaming_memory_updater,
     merge_memory_operations,
     merge_one_memory_type_operations,
     operation_to_patch,
@@ -48,7 +53,6 @@ from openviking.session.memory.streaming_memory_updater import (
     validate_memory_merge_plan,
 )
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
-from openviking.storage.transaction.lock_handle import LockHandle
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -83,16 +87,65 @@ class InMemoryVikingFS:
             raise FileNotFoundError(uri)
         return {"isDir": False}
 
-    async def write_file(self, uri: str, content: str, ctx=None, lock_handle=None):
-        del lock_handle
+    async def write_file(
+        self,
+        uri: str,
+        content: str,
+        ctx=None,
+        lock_handle=None,
+        lease_ref=None,
+    ):
+        del lock_handle, lease_ref
         uri = _canonical_user_uri(uri, ctx)
         self.files[uri] = content
         self.writes.append((uri, content, ctx))
 
-    async def rm(self, uri: str, recursive: bool = False, ctx=None, lock_handle=None):
-        del recursive, lock_handle
+    async def rm(
+        self,
+        uri: str,
+        recursive: bool = False,
+        ctx=None,
+        lock_handle=None,
+        lease_ref=None,
+    ):
+        del recursive, lock_handle, lease_ref
         uri = _canonical_user_uri(uri, ctx)
         self.files.pop(uri, None)
+
+
+class RecordingPathlockClient:
+    def __init__(self, events: list[tuple]):
+        self.events = events
+
+    async def pathlock_acquire_exact_batch(self, paths, timeout_secs=0.0):
+        lease_number = len([event for event in self.events if event[0] == "acquire"]) + 1
+        lease_ref = (
+            "memory-batch-lease" if lease_number == 1 else f"memory-batch-lease-{lease_number}"
+        )
+        lease = {"lease_ref": lease_ref}
+        self.events.append(("acquire", tuple(paths), timeout_secs))
+        return lease
+
+    async def pathlock_release(self, lease):
+        self.events.append(("release", lease))
+
+
+class PathlockedInMemoryVikingFS(InMemoryVikingFS):
+    def __init__(self, files: dict[str, str] | None = None):
+        super().__init__(files)
+        self.events: list[tuple] = []
+        self._async_agfs = RecordingPathlockClient(self.events)
+
+    def _uri_to_path(self, uri: str, ctx=None) -> str:
+        return "/" + _canonical_user_uri(uri, ctx).removeprefix("viking://")
+
+    async def write_file(self, uri: str, content: str, ctx=None, lease_ref=None):
+        self.events.append(("write", uri, lease_ref))
+        return await super().write_file(uri, content, ctx=ctx, lease_ref=lease_ref)
+
+    async def _delete_from_vector_store(self, uris, ctx=None):
+        del ctx
+        self.events.append(("vector_delete", tuple(uris)))
 
 
 def _canonical_user_uri(uri: str, ctx=None) -> str:
@@ -104,28 +157,6 @@ def _canonical_user_uri(uri: str, ctx=None) -> str:
 
 def _ctx() -> RequestContext:
     return RequestContext(user=UserIdentifier.the_default_user("u"), role=Role.ROOT)
-
-
-def _install_test_lock_manager(monkeypatch) -> None:
-    handles: dict[str, LockHandle] = {}
-    manager = MagicMock()
-
-    def create_handle() -> LockHandle:
-        handle = LockHandle()
-        handles[handle.id] = handle
-        return handle
-
-    async def release(handle: LockHandle) -> None:
-        handles.pop(handle.id, None)
-
-    manager.create_handle.side_effect = create_handle
-    manager.get_handle.side_effect = handles.get
-    manager.acquire_tree_batch = AsyncMock(return_value=True)
-    manager.release = AsyncMock(side_effect=release)
-    monkeypatch.setattr(
-        "openviking.storage.transaction.get_lock_manager",
-        lambda: manager,
-    )
 
 
 def _registry() -> MemoryTypeRegistry:
@@ -218,6 +249,41 @@ def _note_op_with_source(name: str, extraction_id: str) -> ResolvedOperation:
     return op
 
 
+def _note_update_op(name: str) -> ResolvedOperation:
+    uri = f"viking://user/u/memories/notes/{name}.md"
+    old_file = MemoryFile(
+        uri=uri,
+        content=f"old {name}",
+        memory_type="notes",
+        extra_fields={"note_name": name},
+    )
+    return ResolvedOperation(
+        old_memory_file_content=old_file,
+        memory_type="notes",
+        uris=[uri],
+        memory_fields={
+            "note_name": name,
+            "content": StrPatch(
+                blocks=[
+                    SearchReplaceBlock(
+                        search=f"old {name}",
+                        replace=f"new {name}",
+                    )
+                ]
+            ),
+        },
+    )
+
+
+def _note_delete_file(name: str) -> MemoryFile:
+    return MemoryFile(
+        uri=f"viking://user/u/memories/notes/{name}.md",
+        content=f"delete {name}",
+        memory_type="notes",
+        extra_fields={"note_name": name},
+    )
+
+
 def _peer_note_op(name: str, peer_id: str) -> ResolvedOperation:
     op = _note_op(name)
     op.memory_fields["peer_id"] = peer_id
@@ -295,7 +361,8 @@ def _install_fake_merge_vlm(monkeypatch, *, responder=None):
     return fake_vlm
 
 
-def test_operation_to_patch_omits_raw_operation_metadata():
+@pytest.mark.asyncio
+async def test_operation_to_patch_omits_raw_operation_metadata():
     schema = _registry().get("notes")
     old_file = MemoryFile(
         uri="viking://user/u/memories/notes/note.md",
@@ -315,29 +382,77 @@ def test_operation_to_patch_omits_raw_operation_metadata():
         },
     )
 
-    patch = operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
+    patch = await operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
 
     assert patch.metadata == {}
     assert patch.after_file.content == "new content"
 
 
-def test_operation_to_patch_raises_when_after_file_preview_rendering_fails(monkeypatch):
-    schema = _registry().get("notes")
-    op = _note_op("note_render_failure")
-
-    def fail_write(*args, **kwargs):
-        raise RuntimeError("template render failed")
-
+@pytest.mark.asyncio
+async def test_replacement_reacquires_persisted_relation_locks_before_writes(monkeypatch):
+    deleted_uri = "viking://user/u/memories/notes/deleted.md"
+    neighbor_uri = "viking://user/u/memories/notes/neighbor.md"
+    replacement = _note_op("replacement")
+    deleted_file = MemoryFile(
+        uri=deleted_uri,
+        content="deleted content",
+        memory_type="notes",
+        extra_fields={"note_name": "deleted"},
+        links=[
+            {
+                "from_uri": deleted_uri,
+                "to_uri": neighbor_uri,
+                "link_type": "related_to",
+            }
+        ],
+    )
+    neighbor_file = MemoryFile(
+        uri=neighbor_uri,
+        content="neighbor content",
+        memory_type="notes",
+        extra_fields={"note_name": "neighbor"},
+    )
+    fs = PathlockedInMemoryVikingFS(
+        {
+            deleted_uri: MemoryFileUtils.write(deleted_file),
+            neighbor_uri: MemoryFileUtils.write(neighbor_file),
+        }
+    )
+    fs.search = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "openviking.session.memory.streaming_memory_updater.MemoryFileUtils.write",
-        fail_write,
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+    operations = ResolvedOperations(
+        upsert_operations=[replacement],
+        delete_file_contents=[deleted_file.model_copy(update={"links": []})],
+        errors=[],
+        delete_replacements={deleted_uri: replacement.uris[0]},
+    )
+    messages = [Message(id="m1", role="user", parts=[TextPart("replace note")])]
+
+    await StreamingMemoryUpdater(registry=_registry())._apply_operations(
+        operations=operations,
+        request=MemoryUpdateRequest(operations=operations, messages=messages, ctx=_ctx()),
+        messages=messages,
     )
 
-    with pytest.raises(RuntimeError, match="template render failed"):
-        operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
+    acquires = [event for event in fs.events if event[0] == "acquire"]
+    writes = [event for event in fs.events if event[0] == "write"]
+    assert len(acquires) == 2
+    assert "/user/u/memories/notes/neighbor.md" not in acquires[0][1]
+    assert "/user/u/memories/notes/neighbor.md" in acquires[1][1]
+    assert writes
+    assert all(event[2] == {"lease_ref": "memory-batch-lease-2"} for event in writes)
+    assert fs.events.index(acquires[1]) < min(fs.events.index(event) for event in writes)
 
 
-def test_operation_to_patch_skips_failed_field_preview_update():
+@pytest.mark.asyncio
+async def test_operation_to_patch_skips_failed_field_preview_update():
     schema = MemoryTypeSchema(
         memory_type="notes",
         description="note memory",
@@ -386,14 +501,15 @@ def test_operation_to_patch_skips_failed_field_preview_update():
         },
     )
 
-    patch = operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
+    patch = await operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
 
     assert patch.after_file.content == "new content"
     assert patch.after_file.extra_fields["summary"] == "old summary"
     assert isinstance(op.memory_fields["summary"], StrPatch)
 
 
-def test_operation_to_patch_preserves_hidden_feedback_stats_metadata():
+@pytest.mark.asyncio
+async def test_operation_to_patch_preserves_hidden_feedback_stats_metadata():
     schema = _registry().get("notes")
     old_file = MemoryFile(
         uri="viking://user/u/memories/notes/note.md",
@@ -418,7 +534,7 @@ def test_operation_to_patch_preserves_hidden_feedback_stats_metadata():
         },
     )
 
-    patch = operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
+    patch = await operation_to_patch(op, schema=schema, extract_context=ExtractContext([]))
 
     assert patch.after_file.content == "new content"
     assert patch.after_file.extra_fields["feedback_stats"] == {
@@ -430,8 +546,7 @@ def test_operation_to_patch_preserves_hidden_feedback_stats_metadata():
 
 @pytest.mark.asyncio
 async def test_streaming_memory_updater_submit_applies_fast_path(monkeypatch):
-    _install_test_lock_manager(monkeypatch)
-    fs = InMemoryVikingFS({})
+    fs = PathlockedInMemoryVikingFS({})
     fs.search = AsyncMock(return_value=[])
     monkeypatch.setattr(
         "openviking.session.memory.streaming_memory_updater.get_viking_fs",
@@ -464,16 +579,228 @@ async def test_streaming_memory_updater_submit_applies_fast_path(monkeypatch):
 
     assert result.request_count == 1
     assert result.operations.upsert_operations[0].memory_type == "cases"
-    assert result.apply_result.written_uris == ["viking://user/u/memories/cases/重复预订处理.md"]
+    written_uri = "viking://user/u/memories/cases/重复预订处理.md"
+    assert result.apply_result.written_uris == [written_uri]
     assert fs.writes
-    written_uri, written_content, _ = fs.writes[0]
-    assert written_uri.endswith("/memories/cases/重复预订处理.md")
+    _, written_content, _ = fs.writes[0]
     assert "重复预订处理" in written_content
+    lease = {"lease_ref": "memory-batch-lease"}
+    assert fs.events[0] == (
+        "acquire",
+        (
+            "/user/u/memories/cases/.overview.md",
+            "/user/u/memories/cases/重复预订处理.md",
+        ),
+        300.0,
+    )
+    assert ("write", written_uri, lease) in fs.events
+    assert fs.events[-1] == ("release", lease)
+
+
+@pytest.mark.asyncio
+async def test_streaming_experience_archive_deletes_vectors_after_file_lock_release(monkeypatch):
+    uri = "viking://user/u/memories/experiences/retired.md"
+    case_uri = "viking://user/u/memories/cases/late_case.md"
+    link = StoredLink(from_uri=case_uri, to_uri=uri, link_type="related_to").model_dump()
+    old_file = MemoryFile(
+        uri=uri,
+        content="full retained body",
+        memory_type="experiences",
+        extra_fields={
+            "memory_type": "experiences",
+            "experience_name": "retired",
+            "status": "promoted",
+            "version": 7,
+        },
+    )
+    current_file = old_file.model_copy(deep=True)
+    current_file.backlinks = [link]
+    case_file = MemoryFile(
+        uri=case_uri,
+        content="case body",
+        links=[link],
+        memory_type="cases",
+        extra_fields={"memory_type": "cases", "case_name": "late_case", "version": 3},
+    )
+    fs = PathlockedInMemoryVikingFS(
+        {
+            uri: MemoryFileUtils.write(current_file),
+            case_uri: MemoryFileUtils.write(case_file),
+        }
+    )
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+    registry = _registry()
+    registry.register(
+        MemoryTypeSchema(
+            memory_type="experiences",
+            description="experience memory",
+            directory="viking://user/{{ user_space }}/memories/experiences",
+            filename_template="{{ experience_name }}.md",
+            content_template="{{ content }}",
+            operation_mode="upsert",
+            fields=[
+                MemoryField(
+                    name="experience_name",
+                    field_type=FieldType.STRING,
+                    merge_op=MergeOp.IMMUTABLE,
+                ),
+                MemoryField(
+                    name="status",
+                    field_type=FieldType.STRING,
+                    merge_op=MergeOp.REPLACE,
+                ),
+                MemoryField(
+                    name="content",
+                    field_type=FieldType.STRING,
+                    merge_op=MergeOp.REPLACE,
+                ),
+            ],
+        )
+    )
+    operations = ResolvedOperations(
+        upsert_operations=[],
+        delete_file_contents=[old_file],
+        errors=[],
+    )
+    request = MemoryUpdateRequest(
+        operations=operations,
+        messages=[],
+        ctx=_ctx(),
+    )
+
+    result = await StreamingMemoryUpdater(registry=registry)._apply_operations(
+        operations=operations,
+        request=request,
+        messages=[],
+    )
+
+    archived = MemoryFileUtils.read(fs.files[uri], uri=uri)
+    assert archived.plain_content() == "full retained body"
+    assert archived.extra_fields["status"] == "archived"
+    assert archived.extra_fields["version"] == 8
+    assert result.deleted_uris == []
+    assert result.archived_uris == [uri]
+    updated_case = MemoryFileUtils.read(fs.files[case_uri], uri=case_uri)
+    assert all(item.get("to_uri") != uri for item in updated_case.links)
+    acquire_events = [event for event in fs.events if event[0] == "acquire"]
+    assert acquire_events == [
+        (
+            "acquire",
+            (
+                "/user/u/memories/experiences/.overview.md",
+                "/user/u/memories/experiences/retired.md",
+            ),
+            300.0,
+        ),
+        (
+            "acquire",
+            (
+                "/user/u/memories/cases/late_case.md",
+                "/user/u/memories/experiences/.overview.md",
+                "/user/u/memories/experiences/retired.md",
+            ),
+            300.0,
+        ),
+    ]
+    release_index = max(index for index, event in enumerate(fs.events) if event[0] == "release")
+    vector_delete_index = next(
+        index for index, event in enumerate(fs.events) if event[0] == "vector_delete"
+    )
+    assert release_index < vector_delete_index
+
+
+@pytest.mark.asyncio
+async def test_cached_updater_restores_vectorization_for_tool_and_skill_memories(monkeypatch):
+    fs = InMemoryVikingFS({})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    registry = _registry()
+    for memory_type, name_field in (("tools", "tool_name"), ("skills", "skill_name")):
+        registry.register(
+            MemoryTypeSchema(
+                memory_type=memory_type,
+                description=f"{memory_type} memory",
+                directory=f"viking://user/{{{{ user_space }}}}/memories/{memory_type}",
+                filename_template=f"{{{{ {name_field} }}}}.md",
+                operation_mode="add_only",
+                content_template=f"{memory_type}: {{{{ {name_field} }}}}",
+                fields=[
+                    MemoryField(
+                        name=name_field,
+                        field_type=FieldType.STRING,
+                        merge_op=MergeOp.IMMUTABLE,
+                    )
+                ],
+            )
+        )
+
+    key = ("cached-updater-vectorization", id(fs))
+    degraded = await get_streaming_memory_updater(
+        key=key,
+        registry=registry,
+        vikingdb=None,
+    )
+    vikingdb = AsyncMock()
+    vikingdb.enqueue_embedding_msg.return_value = True
+    restored = await get_streaming_memory_updater(
+        key=key,
+        registry=registry,
+        vikingdb=vikingdb,
+    )
+
+    assert restored is degraded
+    assert restored.vikingdb is vikingdb
+
+    operations = []
+    for memory_type, name_field, name in (
+        ("tools", "tool_name", "terminal"),
+        ("skills", "skill_name", "analyze_code"),
+    ):
+        operations.append(
+            ResolvedOperation(
+                old_memory_file_content=None,
+                memory_type=memory_type,
+                uris=[f"viking://user/u/memories/{memory_type}/{name}.md"],
+                memory_fields={name_field: name},
+            )
+        )
+
+    result = await restored.submit(
+        MemoryUpdateRequest(
+            operations=ResolvedOperations(
+                upsert_operations=operations,
+                delete_file_contents=[],
+                errors=[],
+            ),
+            messages=[Message(id="m1", role="user", parts=[TextPart("use tools and skills")])],
+            ctx=_ctx(),
+        )
+    )
+
+    assert sorted(result.apply_result.written_uris) == sorted(
+        operation.uris[0] for operation in operations
+    )
+    assert vikingdb.enqueue_embedding_msg.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_streaming_memory_updater_fast_path_filters_links(monkeypatch):
-    _install_test_lock_manager(monkeypatch)
     fs = InMemoryVikingFS(
         {
             "viking://user/u/memories/events/existing.md": (
@@ -537,6 +864,743 @@ async def test_streaming_memory_updater_fast_path_filters_links(monkeypatch):
     assert len(result.operations.resolved_links) == 1
     assert result.operations.resolved_links[0].to_uri.endswith("/events/existing.md")
     assert result.apply_result.written_uris == [op1.uris[0]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_link_count"),
+    [("archived", 0), ("draft", 0), ("degraded", 0), ("promoted", 1)],
+)
+async def test_filter_valid_links_only_keeps_promoted_experiences_with_cached_reads(
+    monkeypatch,
+    status,
+    expected_link_count,
+):
+    case_uri = "viking://user/u/memories/cases/report.md"
+    experience_uri = "viking://user/u/memories/experiences/retired.md"
+
+    class CountingFS(InMemoryVikingFS):
+        def __init__(self):
+            super().__init__(
+                {
+                    case_uri: MemoryFileUtils.write(
+                        MemoryFile(
+                            uri=case_uri,
+                            content="case",
+                            memory_type="cases",
+                            extra_fields={"memory_type": "cases"},
+                        )
+                    ),
+                    experience_uri: MemoryFileUtils.write(
+                        MemoryFile(
+                            uri=experience_uri,
+                            content=f"{status} experience",
+                            memory_type="experiences",
+                            extra_fields={
+                                "memory_type": "experiences",
+                                "status": status,
+                            },
+                        )
+                    ),
+                }
+            )
+            self.read_counts: dict[str, int] = {}
+
+        async def read_file(self, uri: str, ctx=None):
+            canonical_uri = _canonical_user_uri(uri, ctx)
+            self.read_counts[canonical_uri] = self.read_counts.get(canonical_uri, 0) + 1
+            return await super().read_file(uri, ctx=ctx)
+
+    fs = CountingFS()
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+    link = StoredLink(
+        from_uri=case_uri,
+        to_uri=experience_uri,
+        link_type="related_to",
+        weight=1.0,
+    )
+
+    valid_links = await filter_valid_links(
+        [link],
+        upsert_operations=[],
+        delete_file_contents=[],
+        ctx=_ctx(),
+    )
+
+    assert len(valid_links) == expected_link_count
+    assert fs.read_counts == {case_uri: 1, experience_uri: 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_status", "pending_status", "expected_link_count"),
+    [
+        (None, "promoted", 1),
+        (None, "draft", 0),
+        ("draft", "promoted", 1),
+        ("degraded", "promoted", 1),
+        ("promoted", "draft", 0),
+        ("promoted", "archived", 0),
+    ],
+)
+async def test_filter_valid_links_pre_apply_still_uses_pending_upserts(
+    monkeypatch, stored_status, pending_status, expected_link_count
+):
+    case_uri = "viking://user/u/memories/cases/report.md"
+    experience_uri = "viking://user/u/memories/experiences/rule.md"
+    stored_experience = (
+        MemoryFile(
+            uri=experience_uri,
+            memory_type="experiences",
+            content="experience",
+            extra_fields={"status": stored_status},
+        )
+        if stored_status is not None
+        else None
+    )
+    fs = InMemoryVikingFS(
+        {experience_uri: MemoryFileUtils.write(stored_experience)}
+        if stored_experience is not None
+        else {}
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs", lambda: fs
+    )
+    link = StoredLink(from_uri=case_uri, to_uri=experience_uri, link_type="related_to")
+    pending_operations = [
+        ResolvedOperation(memory_type="cases", uris=[case_uri], memory_fields={}),
+        ResolvedOperation(
+            memory_type="experiences",
+            uris=[experience_uri],
+            memory_fields={"status": pending_status},
+            old_memory_file_content=stored_experience,
+        ),
+    ]
+
+    valid_links = await filter_valid_links(
+        [link],
+        upsert_operations=pending_operations,
+        delete_file_contents=[],
+        ctx=_ctx(),
+    )
+
+    assert len(valid_links) == expected_link_count
+    assert case_uri not in fs.files  # The same-batch Case is not written yet.
+    assert fs.writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_status", "persisted_status", "expected_link_count"),
+    [
+        ("promoted", "draft", 0),
+        ("promoted", "degraded", 0),
+        ("promoted", "archived", 0),
+        ("promoted", None, 0),
+        ("promoted", "unknown", 0),
+        ("draft", "promoted", 1),
+        ("degraded", "promoted", 1),
+        ("archived", "promoted", 1),
+        ("promoted", "promoted", 1),
+    ],
+)
+async def test_post_group_links_recheck_persisted_experience_status_under_endpoint_lease(
+    monkeypatch, operation_status, persisted_status, expected_link_count
+):
+    case_uri = "viking://user/u/memories/cases/report.md"
+    experience_uri = "viking://user/u/memories/experiences/rule.md"
+    case = MemoryFile(uri=case_uri, memory_type="cases", content="case")
+    experience = MemoryFile(
+        uri=experience_uri,
+        memory_type="experiences",
+        content="experience",
+        extra_fields={"status": operation_status},
+    )
+
+    class LeaseCheckedFS(PathlockedInMemoryVikingFS):
+        async def read_file(self, uri, ctx=None):
+            assert self.events[0][0] == "acquire"
+            assert not any(event[0] == "release" for event in self.events)
+            self.events.append(("read", uri))
+            return await super().read_file(uri, ctx=ctx)
+
+    fs = LeaseCheckedFS(
+        {
+            case_uri: MemoryFileUtils.write(case),
+            experience_uri: MemoryFileUtils.write(experience),
+        }
+    )
+    acquire = fs._async_agfs.pathlock_acquire_exact_batch
+
+    async def acquire_after_concurrent_status_update(paths, timeout_secs=0.0):
+        # Feedback wins the lock after group application and before link repair.
+        current = experience.model_copy(deep=True)
+        if persisted_status is None:
+            current.extra_fields.pop("status", None)
+        else:
+            current.extra_fields["status"] = persisted_status
+        fs.files[experience_uri] = MemoryFileUtils.write(current)
+        return await acquire(paths, timeout_secs=timeout_secs)
+
+    fs._async_agfs.pathlock_acquire_exact_batch = acquire_after_concurrent_status_update
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs", lambda: fs
+    )
+    link = StoredLink(from_uri=case_uri, to_uri=experience_uri, link_type="related_to")
+    operations = ResolvedOperations(
+        upsert_operations=[
+            ResolvedOperation(memory_type="cases", uris=[case_uri], memory_fields={}),
+            ResolvedOperation(
+                memory_type="experiences",
+                uris=[experience_uri],
+                old_memory_file_content=experience,
+                memory_fields={"status": operation_status},
+            ),
+        ],
+        delete_file_contents=[],
+        errors=[],
+    )
+    result = StreamingMemoryUpdateResult(
+        operations=operations, apply_result=MemoryUpdateResult(), request_count=1
+    )
+    updater = StreamingMemoryUpdater()
+    await updater._apply_post_group_links(
+        MemoryUpdateRequest(
+            operations=operations.model_copy(update={"resolved_links": [link]}),
+            messages=[],
+            ctx=_ctx(),
+        ),
+        result,
+    )
+
+    persisted_case = MemoryFileUtils.read(fs.files[case_uri], uri=case_uri)
+    persisted_experience = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+    assert len(persisted_case.links) == expected_link_count
+    assert len(persisted_experience.backlinks) == expected_link_count
+    assert persisted_experience.extra_fields.get("status") == persisted_status
+    assert len(result.operations.resolved_links) == expected_link_count
+    assert fs.events[0][1] == tuple(
+        sorted(fs._uri_to_path(uri) for uri in (case_uri, experience_uri))
+    )
+    assert fs.events[-1][0] == "release"
+    writes = [event for event in fs.events if event[0] == "write"]
+    assert len(writes) == 2 * expected_link_count
+    assert all(event[2] == fs.events[-1][1] for event in writes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable_endpoint", ["case", "experience"])
+@pytest.mark.parametrize("failure", ["missing", "read_error", "empty"])
+async def test_post_group_links_do_not_trust_upserts_for_unavailable_endpoints(
+    monkeypatch, unavailable_endpoint, failure
+):
+    case_uri = "viking://user/u/memories/cases/report.md"
+    experience_uri = "viking://user/u/memories/experiences/rule.md"
+    unavailable_uri = case_uri if unavailable_endpoint == "case" else experience_uri
+    files = [
+        MemoryFile(uri=case_uri, memory_type="cases", content="case"),
+        MemoryFile(
+            uri=experience_uri,
+            memory_type="experiences",
+            content="experience",
+            extra_fields={"status": "promoted"},
+        ),
+    ]
+
+    class UnavailableEndpointFS(PathlockedInMemoryVikingFS):
+        async def read_file(self, uri, ctx=None):
+            assert self.events[0][0] == "acquire"
+            assert self.events[-1][0] != "release"
+            if uri == unavailable_uri and failure == "read_error":
+                raise OSError("endpoint temporarily unavailable")
+            return await super().read_file(uri, ctx=ctx)
+
+    fs = UnavailableEndpointFS({file.uri: MemoryFileUtils.write(file) for file in files})
+    if failure == "missing":
+        del fs.files[unavailable_uri]
+    elif failure == "empty":
+        fs.files[unavailable_uri] = ""
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs", lambda: fs
+    )
+    link = StoredLink(from_uri=case_uri, to_uri=experience_uri, link_type="related_to")
+    operations = ResolvedOperations(
+        upsert_operations=[
+            ResolvedOperation(
+                memory_type=file.memory_type,
+                uris=[file.uri],
+                memory_fields=dict(file.extra_fields),
+            )
+            for file in files
+        ],
+        delete_file_contents=[],
+        errors=[],
+    )
+    apply_result = MemoryUpdateResult()
+    apply_result.add_error(unavailable_uri, OSError("group endpoint write failed"))
+    result = StreamingMemoryUpdateResult(
+        operations=operations, apply_result=apply_result, request_count=1
+    )
+
+    await StreamingMemoryUpdater()._apply_post_group_links(
+        MemoryUpdateRequest(
+            operations=operations.model_copy(update={"resolved_links": [link]}),
+            messages=[],
+            ctx=_ctx(),
+        ),
+        result,
+    )
+
+    assert fs.writes == []
+    assert result.operations.resolved_links == []
+    assert result.apply_result.edited_uris == []
+    assert fs.events[-1][0] == "release"
+
+
+def _case_experience_registry() -> MemoryTypeRegistry:
+    registry = _registry()
+    registry.get(
+        "cases"
+    ).content_template = (
+        "{{ task_signature }}\n{% for link in links %}{{ link.to_uri }}\n{% endfor %}"
+    )
+    registry.register(
+        MemoryTypeSchema(
+            memory_type="experiences",
+            description="experience memory",
+            directory="viking://user/{{ user_space }}/memories/experiences",
+            filename_template="{{ name }}.md",
+            operation_mode="upsert",
+            fields=[
+                MemoryField(name="name", field_type=FieldType.STRING, merge_op=MergeOp.IMMUTABLE),
+                MemoryField(name="status", field_type=FieldType.STRING, merge_op=MergeOp.REPLACE),
+            ],
+        )
+    )
+    return registry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["append_only", "direct_apply"])
+@pytest.mark.parametrize("link_source", ["resolved_links", "memory_fields"])
+@pytest.mark.parametrize("persisted_status", ["degraded", "archived", "draft", "promoted"])
+async def test_case_links_use_persisted_status_after_upserts(
+    monkeypatch, entry, link_source, persisted_status
+):
+    case_op = _case_op("status_race")
+    case_uri = case_op.uris[0]
+    experience_uri = "viking://user/u/memories/experiences/status_race.md"
+    experience = MemoryFile(
+        uri=experience_uri,
+        memory_type="experiences",
+        content="experience",
+        extra_fields={"status": "promoted"},
+    )
+    fs = PathlockedInMemoryVikingFS({experience_uri: MemoryFileUtils.write(experience)})
+    acquire = fs._async_agfs.pathlock_acquire_exact_batch
+
+    async def change_status_before_publication(paths, timeout_secs=0.0):
+        if any(event[0] == "release" for event in fs.events):
+            current = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+            current.extra_fields["status"] = persisted_status
+            fs.files[experience_uri] = MemoryFileUtils.write(current)
+        return await acquire(paths, timeout_secs=timeout_secs)
+
+    fs._async_agfs.pathlock_acquire_exact_batch = change_status_before_publication
+    for module in ("memory_updater", "streaming_memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{module}.get_viking_fs", lambda: fs)
+    link = StoredLink(from_uri=case_uri, to_uri=experience_uri, link_type="related_to")
+    if link_source == "memory_fields":
+        case_op.memory_fields["links"] = [link.model_dump()]
+    operations = ResolvedOperations(
+        upsert_operations=[case_op],
+        delete_file_contents=[],
+        errors=[],
+        resolved_links=[link] if link_source == "resolved_links" else [],
+    )
+    request = MemoryUpdateRequest(operations=operations, messages=[], ctx=_ctx())
+    updater = StreamingMemoryUpdater(registry=_case_experience_registry())
+    if entry == "append_only":
+        outcome = await updater.submit(request)
+        operations = outcome.operations
+        result = outcome.apply_result
+    else:
+        result = await updater._apply_operations(
+            operations=operations, request=request, messages=[]
+        )
+
+    expected = int(persisted_status == "promoted")
+    assert result.errors == []
+    assert result.written_uris == [case_uri]
+    case = MemoryFileUtils.read(fs.files[case_uri], uri=case_uri)
+    current = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+    assert len(case.links) == len(current.backlinks) == len(operations.resolved_links) == expected
+    assert (experience_uri in case.content) is bool(expected)
+    # The first Case write must not publish from the stale operation preview.
+    first_case_write = next(content for uri, content, _ in fs.writes if uri == case_uri)
+    assert MemoryFileUtils.read(first_case_write, uri=case_uri).links == []
+    assert fs.events[-1][0] == "release"
+    assert len([event for event in fs.events if event[0] == "acquire"]) == 2
+    if expected and entry == "direct_apply":
+        assert result.files_by_uri[case_uri].links == case.links
+        assert experience_uri not in result.files_by_uri
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_status", [None, "draft", "promoted"])
+@pytest.mark.parametrize("fail_experience_write", [False, True])
+async def test_same_batch_case_links_follow_successful_experience_write(
+    monkeypatch, initial_status, fail_experience_write
+):
+    case_op = _case_op("same_batch")
+    case_uri = case_op.uris[0]
+    experience_uri = "viking://user/u/memories/experiences/same_batch.md"
+    old_experience = (
+        MemoryFile(
+            uri=experience_uri,
+            memory_type="experiences",
+            content="experience",
+            extra_fields={"name": "same_batch", "status": initial_status},
+        )
+        if initial_status is not None
+        else None
+    )
+
+    class FailingExperienceFS(PathlockedInMemoryVikingFS):
+        async def write_file(self, uri, content, ctx=None, lease_ref=None):
+            if uri == experience_uri and fail_experience_write:
+                raise OSError("experience write failed")
+            return await super().write_file(uri, content, ctx=ctx, lease_ref=lease_ref)
+
+    fs = FailingExperienceFS(
+        {experience_uri: MemoryFileUtils.write(old_experience)} if old_experience else {}
+    )
+    for module in ("memory_updater", "streaming_memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{module}.get_viking_fs", lambda: fs)
+    link = StoredLink(from_uri=case_uri, to_uri=experience_uri, link_type="related_to")
+    operations = ResolvedOperations(
+        upsert_operations=[
+            case_op,  # Case runs first: do not publish before the EXP write succeeds.
+            ResolvedOperation(
+                memory_type="experiences",
+                uris=[experience_uri],
+                old_memory_file_content=old_experience,
+                memory_fields={
+                    "name": "same_batch",
+                    "status": "promoted",
+                    "backlinks": [link.model_dump()],
+                },
+            ),
+        ],
+        delete_file_contents=[],
+        errors=[],
+        resolved_links=[link],
+    )
+    request = MemoryUpdateRequest(operations=operations, messages=[], ctx=_ctx())
+    result = await StreamingMemoryUpdater(registry=_case_experience_registry())._apply_operations(
+        operations=operations, request=request, messages=[]
+    )
+
+    expected = int(not fail_experience_write)
+    case = MemoryFileUtils.read(fs.files[case_uri], uri=case_uri)
+    assert len(case.links) == len(operations.resolved_links) == expected
+    assert bool(result.errors) == fail_experience_write
+    if experience_uri in fs.files:
+        current = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+        assert len(current.backlinks) == expected
+    assert (experience_uri in case.content) is bool(expected)
+    assert fs.events[-1][0] == "release"
+
+
+@pytest.mark.asyncio
+async def test_deferred_case_links_use_allocated_add_only_uri(monkeypatch):
+    case_op = _case_op("numbered")
+    original_uri = case_op.uris[0]
+    experience_uri = "viking://user/u/memories/experiences/numbered.md"
+    original_case = MemoryFile(uri=original_uri, memory_type="cases", content="do not change")
+    experience = MemoryFile(
+        uri=experience_uri,
+        memory_type="experiences",
+        content="experience",
+        extra_fields={"status": "promoted"},
+    )
+    fs = PathlockedInMemoryVikingFS(
+        {item.uri: MemoryFileUtils.write(item) for item in (original_case, experience)}
+    )
+    for module in ("memory_updater", "streaming_memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{module}.get_viking_fs", lambda: fs)
+    result = await StreamingMemoryUpdater(registry=_case_experience_registry()).submit(
+        MemoryUpdateRequest(
+            operations=ResolvedOperations(
+                upsert_operations=[case_op],
+                delete_file_contents=[],
+                errors=[],
+                resolved_links=[StoredLink(from_uri=original_uri, to_uri=experience_uri)],
+            ),
+            messages=[],
+            ctx=_ctx(),
+            metadata={"source_extraction_id": "numbered-case-extraction"},
+        )
+    )
+    allocated_uri = result.apply_result.written_uris[0]
+    assert allocated_uri != original_uri
+    assert fs.files[original_uri] == MemoryFileUtils.write(original_case)
+    assert result.operations.resolved_links[0].from_uri == allocated_uri
+    assert MemoryFileUtils.read(fs.files[allocated_uri], uri=allocated_uri).links
+    current = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+    assert current.backlinks[0]["from_uri"] == allocated_uri
+    publication_acquire = [event for event in fs.events if event[0] == "acquire"][-1]
+    assert publication_acquire[1] == tuple(
+        sorted(fs._uri_to_path(uri) for uri in (allocated_uri, experience_uri))
+    )
+    assert result.apply_result.errors == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case_mode", "preallocated"), [("add_only", False), ("add_only", True), ("upsert", False)]
+)
+@pytest.mark.parametrize("link_source", ["resolved_links", "memory_fields"])
+async def test_submit_preserves_case_experience_links_across_apply_groups(
+    monkeypatch, case_mode, preallocated, link_source
+):
+    case_op = _case_op("mixed_group")
+    canonical_uri = case_op.uris[0]
+    if preallocated:
+        case_op.uris = [canonical_uri.removesuffix(".md") + "_2.md"]
+        case_op.add_only_uri_bases = {case_op.uris[0]: canonical_uri}
+    original_uri = case_op.uris[0]
+    experience_uri = "viking://user/u/memories/experiences/mixed_group.md"
+    old_case = MemoryFile(uri=original_uri, memory_type="cases", content="existing case")
+    fs = PathlockedInMemoryVikingFS(
+        {original_uri: MemoryFileUtils.write(old_case)} if case_mode == "add_only" else {}
+    )
+    if preallocated:
+        fs.files[canonical_uri] = MemoryFileUtils.write(
+            old_case.model_copy(update={"uri": canonical_uri})
+        )
+    for module in ("memory_updater", "streaming_memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{module}.get_viking_fs", lambda: fs)
+    registry = _case_experience_registry()
+    registry.get("cases").operation_mode = case_mode
+    updater = StreamingMemoryUpdater(
+        registry=registry,
+        config=StreamingMemoryUpdaterConfig(
+            max_wait_seconds=0.01, timer_check_interval_seconds=0.01
+        ),
+    )
+
+    async def merge_without_model(self, requests):
+        # Exercise the real group scheduling, apply, and post-group publication
+        # without involving a model in this ordering regression.
+        return ResolvedOperations(
+            upsert_operations=[
+                op for request in requests for op in request.operations.upsert_operations
+            ],
+            delete_file_contents=[],
+            errors=[],
+            resolved_links=[],
+        )
+
+    monkeypatch.setattr(StreamingMemoryUpdater, "_merge_requests", merge_without_model)
+    link = StoredLink(from_uri=original_uri, to_uri=experience_uri)
+    if link_source == "memory_fields":
+        case_op.memory_fields["links"] = [link.model_dump()]
+    result = await updater.submit(
+        MemoryUpdateRequest(
+            operations=ResolvedOperations(
+                upsert_operations=[
+                    case_op,
+                    ResolvedOperation(
+                        memory_type="experiences",
+                        uris=[experience_uri],
+                        memory_fields={"name": "mixed_group", "status": "promoted"},
+                    ),
+                ],
+                delete_file_contents=[],
+                errors=[],
+                resolved_links=[link] if link_source == "resolved_links" else [],
+            ),
+            messages=[],
+            ctx=_ctx(),
+            metadata={"source_extraction_id": "mixed-group-extraction"},
+        )
+    )
+    await updater.close()
+    case_uri = next(uri for uri in result.apply_result.written_uris if "/cases/" in uri)
+    if case_mode == "add_only":
+        assert case_uri != original_uri
+        assert fs.files[original_uri] == MemoryFileUtils.write(old_case)
+    case = MemoryFileUtils.read(fs.files[case_uri], uri=case_uri)
+    experience = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+    assert case.links[0]["to_uri"] == experience_uri
+    assert experience.backlinks[0]["from_uri"] == case_uri
+    assert result.operations.resolved_links[0].from_uri == case_uri
+    assert experience_uri in case.content
+    assert result.apply_result.errors == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["direct_apply", "mixed_submit"])
+@pytest.mark.parametrize(("occupied", "proposal_count"), [(1, 2), (2, 3)])
+async def test_allocation_remaps_each_case_once_without_following_other_proposal_names(
+    monkeypatch, entry, occupied, proposal_count
+):
+    canonical_uri = "viking://user/u/memories/cases/overlapping.md"
+    experience_uris = [
+        f"viking://user/u/memories/experiences/overlapping_{ordinal}.md"
+        for ordinal in range(1, proposal_count + 1)
+    ]
+
+    def numbered_uri(ordinal):
+        return (
+            canonical_uri if ordinal == 1 else canonical_uri.removesuffix(".md") + f"_{ordinal}.md"
+        )
+
+    files = {
+        numbered_uri(ordinal): MemoryFileUtils.write(
+            MemoryFile(
+                uri=numbered_uri(ordinal), memory_type="cases", content=f"old case {ordinal}"
+            )
+        )
+        for ordinal in range(1, occupied + 1)
+    }
+    fs = PathlockedInMemoryVikingFS(files)
+    for module in ("memory_updater", "streaming_memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{module}.get_viking_fs", lambda: fs)
+    case_ops = []
+    for ordinal in range(1, proposal_count + 1):
+        op = _case_op(f"overlapping_{ordinal}")
+        op.uris = [numbered_uri(ordinal)]
+        op.add_only_uri_bases = {op.uris[0]: canonical_uri}
+        case_ops.append(op)
+    operations = ResolvedOperations(
+        upsert_operations=case_ops
+        + [
+            ResolvedOperation(
+                memory_type="experiences",
+                uris=[experience_uri],
+                memory_fields={"name": f"overlapping_{ordinal}", "status": "promoted"},
+            )
+            for ordinal, experience_uri in enumerate(experience_uris, start=1)
+        ],
+        delete_file_contents=[],
+        errors=[],
+        resolved_links=[
+            StoredLink(from_uri=op.uris[0], to_uri=experience_uri)
+            for op, experience_uri in zip(case_ops, experience_uris, strict=True)
+        ],
+    )
+    request = MemoryUpdateRequest(
+        operations=operations,
+        messages=[],
+        ctx=_ctx(),
+        metadata={"source_extraction_id": "overlapping-allocation"},
+    )
+    updater = StreamingMemoryUpdater(
+        registry=_case_experience_registry(),
+        config=StreamingMemoryUpdaterConfig(
+            max_wait_seconds=0.01, timer_check_interval_seconds=0.01
+        ),
+    )
+    if entry == "mixed_submit":
+
+        async def merge_without_model(self, requests):
+            return ResolvedOperations(
+                upsert_operations=[
+                    op for item in requests for op in item.operations.upsert_operations
+                ],
+                delete_file_contents=[],
+                errors=[],
+            )
+
+        monkeypatch.setattr(StreamingMemoryUpdater, "_merge_requests", merge_without_model)
+        outcome = await updater.submit(request)
+        operations = outcome.operations
+        result = outcome.apply_result
+        await updater.close()
+    else:
+        result = await updater._apply_operations(
+            operations=operations, request=request, messages=[]
+        )
+
+    expected_case_uris = {
+        numbered_uri(ordinal) for ordinal in range(occupied + 1, occupied + proposal_count + 1)
+    }
+    assert set(result.written_uris) == expected_case_uris | set(experience_uris)
+    expected_relations = {
+        (numbered_uri(occupied + ordinal), experience_uri)
+        for ordinal, experience_uri in enumerate(experience_uris, start=1)
+    }
+    assert {
+        (link.from_uri, link.to_uri) for link in operations.resolved_links
+    } == expected_relations
+    for case_uri, experience_uri in expected_relations:
+        experience = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+        assert [link["from_uri"] for link in experience.backlinks] == [case_uri]
+        case = MemoryFileUtils.read(fs.files[case_uri], uri=case_uri)
+        assert [link["to_uri"] for link in case.links] == [experience_uri]
+    for uri, content in files.items():
+        assert fs.files[uri] == content
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_endpoint", ["case", "experience"])
+async def test_case_link_publication_reports_partial_failure_without_dangling_forward_link(
+    monkeypatch, failing_endpoint
+):
+    case_uri = "viking://user/u/memories/cases/publication.md"
+    experience_uri = "viking://user/u/memories/experiences/publication.md"
+    failing_uri = case_uri if failing_endpoint == "case" else experience_uri
+
+    class FailingLinkFS(PathlockedInMemoryVikingFS):
+        async def write_file(self, uri, content, ctx=None, lease_ref=None):
+            if uri == failing_uri:
+                raise OSError("link publication failed")
+            return await super().write_file(uri, content, ctx=ctx, lease_ref=lease_ref)
+
+    fs = FailingLinkFS(
+        {
+            item.uri: MemoryFileUtils.write(item)
+            for item in (
+                MemoryFile(uri=case_uri, memory_type="cases", content="case"),
+                MemoryFile(
+                    uri=experience_uri,
+                    memory_type="experiences",
+                    content="experience",
+                    extra_fields={"status": "promoted"},
+                ),
+            )
+        }
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs", lambda: fs
+    )
+    result = StreamingMemoryUpdateResult(
+        operations=ResolvedOperations(upsert_operations=[], delete_file_contents=[], errors=[]),
+        apply_result=MemoryUpdateResult(),
+        request_count=1,
+    )
+    await StreamingMemoryUpdater(registry=_case_experience_registry())._apply_post_group_links(
+        MemoryUpdateRequest(
+            operations=result.operations.model_copy(
+                update={"resolved_links": [StoredLink(from_uri=case_uri, to_uri=experience_uri)]}
+            ),
+            messages=[],
+            ctx=_ctx(),
+        ),
+        result,
+    )
+    assert MemoryFileUtils.read(fs.files[case_uri], uri=case_uri).links == []
+    experience = MemoryFileUtils.read(fs.files[experience_uri], uri=experience_uri)
+    assert len(experience.backlinks) == int(failing_endpoint == "case")
+    assert result.operations.resolved_links == []
+    assert result.apply_result.errors[0][0] == failing_uri
+    assert fs.events[-1][0] == "release"
 
 
 @pytest.mark.asyncio
@@ -767,6 +1831,165 @@ async def test_streaming_memory_updater_bisects_merge_failure_before_apply(monke
     assert len(applied_uris) == len(good_uris)
 
 
+@pytest.mark.asyncio
+async def test_merge_requests_skips_patch_merge_for_same_session(monkeypatch):
+    merge_mock = AsyncMock()
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.merge_memory_operations",
+        merge_mock,
+    )
+    updater = StreamingMemoryUpdater(registry=_registry())
+
+    def make_request(suffix: str, extraction_id: str) -> MemoryUpdateRequest:
+        return MemoryUpdateRequest(
+            operations=ResolvedOperations(
+                upsert_operations=[
+                    _note_op(f"add_{suffix}"),
+                    _note_update_op(f"update_{suffix}"),
+                ],
+                delete_file_contents=[_note_delete_file(f"delete_{suffix}")],
+                errors=[],
+            ),
+            messages=[],
+            ctx=_ctx(),
+            metadata={
+                "session_id": "same-session",
+                "source_extraction_id": extraction_id,
+            },
+        )
+
+    merged = await updater._merge_requests(
+        [
+            make_request("a", "extract-a"),
+            make_request("b", "extract-b"),
+        ]
+    )
+
+    merge_mock.assert_not_awaited()
+    assert len(merged.upsert_operations) == 4
+    assert len(merged.delete_file_contents) == 2
+
+
+@pytest.mark.asyncio
+async def test_merge_requests_prepares_same_session_case_without_merging_notes():
+    updater = StreamingMemoryUpdater(registry=_registry())
+    request = MemoryUpdateRequest(
+        operations=ResolvedOperations(
+            upsert_operations=[_case_op("prepared_case"), _note_op("direct_note")],
+            delete_file_contents=[],
+            errors=[],
+        ),
+        messages=[],
+        ctx=_ctx(),
+        metadata={
+            "session_id": "same-session",
+            "source_extraction_id": "extract-case",
+        },
+    )
+    request.operations.upsert_operations[0].source = MemoryOperationSource(
+        session_id="same-session",
+        extraction_id="extract-case",
+    )
+
+    merged = await updater._merge_requests([request])
+
+    operations_by_type = {
+        operation.memory_type: operation for operation in merged.upsert_operations
+    }
+    case_fields = operations_by_type["cases"].memory_fields
+    assert case_fields["case_status"] == "draft"
+    assert case_fields["source_count"] == 1
+    assert case_fields["last_compacted_source_count"] == 0
+    assert case_fields["last_compacted_version"] == 0
+    assert "case_identity" in case_fields
+    assert operations_by_type["notes"].memory_fields == _note_op("direct_note").memory_fields
+
+
+@pytest.mark.asyncio
+async def test_merge_requests_merges_cross_session_operation_kinds_in_parallel(monkeypatch):
+    entered: set[str] = set()
+    all_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_merge_memory_operations(**kwargs):
+        operations = kwargs["operations"]
+        if operations.delete_file_contents:
+            kind = "delete"
+            assert not operations.upsert_operations
+        elif all(op.old_memory_file_content is None for op in operations.upsert_operations):
+            kind = "add"
+        else:
+            kind = "update"
+            assert all(
+                op.old_memory_file_content is not None for op in operations.upsert_operations
+            )
+        assert kwargs["force_merge"] is True
+        entered.add(kind)
+        if len(entered) == 3:
+            all_entered.set()
+        await release.wait()
+        return operations
+
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.merge_memory_operations",
+        fake_merge_memory_operations,
+    )
+    updater = StreamingMemoryUpdater(registry=_registry())
+
+    def make_request(suffix: str, session_id: str) -> MemoryUpdateRequest:
+        return MemoryUpdateRequest(
+            operations=ResolvedOperations(
+                upsert_operations=[
+                    _note_op(f"add_{suffix}"),
+                    _note_update_op(f"update_{suffix}"),
+                ],
+                delete_file_contents=[_note_delete_file(f"delete_{suffix}")],
+                errors=[],
+            ),
+            messages=[],
+            ctx=_ctx(),
+            metadata={"session_id": session_id},
+        )
+
+    merge_task = asyncio.create_task(
+        updater._merge_requests(
+            [
+                make_request("a", "session-a"),
+                make_request("b", "session-b"),
+            ]
+        )
+    )
+    await asyncio.wait_for(all_entered.wait(), timeout=5)
+    assert not merge_task.done()
+    release.set()
+    merged = await asyncio.wait_for(merge_task, timeout=5)
+
+    assert entered == {"add", "update", "delete"}
+    assert len(merged.upsert_operations) == 4
+    assert len(merged.delete_file_contents) == 2
+
+
+@pytest.mark.asyncio
+async def test_merge_requests_rejects_uri_conflicts_between_operation_kinds():
+    updater = StreamingMemoryUpdater(registry=_registry())
+    request = MemoryUpdateRequest(
+        operations=ResolvedOperations(
+            upsert_operations=[_note_op("conflict")],
+            delete_file_contents=[_note_delete_file("conflict")],
+            errors=[],
+        ),
+        messages=[],
+        ctx=_ctx(),
+        metadata={"session_id": "session-a"},
+    )
+
+    merged = await updater._merge_requests([request])
+
+    assert merged.upsert_operations == []
+    assert merged.delete_file_contents == []
+    assert "Conflicting add/update/delete results" in merged.errors[0]
+
+
 def test_scope_memory_update_result_to_submitter_filters_shared_batch_by_source():
     from openviking.session.memory.streaming_memory_updater import (
         scope_memory_update_result_to_submitter,
@@ -777,6 +2000,28 @@ def test_scope_memory_update_result_to_submitter_filters_shared_batch_by_source(
     apply_result = MemoryUpdateResult()
     apply_result.add_written(op_a.uris[0])
     apply_result.add_written(op_b.uris[0])
+    apply_result.add_skipped(
+        SkippedMemoryOperation(
+            memory_type="preferences",
+            reason_code=MemoryOperationSkipCode.PEER_NOT_ALLOWED,
+            reason="Target peer is outside the allowed memory scope",
+            source=MemoryOperationSource(
+                extraction_id="extract_a",
+                session_id="session_a",
+            ),
+        )
+    )
+    apply_result.add_skipped(
+        SkippedMemoryOperation(
+            memory_type="preferences",
+            reason_code=MemoryOperationSkipCode.PEER_MEMORY_DISABLED,
+            reason="Peer memory writes are disabled",
+            source=MemoryOperationSource(
+                extraction_id="extract_b",
+                session_id="session_a",
+            ),
+        )
+    )
     batch_result = StreamingMemoryUpdateResult(
         operations=ResolvedOperations(
             upsert_operations=[op_a, op_b],
@@ -808,6 +2053,10 @@ def test_scope_memory_update_result_to_submitter_filters_shared_batch_by_source(
     assert scoped.metadata["batch_request_count"] == 2
     assert scoped.metadata["scoped_to_source_extraction_id"] == "extract_a"
     assert scoped.apply_result.written_uris == [op_a.uris[0]]
+    assert len(scoped.apply_result.skipped_operations) == 1
+    assert scoped.apply_result.skipped_operations[0].reason_code == (
+        MemoryOperationSkipCode.PEER_NOT_ALLOWED
+    )
     assert scoped.operations.upsert_operations == [op_a]
     assert scoped.operations.link_replacements == {
         "viking://user/u/memories/cases/old_a.md": op_a.uris[0]
@@ -853,6 +2102,38 @@ def test_split_request_by_merge_group_groups_by_peer_and_memory_type():
         0,
         0,
     ]
+
+
+def test_split_request_keeps_unresolved_upserts_separate_from_delete_groups():
+    replacement = _note_op("replacement")
+    unresolved = _note_op("skipped")
+    unresolved.uris = []
+    old_file = _note_delete_file("old")
+    request = MemoryUpdateRequest(
+        operations=ResolvedOperations(
+            upsert_operations=[replacement, unresolved],
+            delete_file_contents=[old_file],
+            errors=[],
+            delete_replacements={old_file.uri: replacement.uris[0]},
+        ),
+        messages=[],
+        ctx=_ctx(),
+    )
+
+    grouped = split_request_by_merge_group(request)
+
+    assert len(grouped) == 2
+    replacement_key, replacement_request = grouped[0]
+    assert replacement_key == MemoryMergeGroupKey(peer_id=None, memory_type="notes")
+    assert replacement_request.operations.upsert_operations == [replacement]
+    assert replacement_request.operations.delete_file_contents == [old_file]
+    assert replacement_request.operations.delete_replacements == {old_file.uri: replacement.uris[0]}
+
+    unresolved_key, unresolved_request = grouped[1]
+    assert unresolved_key == MemoryMergeGroupKey(peer_id=None, memory_type="")
+    assert unresolved_request.operations.upsert_operations == [unresolved]
+    assert unresolved_request.operations.delete_file_contents == []
+    assert unresolved_request.operations.delete_replacements == {}
 
 
 def test_split_request_by_merge_group_infers_peer_from_uri_when_field_missing():
@@ -1092,7 +2373,7 @@ async def test_streaming_memory_updater_submit_waits_for_all_merge_groups(monkey
 
 @pytest.mark.asyncio
 async def test_streaming_memory_updater_applies_cross_group_links_after_all_groups(monkeypatch):
-    fs = InMemoryVikingFS({})
+    fs = PathlockedInMemoryVikingFS({})
     fs.search = AsyncMock(return_value=[])
     monkeypatch.setattr(
         "openviking.session.memory.streaming_memory_updater.get_viking_fs",
@@ -1140,19 +2421,34 @@ async def test_streaming_memory_updater_applies_cross_group_links_after_all_grou
     assert len(result.operations.resolved_links) == 1
     assert self_file.links[0]["to_uri"] == peer_op.uris[0]
     assert peer_file.backlinks[0]["from_uri"] == self_op.uris[0]
+    post_link_acquire = [event for event in fs.events if event[0] == "acquire"][-1]
+    assert post_link_acquire[1] == (
+        "/user/u/memories/notes/linked_self.md",
+        "/user/u/peers/web-visitor-alice/memories/notes/linked_peer.md",
+    )
+    post_link_events = fs.events[fs.events.index(post_link_acquire) :]
+    post_link_lease = post_link_events[-1][1]
+    assert post_link_events[-1] == ("release", post_link_lease)
+    assert {event[1] for event in post_link_events if event[0] == "write"} == {
+        self_op.uris[0],
+        peer_op.uris[0],
+    }
+    assert all(event[2] == post_link_lease for event in post_link_events if event[0] == "write")
 
 
-def test_classify_memory_merge_mode_forces_cross_extraction_merge():
+async def test_classify_memory_merge_mode_forces_cross_extraction_merge():
     op1 = _note_op_with_source("note_a", "extract_a")
     op2 = _note_op_with_source("note_b", "extract_b")
 
-    fast_path, reason = classify_memory_merge_mode([op1, op2], schema=_registry().get("notes"))
+    fast_path, reason = await classify_memory_merge_mode(
+        [op1, op2], schema=_registry().get("notes")
+    )
 
     assert fast_path is False
     assert reason == "cross_extraction_batch"
 
 
-def test_classify_memory_merge_mode_treats_noop_str_patch_as_unchanged():
+async def test_classify_memory_merge_mode_treats_noop_str_patch_as_unchanged():
     old_file = MemoryFile(
         uri="viking://user/u/memories/notes/note.md",
         content="old content",
@@ -1171,13 +2467,13 @@ def test_classify_memory_merge_mode_treats_noop_str_patch_as_unchanged():
         },
     )
 
-    fast_path, reason = classify_memory_merge_mode([op], schema=_registry().get("notes"))
+    fast_path, reason = await classify_memory_merge_mode([op], schema=_registry().get("notes"))
 
     assert fast_path is True
     assert reason == "single_existing_content_unchanged"
 
 
-def test_classify_memory_merge_mode_detects_changed_str_patch_after_preview():
+async def test_classify_memory_merge_mode_detects_changed_str_patch_after_preview():
     old_file = MemoryFile(
         uri="viking://user/u/memories/notes/note.md",
         content="old content",
@@ -1196,7 +2492,7 @@ def test_classify_memory_merge_mode_detects_changed_str_patch_after_preview():
         },
     )
 
-    fast_path, reason = classify_memory_merge_mode([op], schema=_registry().get("notes"))
+    fast_path, reason = await classify_memory_merge_mode([op], schema=_registry().get("notes"))
 
     assert fast_path is False
     assert reason == "single_existing_content_changed"
@@ -1255,12 +2551,12 @@ async def test_streaming_memory_updater_persists_source_extraction_id_trace_id_a
     assert "last_update_trace_id" not in read_result
 
 
-def test_render_operation_after_file_content_persists_source_trace_id():
+async def test_render_operation_after_file_content_persists_source_trace_id():
     schema = _registry().get("notes")
     op = _note_op("note_trace")
     op.source = MemoryOperationSource(extraction_id="extract_2", trace_id="trace_2")
 
-    rendered = render_operation_after_file_content(
+    rendered = await render_operation_after_file_content(
         op,
         schema=schema,
         extract_context=ExtractContext([]),
@@ -1268,6 +2564,54 @@ def test_render_operation_after_file_content_persists_source_trace_id():
 
     assert '"source_extraction_id": "extract_2"' in rendered
     assert '"last_update_trace_id": "trace_2"' in rendered
+
+
+@pytest.mark.asyncio
+async def test_render_case_operation_strips_proposed_identity_from_new_file():
+    schema = _registry().get("cases")
+    op = _case_op("case_transient_identity")
+    op.memory_fields["case_identity"] = '{"goal":"stored"}'
+    op.memory_fields["_proposed_case_identity"] = '{"goal":"proposed"}'
+
+    rendered = await render_operation_after_file_content(
+        op,
+        schema=schema,
+        extract_context=ExtractContext([]),
+    )
+    parsed = MemoryFileUtils.read(rendered, uri=op.uris[0])
+
+    assert parsed.extra_fields["case_identity"] == '{"goal":"stored"}'
+    assert "_proposed_case_identity" not in parsed.extra_fields
+
+
+@pytest.mark.asyncio
+async def test_render_case_operation_cleans_legacy_proposed_identity():
+    schema = _registry().get("cases")
+    op = _case_op("case_legacy_transient_identity")
+    op.old_memory_file_content = MemoryFile(
+        uri=op.uris[0],
+        content="legacy case",
+        memory_type="cases",
+        extra_fields={
+            "case_name": "case_legacy_transient_identity",
+            "case_identity": '{"goal":"stored"}',
+            "_proposed_case_identity": '{"goal":"stale"}',
+        },
+    )
+    op.memory_fields = {
+        "case_name": "case_legacy_transient_identity",
+        "case_identity": '{"goal":"stored"}',
+    }
+
+    rendered = await render_operation_after_file_content(
+        op,
+        schema=schema,
+        extract_context=ExtractContext([]),
+    )
+    parsed = MemoryFileUtils.read(rendered, uri=op.uris[0])
+
+    assert parsed.extra_fields["case_identity"] == '{"goal":"stored"}'
+    assert "_proposed_case_identity" not in parsed.extra_fields
 
 
 @pytest.mark.asyncio
@@ -1340,6 +2684,66 @@ async def test_cross_extraction_merge_deletes_existing_loser_from_validated_grou
     assert [op.uris for op in merged.upsert_operations] == [[winner_uri]]
     assert [file.uri for file in merged.delete_file_contents] == [existing_uri]
     assert merged.delete_replacements == {existing_uri: winner_uri}
+
+
+@pytest.mark.asyncio
+async def test_force_merge_sends_delete_only_group_through_patch_merge(monkeypatch):
+    delete_file = _note_delete_file("obsolete")
+    replacement_uri = "viking://user/u/memories/notes/replacement.md"
+    fake_vlm = _install_fake_merge_vlm(
+        monkeypatch,
+        responder=lambda messages: json.dumps(
+            {
+                "groups": [],
+                "delete_proposal_ids": ["batch:delete:0"],
+            }
+        ),
+    )
+    fs = InMemoryVikingFS({delete_file.uri: delete_file.content})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    merged = await merge_memory_operations(
+        operations=ResolvedOperations(
+            upsert_operations=[],
+            delete_file_contents=[delete_file],
+            errors=[],
+            delete_replacements={delete_file.uri: replacement_uri},
+        ),
+        messages=[],
+        ctx=_ctx(),
+        registry=_registry(),
+        force_merge=True,
+    )
+
+    assert len(fake_vlm.calls) == 1
+    assert merged.delete_file_contents == [delete_file]
+    assert merged.delete_replacements == {delete_file.uri: replacement_uri}
+
+
+@pytest.mark.asyncio
+async def test_force_merge_does_not_drop_add_only_delete():
+    delete_file = MemoryFile(
+        uri="viking://user/u/memories/cases/obsolete.md",
+        content="obsolete",
+        memory_type="cases",
+        extra_fields={"case_name": "obsolete"},
+    )
+
+    merged = await merge_one_memory_type_operations(
+        memory_type="cases",
+        operations=[],
+        delete_files=[delete_file],
+        messages=[],
+        ctx=_ctx(),
+        registry=_registry(),
+        force_merge=True,
+    )
+
+    assert merged.delete_file_contents == [delete_file]
 
 
 @pytest.mark.asyncio
@@ -1441,9 +2845,10 @@ async def test_patch_merge_reconstructs_canonical_with_existing_merge_op(monkeyp
     assert merged.upsert_operations[0].memory_fields["content"] == "merged content"
 
 
-def test_merge_plan_can_select_existing_candidate_as_canonical():
+@pytest.mark.asyncio
+async def test_merge_plan_can_select_existing_candidate_as_canonical():
     schema = _registry().get("notes")
-    proposals = build_memory_merge_proposals(
+    proposals = await build_memory_merge_proposals(
         operations=[_note_op_with_source("new_note", "extract_1")],
         delete_files=[],
         schema=schema,
@@ -1477,7 +2882,7 @@ def test_merge_plan_can_select_existing_candidate_as_canonical():
         required_proposals=proposals,
         all_proposals=all_proposals,
     )
-    merged = reconstruct_memory_operations_from_plan(
+    merged = await reconstruct_memory_operations_from_plan(
         plan,
         required_proposals=proposals,
         all_proposals=all_proposals,
@@ -1489,6 +2894,39 @@ def test_merge_plan_can_select_existing_candidate_as_canonical():
     assert merged.upsert_operations[0].old_memory_file_content == candidate_file
     assert merged.upsert_operations[0].memory_fields["content"] == "merged content"
     assert merged.upsert_operations[0].memory_fields["source_extraction_id"] == "extract_1"
+
+
+def test_stored_case_candidate_ignores_legacy_proposed_identity():
+    canonical_identity = {
+        "goal": "prepare a reusable report",
+        "subject": "report document",
+        "action_pattern": "analyze source data and write report",
+        "success_boundary": "report is complete and usable",
+        "context_constraints": ["source data is available"],
+    }
+    stale_identity = {
+        "goal": "prepare a one-off spreadsheet",
+        "subject": "spreadsheet",
+        "action_pattern": "filter exact rows",
+        "success_boundary": "specific workbook is saved",
+        "context_constraints": ["use a fixed date"],
+    }
+    candidate_file = MemoryFile(
+        uri="viking://user/u/memories/cases/report.md",
+        content="Reusable report task.",
+        memory_type="cases",
+        extra_fields={
+            "case_name": "report",
+            "case_identity": json.dumps(canonical_identity),
+            "_proposed_case_identity": json.dumps(stale_identity),
+        },
+    )
+    proposal = build_candidate_merge_proposals({"candidate:existing": candidate_file})[0]
+
+    context = _compact_case_proposal_context(proposal)
+
+    assert context["case_identity"]["goal"] == canonical_identity["goal"]
+    assert context["case_identity"]["subject"] == canonical_identity["subject"]
 
 
 @pytest.mark.asyncio

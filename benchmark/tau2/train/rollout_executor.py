@@ -77,8 +77,8 @@ def make_tau2_rollout_executor(
     loader_mode = normalize_tau2_experience_loader_mode(
         opts.get("loader_mode") or DEFAULT_TAU2_EXPERIENCE_LOADER_MODE
     )
-    if loader_mode == "direct_experience":
-        raise ValueError("loader_mode='direct_experience' requires rollout backend 'vikingbot'")
+    if loader_mode in {"direct_experience", "auto_experience"}:
+        raise ValueError(f"loader_mode='{loader_mode}' requires rollout backend 'vikingbot'")
     return NativeTau2RolloutExecutor(
         concurrency=concurrency,
         agent_llm=_optional_str(opts.get("agent_llm")),
@@ -95,7 +95,7 @@ def make_tau2_rollout_executor(
             default=True,
         ),
         retrieval_mode=str(opts.get("retrieval_mode") or "first_user_prewrite"),
-        search_uri=str(opts.get("search_uri") or "viking://user/memories/experiences"),
+        search_uri=str(opts.get("search_uri") or "viking://~/memories/experiences"),
         retrieval_top_k=int(opts.get("retrieval_top_k") or 4),
         first_user_retrieval_top_k=_optional_int(opts.get("first_user_retrieval_top_k")),
         first_user_inject_top_k=_optional_int(opts.get("first_user_inject_top_k")),

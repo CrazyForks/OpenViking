@@ -284,10 +284,9 @@ class AsyncHTTPAdapter(LoadAdapter):
         return await self._client.add_resource(
             path=path,
             to=to,
-            reason=reason,
             wait=wait,
             timeout=timeout,
-            strict=False,
+            options={"reason": reason, "strict": False},
         )
 
     async def wait_processed(self, timeout: Optional[float]) -> Any:
@@ -994,7 +993,7 @@ class BenchmarkRunner:
                 "glob",
                 lambda: adapter.glob(
                     uri=self.config.data_root_uri,
-                    pattern="*.md",
+                    pattern="**/*.md",
                     limit=self.config.find_limit,
                 ),
                 worker_id=worker_id,

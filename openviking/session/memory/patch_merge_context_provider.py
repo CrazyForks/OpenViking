@@ -10,7 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from openviking.server.identity import RequestContext
-from openviking.session.memory.case_aggregation import CASE_PENDING_SOURCES_FIELD
+from openviking.session.memory.case_aggregation import (
+    CASE_PENDING_SOURCES_FIELD,
+    PROPOSED_CASE_IDENTITY_FIELD,
+)
 from openviking.session.memory.dataclass import MemoryFile, MemoryTypeSchema
 from openviking.session.memory.session_extract_context_provider import (
     SessionExtractContextProvider,
@@ -24,6 +27,11 @@ _SYSTEM_HIDDEN_FIELDS = {
     "feedback_stats",
     "_case_source_ids",
     CASE_PENDING_SOURCES_FIELD,
+    PROPOSED_CASE_IDENTITY_FIELD,
+    "archived_at",
+    "archive_reason",
+    "archive_replacement_uri",
+    "archived_case_uris",
 }
 _MAX_EXTRA_CANDIDATE_FILES = 10
 _MAX_CASE_EXTRA_CANDIDATE_FILES = 3
@@ -147,8 +155,8 @@ class PatchMergeContextProvider(SessionExtractContextProvider):
 When merging `experiences`, every synthesized upsert must keep the skill-loader
 format: put the full runtime-facing Markdown in the `constraint` field, with
 exactly these top-level sections: `## Situation`, `## Reminder`, `## Procedure`,
-and `## Anti-pattern`. Do not output only a production reminder such as
-`# name` plus `## 规则`; convert that content into the four sections. Preserve
+`## Verification`, `## Fallback`, and `## Anti-pattern`. Do not output only a production reminder such as
+`# name` plus `## 规则`; convert that content into the six sections. Preserve
 source-binding, applicability, scope ambiguity, canonical value/source-field
 rules, and anti-patterns from the strongest patches.
 """
@@ -294,6 +302,9 @@ may use the explicitly allowed empty field_operations described below.
         """Resolve required files plus semantic-search candidates for this merge."""
 
         required_uris = _dedupe_uris(self.required_file_uris)
+        if not any(patch.before_file is None for patch in self.patches):
+            return required_uris
+
         if self.memory_type == "cases":
             max_extra_candidate_files = _MAX_CASE_EXTRA_CANDIDATE_FILES
         else:

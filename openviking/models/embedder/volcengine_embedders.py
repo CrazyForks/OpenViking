@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Volcengine Embedder Implementation"""
 
-import asyncio
 from typing import Any, Dict, List, Optional
 
 import volcenginesdkarkruntime
@@ -260,38 +259,6 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
         except Exception as e:
             raise RuntimeError(f"Volcengine embedding failed: {str(e)}") from e
 
-    def embed_batch(
-        self, contents: List["EmbeddingInput"], is_query: bool = False
-    ) -> List[EmbedResult]:
-        """Batch embedding
-
-        Args:
-            contents: List of texts or multimodal content parts
-            is_query: Flag to indicate if these are query embeddings
-
-        Returns:
-            List[EmbedResult]: List of embedding results
-
-        Raises:
-            RuntimeError: When API call fails
-        """
-        if not contents:
-            return []
-        return [self.embed(content, is_query=is_query) for content in contents]
-
-    async def embed_batch_async(
-        self, contents: List["EmbeddingInput"], is_query: bool = False
-    ) -> List[EmbedResult]:
-        if not contents:
-            return []
-
-        # Embed each content individually and run them concurrently.
-        return list(
-            await asyncio.gather(
-                *(self.embed_async(content, is_query=is_query) for content in contents)
-            )
-        )
-
     def get_dimension(self) -> int:
         return self._dimension
 
@@ -436,43 +403,18 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
         except Exception as e:
             raise RuntimeError(f"Volcengine sparse embedding failed: {str(e)}") from e
 
-    def embed_batch(
-        self, contents: List["EmbeddingInput"], is_query: bool = False
-    ) -> List[EmbedResult]:
-        """Batch sparse embedding
-
-        Args:
-            contents: List of texts or multimodal content parts
-            is_query: Flag to indicate if these are query embeddings
-
-        Returns:
-            List[EmbedResult]: List of embedding results
-
-        Raises:
-            RuntimeError: When API call fails
-        """
-        if not contents:
-            return []
-        return [self.embed(content, is_query=is_query) for content in contents]
-
-    async def embed_batch_async(
-        self, contents: List["EmbeddingInput"], is_query: bool = False
-    ) -> List[EmbedResult]:
-        if not contents:
-            return []
-
-        # The multimodal endpoint embeds a single content per call; run the items
-        # concurrently while sharing the async client.
-        return list(
-            await asyncio.gather(
-                *(self.embed_async(content, is_query=is_query) for content in contents)
-            )
-        )
-
     @property
     def supports_multimodal(self) -> bool:
-        """Multimodal inputs are supported when using the multimodal endpoint."""
-        return self.input_type == "multimodal"
+        """Sparse vectors require text-only input even on the multimodal endpoint.
+
+        The provider accepts the request at the endpoint level, but rejects
+        non-text parts (images and videos) whenever ``sparse_embedding`` is
+        enabled. Returning ``False`` makes the common embedder guard retain the
+        extracted text and drop those parts before the provider call. Image-only
+        search remains unsupported and is rejected by the retrieval capability
+        check instead of embedding empty text.
+        """
+        return False
 
 
 class VolcengineHybridEmbedder(HybridEmbedderBase):
@@ -555,8 +497,14 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
 
     @property
     def supports_multimodal(self) -> bool:
-        """Hybrid embeddings always use the multimodal endpoint."""
-        return True
+        """Hybrid vectors include sparse output and therefore require text input.
+
+        A hybrid provider request enables sparse embedding, for which image and
+        video parts are unsupported. The base guard performs a deterministic
+        text-only downgrade for mixed content. Image-only search remains
+        unsupported because dropping its only input would produce an empty query.
+        """
+        return False
 
     def embed(self, content: "EmbeddingInput", is_query: bool = False) -> EmbedResult:
         """Perform hybrid embedding on text or multimodal content
@@ -632,39 +580,6 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
             )
         except Exception as e:
             raise RuntimeError(f"Volcengine hybrid embedding failed: {str(e)}") from e
-
-    def embed_batch(
-        self, contents: List["EmbeddingInput"], is_query: bool = False
-    ) -> List[EmbedResult]:
-        """Batch hybrid embedding
-
-        Args:
-            contents: List of texts or multimodal content parts
-            is_query: Flag to indicate if these are query embeddings
-
-        Returns:
-            List[EmbedResult]: List of embedding results
-
-        Raises:
-            RuntimeError: When API call fails
-        """
-        if not contents:
-            return []
-        return [self.embed(content, is_query=is_query) for content in contents]
-
-    async def embed_batch_async(
-        self, contents: List["EmbeddingInput"], is_query: bool = False
-    ) -> List[EmbedResult]:
-        if not contents:
-            return []
-
-        # The multimodal endpoint embeds a single content per call; run the items
-        # concurrently while sharing the async client.
-        return list(
-            await asyncio.gather(
-                *(self.embed_async(content, is_query=is_query) for content in contents)
-            )
-        )
 
     def get_dimension(self) -> int:
         return self._dimension

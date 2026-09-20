@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from openviking_cli.utils.logger import get_logger
+
 from .config_utils import raise_unknown_config_fields
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -29,7 +33,8 @@ class ParserConfig:
         encoding: Default file encoding
         max_section_size: Maximum tokens per section before splitting
         section_size_flexibility: Allow overflow to maintain coherence (0.0-1.0)
-        max_section_chars: Hard character limit per section (guards against token estimation errors)
+        max_section_chars: Target character limit per section. A single oversized
+            Markdown table row may remain intact to preserve table semantics.
     """
 
     enabled: bool = True
@@ -39,9 +44,7 @@ class ParserConfig:
     # Smart splitting configuration
     max_section_size: int = 2048  # Maximum tokens per section before splitting
     section_size_flexibility: float = 0.3  # Allow 30% overflow to maintain coherence
-    max_section_chars: int = (
-        6000  # Hard character limit per section (guards against token estimation errors)
-    )
+    max_section_chars: int = 6000  # Target character limit per section
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ParserConfig":
@@ -144,18 +147,16 @@ class PDFConfig(ParserConfig):
     Attributes:
         strategy: Parsing strategy ("local" | "mineru" | "auto")
         mineru_endpoint: MinerU API endpoint URL
-        mineru_api_key: MinerU API authentication key
         mineru_timeout: MinerU request timeout in seconds
-        mineru_params: Additional MinerU API parameters
+        mineru_bodys: Additional MinerU API multipart form fields
     """
 
     strategy: str = "auto"  # "local" | "mineru" | "auto"
 
     # MinerU API configuration
     mineru_endpoint: Optional[str] = None  # API endpoint URL
-    mineru_api_key: Optional[str] = None  # API authentication key
     mineru_timeout: float = 300.0  # Request timeout in seconds (5 minutes)
-    mineru_params: Optional[dict] = None  # Additional API parameters
+    mineru_bodys: Optional[dict] = None  # Additional API multipart form fields
 
     # Heading detection configuration
     heading_detection: str = "auto"  # "bookmarks" | "font" | "auto" | "none"
@@ -201,7 +202,7 @@ class CodeHostingConfig(ParserConfig):
     Base configuration for code hosting platform domains.
 
     Attributes:
-        code_hosting_domains: List of code hosting platform domains (github.com, gitlab.com, etc.)
+        code_hosting_domains: List of allowed generic code hosting domains
         github_domains: List of GitHub domains (github.com, www.github.com)
         gitlab_domains: List of GitLab domains (gitlab.com, www.gitlab.com)
         azure_devops_domains: List of Azure DevOps domains (dev.azure.com, ssh.dev.azure.com)
@@ -216,7 +217,17 @@ class CodeHostingConfig(ParserConfig):
     def __post_init__(self):
         """Initialize default values for mutable fields."""
         if self.code_hosting_domains is None:
-            self.code_hosting_domains = ["github.com", "gitlab.com"]
+            self.code_hosting_domains = [
+                "github.com",
+                "gitlab.com",
+                "gitcode.com",
+                "gitee.com",
+                "bitbucket.org",
+                "codeberg.org",
+                "gitea.com",
+                "atomgit.com",
+                "git.sr.ht",
+            ]
         if self.github_domains is None:
             self.github_domains = ["github.com", "www.github.com"]
         if self.gitlab_domains is None:
@@ -235,20 +246,18 @@ class CodeConfig(CodeHostingConfig):
     Configuration for code parsing.
 
     Attributes:
-        code_summary_mode: Summary generation mode ("llm" | "ast" | "ast_llm")
-        extract_functions: Whether to extract function definitions
-        extract_classes: Whether to extract class definitions
-        extract_imports: Whether to extract import statements
-        include_comments: Whether to include comments in L1/L2
-        max_line_length: Maximum line length before splitting
-        language_hint: Optional language hint (auto-detected if None)
-        max_token_limit: Maximum tokens to process per file
-        truncation_strategy: "head", "tail", or "balanced"
-        warn_on_truncation: Whether to warn when truncation occurs
+        extract_functions: Legacy compatibility field; ignored by the fixed skeleton route
+        extract_classes: Legacy compatibility field; ignored by the fixed skeleton route
+        extract_imports: Legacy compatibility field; ignored by the fixed skeleton route
+        include_comments: Legacy compatibility field; ignored by the fixed skeleton route
+        max_line_length: Legacy compatibility field; ignored by the fixed skeleton route
+        language_hint: Legacy compatibility field; ignored by the fixed skeleton route
+        max_token_limit: Legacy compatibility field; ignored by the fixed skeleton route
+        truncation_strategy: Legacy compatibility field; ignored by the fixed skeleton route
+        warn_on_truncation: Legacy compatibility field; ignored by the fixed skeleton route
         github_raw_domain: Domain for GitHub raw content (raw.githubusercontent.com)
     """
 
-    code_summary_mode: str = "ast"  # "llm" | "ast" | "ast_llm"
     extract_functions: bool = True
     extract_classes: bool = True
     extract_imports: bool = True
@@ -259,6 +268,22 @@ class CodeConfig(CodeHostingConfig):
     truncation_strategy: str = "head"  # "head", "tail", or "balanced"
     warn_on_truncation: bool = True
     github_raw_domain: str = "raw.githubusercontent.com"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CodeConfig":
+        """Create code configuration, accepting removed fields for upgrade compatibility."""
+
+        data = dict(data)
+        if "code_summary_mode" in data:
+            data.pop("code_summary_mode", None)
+            logger.warning(
+                "code.code_summary_mode is deprecated and ignored; "
+                "code summaries now always use the fixed skeleton route with LLM fallback"
+            )
+
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        raise_unknown_config_fields(data=data, valid_fields=valid_fields, context_name=cls.__name__)
+        return cls(**data)
 
     def validate(self) -> None:
         """
@@ -271,12 +296,6 @@ class CodeConfig(CodeHostingConfig):
         super().validate()
 
         # Validate code-specific fields
-        if self.code_summary_mode not in ("llm", "ast", "ast_llm"):
-            raise ValueError(
-                f"Invalid code_summary_mode '{self.code_summary_mode}'. "
-                "Must be 'llm', 'ast', or 'ast_llm'"
-            )
-
         if self.max_line_length <= 0:
             raise ValueError("max_line_length must be positive")
 
@@ -300,14 +319,23 @@ class ImageConfig(ParserConfig):
         enable_vlm: Whether to use VLM for visual understanding
         ocr_lang: Language for OCR (e.g., "chi_sim", "eng")
         vlm_model: VLM model to use (e.g., "gpt-4-vision")
-        max_dimension: Maximum image dimension (resize if larger)
+        preview_max_dimension: Maximum dimension for preview resizing (resize if larger)
+        max_file_size_mb: Maximum file size before triggering large image processing
+        max_tile_dimension_px: Maximum dimension for individual tiles
+        tile_overlap_px: Number of pixels to overlap between tiles
+        large_image_threshold_dimension: Dimension threshold for large image detection
     """
 
     enable_ocr: bool = False
     enable_vlm: bool = True
     ocr_lang: str = "eng"
     vlm_model: Optional[str] = None
-    max_dimension: int = 2048
+    preview_max_dimension: int = 2048
+    # Large image processing settings
+    max_file_size_mb: float = 10.0  # 10 MB
+    max_tile_dimension_px: int = 2048  # 2048 pixels
+    tile_overlap_px: int = 2  # 2 pixels
+    large_image_threshold_dimension: int = 4096  # 4096 pixels
 
     def validate(self) -> None:
         """
@@ -320,8 +348,16 @@ class ImageConfig(ParserConfig):
         super().validate()
 
         # Validate image-specific fields
-        if self.max_dimension <= 0:
-            raise ValueError("max_dimension must be positive")
+        if self.preview_max_dimension <= 0:
+            raise ValueError("preview_max_dimension must be positive")
+        if self.max_file_size_mb <= 0:
+            raise ValueError("max_file_size_mb must be positive")
+        if self.max_tile_dimension_px <= 0:
+            raise ValueError("max_tile_dimension_px must be positive")
+        if self.tile_overlap_px < 0:
+            raise ValueError("tile_overlap_px must be non-negative")
+        if self.large_image_threshold_dimension <= 0:
+            raise ValueError("large_image_threshold_dimension must be positive")
 
 
 @dataclass
@@ -400,13 +436,16 @@ class MarkdownConfig(ParserConfig):
 
     Attributes:
         preserve_links: Whether to preserve hyperlinks in output
-        extract_frontmatter: Whether to extract YAML frontmatter
+        extract_frontmatter: Whether to REMOVE YAML frontmatter from the stored
+            document body. Frontmatter is parsed into the parse result metadata
+            regardless. Off by default: the parsed metadata is never persisted, so
+            removing the block would silently lose those fields.
         include_metadata: Whether to include file metadata
         max_heading_depth: Maximum heading depth to include in structure
     """
 
     preserve_links: bool = True
-    extract_frontmatter: bool = True
+    extract_frontmatter: bool = False
     include_metadata: bool = True
     max_heading_depth: int = 3
 
@@ -423,6 +462,24 @@ class MarkdownConfig(ParserConfig):
         # Validate markdown-specific fields
         if self.max_heading_depth < 1:
             raise ValueError("max_heading_depth must be at least 1")
+
+
+@dataclass
+class AnydocConfig(ParserConfig):
+    """Configuration for the shared anydoc Office converter."""
+
+    max_table_rows: int = 1000
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AnydocConfig":
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        raise_unknown_config_fields(data=data, valid_fields=valid_fields, context_name=cls.__name__)
+        return cls(**data)
+
+    def validate(self) -> None:
+        super().validate()
+        if self.max_table_rows < 0:
+            raise ValueError("max_table_rows must be non-negative")
 
 
 @dataclass
@@ -507,9 +564,7 @@ class FeishuConfig(ParserConfig):
     domain: str = "https://open.feishu.cn"
     max_rows_per_sheet: int = 1000
     max_records_per_table: int = 1000
-    download_images: bool = (
-        True  # TODO: not yet implemented, reserved for future image download support
-    )
+    download_images: bool = True
     request_timeout: float = (
         30.0  # TODO: not yet passed to lark-oapi client, reserved for future use
     )
@@ -614,7 +669,7 @@ class SemanticConfig:
     """Maximum characters of file content sent to LLM for summary generation."""
 
     max_skeleton_chars: int = 12000
-    """Maximum characters of AST skeleton used for embedding (~3000 tokens)."""
+    """Maximum characters of code skeleton used for embedding (~3000 tokens)."""
 
     max_overview_prompt_chars: int = 60000
     """Maximum characters allowed in the overview generation prompt.
@@ -622,6 +677,12 @@ class SemanticConfig:
 
     overview_batch_size: int = 50
     """Maximum number of file summaries per batch when splitting oversized prompts."""
+
+    overview_sample_limit: int = 32
+    """Maximum direct-child summaries used in one generated directory sidecar."""
+
+    freshness_refresh_ratio: float = 0.10
+    """Pending direct-child change ratio that refreshes a wide directory."""
 
     abstract_max_chars: int = 256
     """Maximum characters for generated abstracts."""
@@ -636,6 +697,18 @@ class SemanticConfig:
     memory_chunk_overlap: int = 200
     """Character overlap between adjacent memory chunks for context continuity."""
 
+    def __post_init__(self):
+        if self.overview_sample_limit <= 0:
+            raise ValueError("overview_sample_limit must be positive")
+        if not 0 < self.freshness_refresh_ratio <= 1:
+            raise ValueError("freshness_refresh_ratio must be in the range (0, 1]")
+        if self.memory_chunk_chars <= 0:
+            raise ValueError("memory_chunk_chars must be positive")
+        if self.memory_chunk_overlap < 0:
+            raise ValueError("memory_chunk_overlap must be non-negative")
+        if self.memory_chunk_overlap >= self.memory_chunk_chars:
+            raise ValueError("memory_chunk_overlap must be smaller than memory_chunk_chars")
+
 
 # Configuration registry for dynamic loading
 PARSER_CONFIG_REGISTRY = {
@@ -645,6 +718,7 @@ PARSER_CONFIG_REGISTRY = {
     "audio": AudioConfig,
     "video": VideoConfig,
     "markdown": MarkdownConfig,
+    "anydoc": AnydocConfig,
     "html": HTMLConfig,
     "text": TextConfig,
     "directory": DirectoryConfig,
@@ -675,8 +749,7 @@ def get_parser_config(
 
         >>> # Get custom code configuration
         >>> code_config = get_parser_config("code", {
-        ...     "enable_ast": False,
-        ...     "max_token_limit": 10000
+        ...     "github_raw_domain": "raw.githubusercontent.com"
         ... })
     """
     if parser_type not in PARSER_CONFIG_REGISTRY:
@@ -685,10 +758,10 @@ def get_parser_config(
 
     config_class = PARSER_CONFIG_REGISTRY[parser_type]
 
-    if config_data:
-        return config_class.from_dict(config_data)
-    else:
-        return config_class()
+    # Always go through from_dict, even with no data: configs that track which
+    # keys a source provided need to see the empty mapping to record that none
+    # were set.
+    return config_class.from_dict(config_data or {})
 
 
 def load_parser_configs_from_dict(config_dict: Dict[str, Any]) -> Dict[str, ParserConfig]:
@@ -704,7 +777,7 @@ def load_parser_configs_from_dict(config_dict: Dict[str, Any]) -> Dict[str, Pars
     Examples:
         >>> configs = load_parser_configs_from_dict({
         ...     "pdf": {"strategy": "auto"},
-        ...     "code": {"enable_ast": false}
+        ...     "code": {"github_raw_domain": "raw.githubusercontent.com"}
         ... })
         >>> pdf_config = configs["pdf"]
         >>> code_config = configs["code"]
@@ -718,10 +791,8 @@ def load_parser_configs_from_dict(config_dict: Dict[str, Any]) -> Dict[str, Pars
     configs = {}
 
     for parser_type, config_class in PARSER_CONFIG_REGISTRY.items():
-        if parser_type in config_dict:
-            config_data = config_dict[parser_type]
-            configs[parser_type] = config_class.from_dict(config_data)
-        else:
-            configs[parser_type] = config_class()
+        # from_dict on an empty mapping rather than a bare constructor, so
+        # configs that track provided keys record that a section was absent.
+        configs[parser_type] = config_class.from_dict(config_dict.get(parser_type) or {})
 
     return configs

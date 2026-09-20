@@ -169,6 +169,39 @@ class MemoryOperationSource(BaseModel):
     extracted_at: Optional[str] = None
 
 
+class MemoryOperationSkipCode(str, Enum):
+    """Stable reason codes for intentionally skipped memory operations."""
+
+    MEMORY_TYPE_FILTERED = "memory_type_filtered"
+    SELF_MEMORY_DISABLED = "self_memory_disabled"
+    PEER_MEMORY_DISABLED = "peer_memory_disabled"
+    INVALID_PEER_ID = "invalid_peer_id"
+    PEER_NOT_ALLOWED = "peer_not_allowed"
+    INVALID_RANGES = "invalid_ranges"
+    AMBIGUOUS_TARGET = "ambiguous_target"
+    NO_WRITABLE_TARGET = "no_writable_target"
+
+
+class MemoryOperationSkip(BaseModel):
+    """Internal policy/validation decision explaining why no URI was produced."""
+
+    reason_code: MemoryOperationSkipCode
+    reason: str
+
+
+class SkippedMemoryOperation(BaseModel):
+    """Structured, task-visible record for one intentionally skipped operation."""
+
+    memory_type: str
+    page_id: Optional[int] = None
+    uri: Optional[str] = None
+    reason_code: MemoryOperationSkipCode
+    reason: str
+    # Source is used only to scope shared streaming-batch results back to the
+    # submitting commit. It must never be serialized into the public task result.
+    source: Optional[MemoryOperationSource] = Field(default=None, exclude=True)
+
+
 # ============================================================================
 # Memory Field and Schema Definitions
 # ============================================================================
@@ -310,6 +343,31 @@ class ResolvedOperation(BaseModel):
     add_only_uri_bases: Dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
     page_id: Optional[int] = None  # Temporary page_id for link resolution (not persisted)
     source: Optional[MemoryOperationSource] = None
+    # Runtime-only resolution decision. It is deliberately excluded from model
+    # serialization so it cannot enter later LLM merge prompts or memory files.
+    resolution_skip: Optional[MemoryOperationSkip] = Field(default=None, exclude=True)
+    # Custom scalar tags (already normalized as "key=value") to attach to this
+    # operation's memories in the vector index. None means "no tags"; used by
+    # event-memory auto-tagging. Not persisted in the memory file content.
+    search_tags: Optional[List[str]] = None
+    # Optimistic-concurrency preconditions.  These fields are execution-only
+    # and must never be serialized into MEMORY_FIELDS.
+    expected_version: Optional[int] = Field(default=None, exclude=True, repr=False)
+    expected_absent: bool = Field(default=False, exclude=True, repr=False)
+    lifecycle_action: Optional[str] = Field(default=None, exclude=True, repr=False)
+    archive_replacement_uri: Optional[str] = Field(default=None, exclude=True, repr=False)
+    # Policy updates validate all targets while holding one exact-batch lease.
+    # Reuse those reads during apply so CAS does not double downstream file QPS.
+    precondition_files: Dict[str, Optional[MemoryFile]] = Field(
+        default_factory=dict,
+        exclude=True,
+        repr=False,
+    )
+    archive_case_uris_by_uri: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        exclude=True,
+        repr=False,
+    )
 
     def is_edit(self):
         return self.old_memory_file_content is not None

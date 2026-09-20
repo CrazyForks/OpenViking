@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from openviking.server.identity import RequestContext
 from openviking.session.memory.dataclass import MemoryFile
+from openviking.session.memory.experience_lifecycle import normalize_experience_status
 from openviking.session.memory.session_extract_context_provider import (
     SessionExtractContextProvider,
 )
@@ -29,6 +30,7 @@ EXPERIENCE_MEMORY_TYPE = "experiences"
 TRAJECTORY_MEMORY_TYPE = "trajectories"
 COMPARISON_TRAJ_TOP_K = 6
 COMPARISON_TRAJ_INJECT_TOP_K = 2
+SEMANTIC_EXPERIENCE_TOP_K = 5
 MAX_COMPARISON_TRAJ_CHARS = 6000
 
 
@@ -164,6 +166,7 @@ class ExperienceEvidenceLoader:
             [
                 *_case_linked_experience_uris(case_file),
                 *query.loaded_experience_uris,
+                *(await self._search_candidate_experience_uris(query, ctx)),
             ]
         )
         candidates = await self._load_candidates(candidate_uris, ctx)
@@ -172,6 +175,49 @@ class ExperienceEvidenceLoader:
             candidates=candidates,
             comparison_trajectories=comparisons,
         )
+
+    async def _search_candidate_experience_uris(
+        self,
+        query: ExperienceEvidenceQuery,
+        ctx: RequestContext,
+    ) -> list[str]:
+        """Find global semantic candidates so equivalent roots are updated, not duplicated."""
+
+        target_uri = _experience_directory_uri(query.case_uri or query.trajectory_uri)
+        search_query = "\n".join(
+            part.strip()
+            for part in (
+                query.case_name,
+                query.task_signature,
+                query.trajectory_summary[:4000],
+            )
+            if part and part.strip()
+        )
+        if not target_uri or not search_query:
+            return []
+        try:
+            result = await self._viking_fs.find(
+                search_query,
+                target_uri=target_uri,
+                limit=SEMANTIC_EXPERIENCE_TOP_K,
+                level=[2],
+                ctx=ctx,
+            )
+        except Exception as error:
+            tracer.warning(f"Failed to search candidate experiences: {error}")
+            return []
+
+        uris: list[str] = []
+        for item in getattr(result, "memories", []) or []:
+            uri = str(getattr(item, "uri", "") or "")
+            if not uri and isinstance(item, dict):
+                uri = str(item.get("uri") or "")
+            if "/memories/experiences/" not in uri or not uri.endswith(".md"):
+                continue
+            if uri.endswith("/.overview.md") or uri in uris:
+                continue
+            uris.append(uri)
+        return uris[:SEMANTIC_EXPERIENCE_TOP_K]
 
     async def _load_candidates(
         self,
@@ -184,6 +230,10 @@ class ExperienceEvidenceLoader:
             if memory_file is None:
                 continue
             if memory_file.memory_type and memory_file.memory_type != EXPERIENCE_MEMORY_TYPE:
+                continue
+            if normalize_experience_status(
+                (memory_file.extra_fields or {}).get("status")
+            ) == "archived":
                 continue
             candidates.append(CandidateExperienceEvidence(memory_file=memory_file))
         return candidates
@@ -199,8 +249,16 @@ class ExperienceEvidenceLoader:
         seen = {query.trajectory_uri}
         linked_uris = _case_linked_trajectory_uris(case_file)
         results = await self._read_trajectory_evidence(linked_uris, seen, ctx)
+        non_successes = [item for item in results if not _is_success_trajectory(item.memory_file)]
         successes = [item for item in results if _is_success_trajectory(item.memory_file)]
-        return successes[:COMPARISON_TRAJ_TOP_K]
+        ordered: list[TrajectoryEvidence] = []
+        if non_successes:
+            ordered.append(non_successes.pop(0))
+        if successes:
+            ordered.append(successes.pop(0))
+        ordered.extend(non_successes)
+        ordered.extend(successes)
+        return ordered[:COMPARISON_TRAJ_TOP_K]
 
     async def _load_case_file(
         self,
@@ -285,7 +343,13 @@ def _case_linked_trajectory_uris(case_file: MemoryFile | None) -> list[str]:
         return []
     recency_by_uri: dict[str, tuple[str, str]] = {}
     for link in list(case_file.links or []) + list(case_file.backlinks or []):
-        if str(link.get("link_type") or "") != "successful_trajectory":
+        if str(link.get("link_type") or "") not in {
+            "successful_trajectory",
+            "failed_trajectory",
+            "partial_trajectory",
+            "unfinished_trajectory",
+            "unknown_trajectory",
+        }:
             continue
         created_at = str(link.get("created_at") or "")
         for uri in _link_uris(link):
@@ -312,6 +376,13 @@ def _link_uris(link: dict[str, Any]) -> list[str]:
 
 def _unique_experience_uris(uris: list[str]) -> list[str]:
     return list(dict.fromkeys(uri for uri in uris if "/memories/experiences/" in str(uri or "")))
+
+
+def _experience_directory_uri(uri: str) -> str:
+    prefix, separator, _ = str(uri or "").partition("/memories/")
+    if not separator or not prefix.startswith("viking://user/"):
+        return ""
+    return f"{prefix}/memories/experiences"
 
 
 class AgentExperienceContextProvider(SessionExtractContextProvider):
@@ -359,17 +430,49 @@ class AgentExperienceContextProvider(SessionExtractContextProvider):
             situation_guidance = """The skill loader uses the rendered `situation` field as the
 applicability snippet. It must clearly say when the experience applies, when it does not apply,
 and which runtime source binds the rule. """
-        return f"""You are a memory extraction agent. Distill reusable failure-repair experiences from failed or partially failed agent execution trajectories.
+        return f"""You are a memory extraction agent. Distill reusable failure-repair experiences from failed or partially failed agent execution trajectories, or from a narrowly eligible successful trajectory with `recovery_evidence.status=observed_recovered`.
 
 ## Inputs
 
-- One failed or partial `new_trajectory`
-- Up to two successful `comparison_trajectory` records from the exact same case
-- Existing `candidate_experience` memories linked to the exact case or actually loaded in the
-  failed rollout
+- One failed or partial `new_trajectory`, or one successful `new_trajectory` whose structured
+  recovery evidence proves a material failed path, an actually executed alternative, and a
+  verified recovered result
+- Up to two `comparison_trajectory` records from the exact same case, including successful and
+  non-successful peers when available
+- Existing `candidate_experience` memories linked to the exact case, actually loaded in the
+  failed rollout, or found as semantically similar reusable failure patterns
 
 Source and comparison trajectories are evidence only. Do not copy or modify trajectory text in
 the output.
+
+## Extraction algorithm
+
+For each material failure, reason in this order before producing any entry:
+1. Contract: identify the required result from the user request, authoritative input, or observable
+   runtime contract. Evaluation feedback may identify a miss, but must not become a hidden runtime
+   requirement.
+2. First controllable divergence: locate the earliest observable agent decision, action, omitted
+   check, or produced output that caused or failed to prevent that one miss. If it is unknown, skip.
+3. Replacement behavior: state the smallest future decision rule or action change that would alter
+   the result while preserving nearby correct behavior.
+4. Independent proof: define how the future agent verifies the actual result from authoritative
+   input or an independently observable artifact, and what exact check is repeated after repair.
+5. Safe fallback: define what to do when the evidence, capability, conversion, or check is
+   unavailable without fabricating data or silently weakening the user's request.
+6. Transfer test: mentally substitute different entities, dates, amounts, filenames, and valid
+   input values from the same task family. Keep the entry only when its applicability boundary,
+   decision rule, actions, verification relationship, and fallback remain correct. Otherwise skip;
+   do not paraphrase the source task into an Experience.
+
+For a successful recovered trajectory, treat the observable primary-path failure as the failure
+boundary. Extract only the narrow switch to the alternative path that was actually executed and
+verified. Do not turn the rest of the successful run into a positive workflow or full SOP. If the
+trace shows only a same-path retry, cleanup, minor syntax correction, or an unverified alternative,
+output no changes.
+
+Create separate entries when failures have different evidence, decision boundaries, repairs, or
+verification methods. Do not create an entry merely to restate requested content or list everything
+that was missed.
 
 ## Decision and output
 
@@ -377,8 +480,14 @@ the output.
   applicability is too weak to guide skill loading.
 - Existing experience is misleading, over-broad, or too weak: update it.
 - No relevant experience exists and the failure has a reusable preventive repair: create it.
-- Successful, case-specific, unsupported, random, already-covered, or non-preventable failures:
-  output no changes.
+- A successful trajectory with `recovery_evidence.status=observed_recovered` may create or update
+  one narrow recovery Experience when the failed boundary, executed alternative, and verification
+  are all supported by runtime evidence.
+- Ordinary successful, case-specific, unsupported, random, already-covered, or non-preventable
+  trajectories: output no changes.
+- A non-full trajectory may still contribute a narrow, evidenced repair. Update the single
+  compatible candidate when peer trajectories support the same trigger, decision boundary,
+  corrective action, and verification. Do not broaden the rule merely to make sources agree.
 - Treat trajectories as factual evidence, not authoritative conclusions. Compare observations,
   decisions, actions, verification, and outputs at the first material divergence.
 - Do not copy trajectory wording directly into an experience. Re-check runtime evidence,
@@ -390,7 +499,9 @@ Each entry must provide:
 - `supersedes`: an older experience name only when the corrected experience genuinely replaces it
 
 The storage template defines the Markdown structure and order. Do not include headings inside
-field values. {situation_guidance}Do not output `trigger_code`; it is not used by the skill loader.
+field values. {situation_guidance}The complete rendered Experience must contain Situation,
+Reminder, Procedure, Verification, Fallback, and Anti-pattern. Do not output `trigger_code`; it is
+not used by the skill loader.
 
 The system applies same-name entries as updates and new names as creates. Use `supersedes` instead
 of `delete_ids`. Keep content concise, imperative, free of case IDs and hidden answers, and use the
@@ -537,12 +648,12 @@ All memory content must be written in {output_language}.
                 "role": "user",
                 "content": "\n".join(
                     [
-                        "You have already read one `new_trajectory`, optional exact-case successful `comparison_trajectory` records, and candidate experience memories.",
+                        "You have already read one `new_trajectory`, optional exact-case peer `comparison_trajectory` records, and candidate experience memories.",
                         "Treat `new_trajectory` as the new execution to incorporate.",
                         "Treat `comparison_trajectory` as factual peer evidence for comparing success and failure paths; do not modify it directly.",
                         "Treat `candidate_experience` as existing memories you may update, replace, or skip.",
                         "Based on the above, decide whether to **Update**, **Create**, or **Skip** a failure-repair experience. Output JSON only.",
-                        "Only reusable failure patterns should produce entries; successful or unrelated intents should produce no experience changes.",
+                        "Only reusable failure patterns should produce entries. An ordinary successful or unrelated intent produces no changes; a successful new_trajectory is eligible only when recovery_evidence.status=observed_recovered and the trace proves the failed boundary, actually executed alternative, and verified recovered result.",
                     ]
                 ),
             }

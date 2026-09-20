@@ -94,7 +94,7 @@
 
 修改配置后，重启 OpenViking 服务（或重新初始化 SDK 客户端）使其生效。
 
-> 仓库中提供了可直接参考的完整示例：[ov.conf.git-local.example](file:///cloudide/workspace/OpenViking/examples/snapshot/ov.conf.git-local.example) 与 [ov.conf.git-s3-tos.example](file:///cloudide/workspace/OpenViking/examples/snapshot/ov.conf.git-s3-tos.example)。
+> 仓库中提供了可直接参考的完整示例：[ov.conf.git-local.example](https://github.com/volcengine/OpenViking/blob/main/examples/snapshot/ov.conf.git-local.example) 与 [ov.conf.git-s3-tos.example](https://github.com/volcengine/OpenViking/blob/main/examples/snapshot/ov.conf.git-s3-tos.example)。
 
 ## 目录结构变化：`.ovgit` 目录
 
@@ -129,20 +129,30 @@ data/                      # storage.workspace
 快照方法挂在 `client.snapshot.*` 命名空间下。
 
 ```python
-import openviking as ov
+from openviking_sdk import SyncHTTPClient
 
-client = ov.OpenViking()
+client = SyncHTTPClient(url="http://localhost:1933", api_key="your-key")
 client.initialize()
 
 root = "viking://resources/my_project"
 
 # 1. 写入初始内容并提交 v1
-client.write(f"{root}/guide.md", "# Guide\n\nv1 content\n", mode="create", wait=True)
+client.write(
+    uri=f"{root}/guide.md",
+    content="# Guide\n\nv1 content\n",
+    mode="create",
+    wait=True,
+)
 v1 = client.snapshot.commit(message="v1 initial import")
 print("v1:", v1["commit_oid"])
 
 # 2. 修改后再提交 v2
-client.write(f"{root}/guide.md", "# Guide\n\nv2 content\n", mode="replace", wait=True)
+client.write(
+    uri=f"{root}/guide.md",
+    content="# Guide\n\nv2 content\n",
+    mode="replace",
+    wait=True,
+)
 v2 = client.snapshot.commit(message="v2 update")
 
 # 3. 查看历史

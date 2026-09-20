@@ -17,7 +17,6 @@ from openviking.session.memory.tools import (
     MemorySearchTool,
     add_tool_call_pair_to_messages,
     get_tool,
-    get_tool_schemas,
 )
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -160,6 +159,108 @@ class TestMemoryTools:
         assert tool_ctx.read_file_contents[
             "viking://user/default/memories/experiences/payment_guard.md"
         ].extra_fields["feedback_stats"] == {"injected_count": 3, "negative_count": 1}
+
+    @pytest.mark.asyncio
+    async def test_read_tool_does_not_expose_archived_experience_content(self):
+        uri = "viking://user/default/memories/experiences/retired_rule.md"
+        replacement_uri = "viking://user/default/memories/experiences/replacement_rule.md"
+
+        class MockPageIdMap:
+            def get_page_id(self, uri):
+                return None
+
+        class MockVikingFS:
+            async def read_file(self, requested_uri, ctx=None, **kwargs):
+                assert requested_uri == uri
+                return (
+                    "sensitive archived body\n\n"
+                    "<!-- MEMORY_FIELDS\n"
+                    '{"memory_type":"experiences","status":"archived",'
+                    f'"archive_replacement_uri":"{replacement_uri}"}}\n'
+                    "-->"
+                )
+
+        tool_ctx = ToolContext(
+            viking_fs=MockVikingFS(),
+            request_ctx=RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER),
+            default_search_uris=[],
+            read_file_contents={},
+            page_id_map=MockPageIdMap(),
+        )
+
+        result = await MemoryReadTool().execute(tool_ctx, uri=uri)
+
+        assert result == {"error": "Experience is archived and unavailable for Agent use"}
+        assert uri not in tool_ctx.read_file_contents
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["draft", "degraded"])
+    async def test_read_tool_keeps_non_archived_experience_behavior(self, status):
+        uri = f"viking://user/default/memories/experiences/{status}_rule.md"
+
+        class MockPageIdMap:
+            def get_page_id(self, uri):
+                return None
+
+        class MockVikingFS:
+            async def read_file(self, requested_uri, ctx=None, **kwargs):
+                assert requested_uri == uri
+                return (
+                    f"{status} body\n\n<!-- MEMORY_FIELDS\n"
+                    f'{{"memory_type":"experiences","status":"{status}"}}\n-->'
+                )
+
+        tool_ctx = ToolContext(
+            viking_fs=MockVikingFS(),
+            request_ctx=RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER),
+            default_search_uris=[],
+            read_file_contents={},
+            page_id_map=MockPageIdMap(),
+        )
+
+        result = await MemoryReadTool().execute(tool_ctx, uri=uri)
+
+        assert result["status"] == status
+        assert result["content"].endswith(f"\t{status} body")
+        assert uri in tool_ctx.read_file_contents
+
+    @pytest.mark.asyncio
+    async def test_read_tool_hides_legacy_proposed_case_identity_from_llm_output(self):
+        class MockPageIdMap:
+            def get_page_id(self, uri):
+                return None
+
+        class MockVikingFS:
+            async def read_file(self, uri, ctx=None, **kwargs):
+                return (
+                    "Case content.\n\n"
+                    "<!-- MEMORY_FIELDS\n"
+                    "{\n"
+                    '  "memory_type": "cases",\n'
+                    '  "case_name": "report",\n'
+                    '  "case_identity": "{\\"goal\\":\\"canonical\\"}",\n'
+                    '  "_proposed_case_identity": "{\\"goal\\":\\"stale\\"}"\n'
+                    "}\n"
+                    "-->"
+                )
+
+        uri = "viking://user/default/memories/cases/report.md"
+        tool_ctx = ToolContext(
+            viking_fs=MockVikingFS(),
+            request_ctx=RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER),
+            default_search_uris=[],
+            read_file_contents={},
+            page_id_map=MockPageIdMap(),
+        )
+
+        result = await MemoryReadTool().execute(tool_ctx, uri=uri)
+
+        assert result["case_identity"] == '{"goal":"canonical"}'
+        assert "_proposed_case_identity" not in result
+        assert (
+            tool_ctx.read_file_contents[uri].extra_fields["_proposed_case_identity"]
+            == '{"goal":"stale"}'
+        )
 
     @pytest.mark.asyncio
     async def test_read_tool_uses_offset_and_limit_for_visible_content(self):
@@ -316,9 +417,3 @@ class TestMemoryTools:
         read_tool = get_tool("read")
         assert read_tool is not None
         assert isinstance(read_tool, MemoryReadTool)
-
-        # Check get_tool_schemas
-        schemas = get_tool_schemas()
-        schema_names = [s["function"]["name"] for s in schemas]
-        assert "read" in schema_names
-        assert all(name in MEMORY_TOOLS_REGISTRY for name in schema_names)

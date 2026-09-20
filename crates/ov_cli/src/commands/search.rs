@@ -85,7 +85,11 @@ impl SearchRenderContext {
     }
 }
 
-pub(super) fn output_skills_list_results(result: &Value, output_format: OutputFormat, compact: bool) {
+pub(super) fn output_skills_list_results(
+    result: &Value,
+    output_format: OutputFormat,
+    compact: bool,
+) {
     let context = SearchRenderContext::skills_list();
     if let Some(rendered) =
         render_search_output_for_table_with_context(result, output_format, Some(context))
@@ -116,6 +120,7 @@ pub async fn find(
     client: &HttpClient,
     query: &str,
     uri: &str,
+    image: Option<String>,
     node_limit: i32,
     threshold: Option<f64>,
     since: Option<&str>,
@@ -124,6 +129,7 @@ pub async fn find(
     level: Option<Vec<i32>>,
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+    read_content: bool,
     output_format: OutputFormat,
     compact: bool,
 ) -> Result<()> {
@@ -131,6 +137,7 @@ pub async fn find(
         .find(
             query.to_string(),
             uri.to_string(),
+            image,
             node_limit,
             threshold,
             since.map(|s| s.to_string()),
@@ -139,6 +146,7 @@ pub async fn find(
             level,
             context_type,
             tags,
+            read_content,
         )
         .await?;
     output_search_results(
@@ -154,6 +162,7 @@ pub async fn search(
     client: &HttpClient,
     query: &str,
     uri: &str,
+    image: Option<String>,
     session_id: Option<String>,
     node_limit: i32,
     threshold: Option<f64>,
@@ -163,6 +172,7 @@ pub async fn search(
     level: Option<Vec<i32>>,
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+    read_content: bool,
     output_format: OutputFormat,
     compact: bool,
 ) -> Result<()> {
@@ -170,6 +180,7 @@ pub async fn search(
         .search(
             query.to_string(),
             uri.to_string(),
+            image,
             session_id,
             node_limit,
             threshold,
@@ -179,6 +190,7 @@ pub async fn search(
             level,
             context_type,
             tags,
+            read_content,
         )
         .await?;
     output_search_results(
@@ -428,9 +440,7 @@ fn render_search_result_card(
         }
     }
 
-    if split_name_and_description
-        && render_skill_name_and_description(object, text_width, lines)
-    {
+    if split_name_and_description && render_skill_name_and_description(object, text_width, lines) {
         return;
     }
 
@@ -443,6 +453,18 @@ fn render_search_result_card(
         ));
     } else {
         for line in wrapped {
+            lines.push(format!("{SEARCH_INDENT}{}", theme::body(line)));
+        }
+    }
+
+    if let Some(content) = object
+        .and_then(|object| object.get("content"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+    {
+        lines.push(String::new());
+        for line in content.lines() {
             lines.push(format!("{SEARCH_INDENT}{}", theme::body(line)));
         }
     }
@@ -484,10 +506,7 @@ fn render_skill_name_and_description(
         let label = theme::heading("description:").bold().to_string();
         let wrapped = wrap_display_text(description, text_width, SEARCH_MAX_ABSTRACT_LINES);
         if let Some((first, rest)) = wrapped.split_first() {
-            lines.push(format!(
-                "{SEARCH_INDENT}{label} {}",
-                theme::body(first)
-            ));
+            lines.push(format!("{SEARCH_INDENT}{label} {}", theme::body(first)));
             for line in rest {
                 lines.push(format!("{SEARCH_INDENT}{}", theme::body(line)));
             }
@@ -796,6 +815,25 @@ mod tests {
                 line.chars().count() < 140,
                 "line should not sprawl horizontally: {line}"
             );
+        }
+    }
+
+    #[test]
+    fn search_result_cards_show_full_inlined_content_after_the_abstract() {
+        let results = json!([
+            {
+                "context_type": "resource",
+                "uri": "viking://resources/deploy.md",
+                "abstract": "Deployment summary.",
+                "content": "# Deploy\n\nStep one.\nStep two.\nStep three."
+            }
+        ]);
+
+        let rendered = strip_ansi(&render_search_results_for_table(&results).expect("cards"));
+
+        assert!(rendered.contains("Deployment summary."));
+        for line in ["# Deploy", "Step one.", "Step two.", "Step three."] {
+            assert!(rendered.contains(line), "missing inlined content line: {line}");
         }
     }
 

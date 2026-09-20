@@ -28,7 +28,102 @@ from openviking.session.train.domain import (
     RubricEvaluation,
 )
 
-DEFAULT_REMOTE_CASE_PAGE_SIZE = 1000
+DEFAULT_REMOTE_CASE_PAGE_SIZE = 100
+
+
+@dataclass(slots=True)
+class RemoteBenchmarkLifecycle:
+    """Optional per-run lifecycle exposed by benchmark adapters.
+
+    Generic benchmark services do not have to implement these endpoints. A
+    404/405 from ``start`` means lifecycle management is unsupported and the
+    native runner keeps its previous behavior.
+    """
+
+    service_url: str
+    timeout_seconds: float = 1200.0
+
+    async def start(
+        self,
+        *,
+        run_id: str,
+        dataset: str,
+        domain: str,
+        concurrency: int | None = None,
+        training_plan: dict[str, int] | None = None,
+        casehub_dataset_ids: list[str] | None = None,
+        casehub_case_ids: list[str] | None = None,
+        task_casehub_dataset_ids: list[str] | None = None,
+        viking_selection: dict[str, Any] | None = None,
+        required_backend: str | None = None,
+    ) -> dict[str, Any] | None:
+        body: dict[str, Any] = {"run_id": run_id, "dataset": dataset, "domain": domain}
+        if viking_selection:
+            body["viking"] = viking_selection
+        if concurrency is not None:
+            if concurrency <= 0:
+                raise ValueError("concurrency must be > 0")
+            body["concurrency"] = concurrency
+        if training_plan is not None:
+            minimums = {"train_epochs": 0, "train_trials": 1, "eval_trials": 1}
+            if training_plan.keys() != minimums.keys():
+                raise ValueError(
+                    "training_plan must contain train_epochs, train_trials and eval_trials"
+                )
+            for key, minimum in minimums.items():
+                value = training_plan[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                    raise ValueError(f"training_plan.{key} must be an integer >= {minimum}")
+            body["training_plan"] = dict(training_plan)
+        if casehub_dataset_ids or casehub_case_ids:
+            body["casehub"] = {
+                "dataset_ids": list(casehub_dataset_ids or []),
+                "case_ids": list(casehub_case_ids or []),
+            }
+            if task_casehub_dataset_ids:
+                body["casehub"]["task_dataset_ids"] = list(task_casehub_dataset_ids)
+        async with httpx.AsyncClient(
+            base_url=self.service_url.rstrip("/"), timeout=self.timeout_seconds
+        ) as client:
+            if required_backend is not None:
+                health = await client.get("/health")
+                health.raise_for_status()
+                if health.json().get("backend") != required_backend:
+                    raise RuntimeError(
+                        f"Expected {required_backend} adapter; restart the adapter with the new configuration before running"
+                    )
+            response = await client.post(
+                "/v1/runs/start",
+                json=body,
+            )
+        if response.status_code in {404, 405}:
+            return None
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("benchmark lifecycle start response must be a JSON object")
+        return data
+
+    async def complete(self, *, run_id: str) -> dict[str, Any]:
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        async with httpx.AsyncClient(
+            base_url=self.service_url.rstrip("/"), timeout=self.timeout_seconds
+        ) as client:
+            while True:
+                response = await client.post(f"/v1/runs/{run_id}/complete")
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError(
+                        "benchmark lifecycle completion response must be a JSON object"
+                    )
+                if data.get("status") != "finalizing":
+                    return data
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError(
+                        f"Benchmark run {run_id} still finalizing; remote experiments were not cancelled"
+                    )
+                await asyncio.sleep(3)
 
 
 @dataclass(slots=True)
@@ -160,13 +255,8 @@ class RemoteRolloutExecutor:
                     # The polling loop has its own deadline, but an outer timeout
                     # guarantees a stalled await cannot keep a whole batch open.
                     rollout = await asyncio.wait_for(
-                        self._execute_with_handshake_retry(
-                            client, case, policy_set, context
-                        ),
-                        timeout=(
-                            self.execution_timeout_seconds
-                            + self.request_timeout_seconds
-                        ),
+                        self._execute_with_handshake_retry(client, case, policy_set, context),
+                        timeout=(self.execution_timeout_seconds + self.request_timeout_seconds),
                     )
                 except Exception as exc:
                     if not self.continue_on_rollout_failure:
@@ -340,8 +430,7 @@ class RemoteRolloutExecutor:
                         error=error,
                     )
                 raise RuntimeError(
-                    f"rollout execution {execution_id} failed for case {case.name}: "
-                    f"{error}"
+                    f"rollout execution {execution_id} failed for case {case.name}: {error}"
                 )
             if asyncio.get_running_loop().time() >= deadline:
                 last_error_text = (

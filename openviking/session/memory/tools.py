@@ -11,6 +11,11 @@ from abc import ABC, abstractmethod
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from openviking.session.memory.case_aggregation import PROPOSED_CASE_IDENTITY_FIELD
+from openviking.session.memory.experience_lifecycle import (
+    experience_file_is_archived,
+    is_experience_memory_uri,
+)
 from openviking.session.memory.utils import add_line_numbers, line_count, slice_content_lines
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.telemetry import tracer
@@ -29,6 +34,11 @@ _LLM_HIDDEN_MEMORY_FIELDS = {
     "feedback_stats",
     "_case_source_ids",
     "_case_pending_sources",
+    PROPOSED_CASE_IDENTITY_FIELD,
+    "archived_at",
+    "archive_reason",
+    "archive_replacement_uri",
+    "archived_case_uris",
 }
 
 
@@ -205,6 +215,11 @@ class MemoryReadTool(MemoryTool):
             )
             # Parse MEMORY_FIELDS from comment and return dict directly
             mf = MemoryFileUtils.read(content, uri=uri)
+            if is_experience_memory_uri(uri) and experience_file_is_archived(
+                mf,
+                uri=uri,
+            ):
+                return {"error": "Experience is archived and unavailable for Agent use"}
             ctx.read_file_contents[uri] = mf
             # Remove links/backlinks from LLM-visible output (not needed for extraction)
             llm_result = mf.to_metadata()
@@ -373,15 +388,6 @@ def register_tool(tool: MemoryTool) -> None:
 def get_tool(name: str) -> Optional[MemoryTool]:
     """Get a memory tool by name."""
     return MEMORY_TOOLS_REGISTRY.get(name)
-
-
-# Tools exposed to LLM (not all registered tools are exposed)
-LLM_TOOLS = ["read"]
-
-
-def get_tool_schemas() -> List[Dict[str, Any]]:
-    """Get tools exposed to LLM in OpenAI function schema format."""
-    return [tool.to_schema() for tool in MEMORY_TOOLS_REGISTRY.values() if tool.name in LLM_TOOLS]
 
 
 # Register default tools

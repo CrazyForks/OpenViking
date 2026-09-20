@@ -5,7 +5,7 @@ set -euo pipefail
 # are healthy, then start tau2 vikingbot batch train/eval.
 #
 # Default training args match the common vikingbot run:
-#   --commit-concurrency 150 --epochs 2 --trials 8 --train-trials 1 --skip-final-eval
+#   --commit-concurrency 200 --epochs 2 --trials 8 --train-trials 1 --skip-final-eval
 # Pass any non-launcher arguments to override/extend the batch train/eval invocation.
 #
 # Launcher-only options:
@@ -53,10 +53,12 @@ Launcher options:
   --experience-recall-mode case_ann|exp_ann|hybrid_ann
             Experience recall strategy. Default: case_ann.
             Applies to --loader-mode skill only.
-  --loader-mode skill|selector|constraint|direct_experience
+  --loader-mode skill|selector|constraint|direct_experience|auto_experience|none
             How experiences reach the agent. Default: skill.
             selector filters candidates in an isolated context and returns
             at most 2 applicable experiences.
+            auto_experience searches the original first query and injects
+            Experience top 2 bodies automatically, without skill or Case recall.
 
 All remaining args are passed to benchmark/tau2/train/run_batch_train_eval.sh.
 USAGE
@@ -176,9 +178,9 @@ validate_experience_recall_mode() {
 
 validate_loader_mode() {
   case "${LOADER_MODE_ARG}" in
-    skill|selector|constraint|direct_experience) ;;
+    skill|selector|constraint|direct_experience|auto_experience|none) ;;
     *)
-      echo "[restart-vikingbot-train] ERROR: --loader-mode must be skill, selector, constraint, or direct_experience, got: ${LOADER_MODE_ARG}" >&2
+      echo "[restart-vikingbot-train] ERROR: --loader-mode must be skill, selector, constraint, direct_experience, auto_experience, or none, got: ${LOADER_MODE_ARG}" >&2
       exit 1
       ;;
   esac
@@ -461,7 +463,7 @@ run_train_eval() {
   local -a train_args=("$@")
   if [[ ${#train_args[@]} -eq 0 ]]; then
     train_args=(
-      --commit-concurrency 150
+      --commit-concurrency 200
       --epochs 2
       --trials 8
       --train-trials 1
@@ -479,6 +481,7 @@ run_train_eval() {
     --config "${OPENVIKING_CONFIG_FILE}" \
     --server-url "http://127.0.0.1:${OPENVIKING_PORT}" \
     --result-dir-name "${RESULT_DIR_NAME}" \
+    --loader-mode "${TAU2_EXPERIENCE_LOADER_MODE}" \
     "${train_args[@]}"
 }
 

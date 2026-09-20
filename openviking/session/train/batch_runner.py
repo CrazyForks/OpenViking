@@ -23,7 +23,11 @@ from openviking.session.train.components.event_recorder import (
 )
 from openviking.session.train.components.git_notes import GitNotesPipelineReporter
 from openviking.session.train.components.progress import format_label, label_style
-from openviking.session.train.components.remote import RemoteCaseLoader, RemoteRolloutExecutor
+from openviking.session.train.components.remote import (
+    RemoteBenchmarkLifecycle,
+    RemoteCaseLoader,
+    RemoteRolloutExecutor,
+)
 from openviking.session.train.components.report_builder import PipelineReportBuilder
 from openviking.session.train.components.reporter import (
     _accuracy_style,
@@ -60,7 +64,7 @@ class BatchTrainEvalConfig:
     dataset: str
     epochs: int = 1
     batch_size: int | None = None
-    concurrency: int = 150
+    concurrency: int = 200
     config_path: str | None = None
     output_path: str | None = None
     keep_default_tools: bool = True
@@ -71,17 +75,24 @@ class BatchTrainEvalConfig:
     direct_experience_uri: str | None = None
     server_url: str | None = None
     api_key: str | None = None
+    server_headers: dict[str, str] = field(default_factory=dict)
     account_id: str = "default"
     user_id: str = "default"
     commit_keep_recent_count: int = 0
     commit_poll_interval_seconds: float = 2.0
     commit_timeout_seconds: float | None = None
-    commit_concurrency: int = 150
+    commit_concurrency: int = 200
     commit_case_spec_enabled: bool | None = None
     train_split: str = "train"
     train_index: int | str | list[int] | tuple[int, ...] | None = None
     eval_index: int | str | list[int] | tuple[int, ...] | None = None
     benchmark_service_url: str | None = None
+    viking_selection: dict[str, Any] = field(default_factory=dict)
+    viking_config_fingerprint: str = ""
+    remote_execution_timeout_seconds: float = 3600.0
+    casehub_dataset_ids: list[str] = field(default_factory=list)
+    casehub_case_ids: list[str] = field(default_factory=list)
+    casehub_eval_dataset_ids: list[str] = field(default_factory=list)
     baseline_force_recompute: bool = False
     skip_baseline_eval: bool = False
     eval_each_epoch: bool = False
@@ -90,6 +101,7 @@ class BatchTrainEvalConfig:
     trials: int = 8
     train_trials: int = 1
     reuse_train_rollout_cache: bool = False
+    resume_final_eval: bool = False
     continue_on_rollout_failure: bool = False
     clean_result: bool = True
     keep_recent_results: int = 5
@@ -111,8 +123,17 @@ class BatchTrainEvalConfig:
         if self.concurrency <= 0:
             raise ValueError("concurrency must be > 0")
         self.loader_mode = str(self.loader_mode or "skill").strip().lower()
-        if self.loader_mode not in {"skill", "constraint", "direct_experience"}:
-            raise ValueError("loader_mode must be skill, constraint, or direct_experience")
+        if self.loader_mode not in {
+            "skill",
+            "selector",
+            "constraint",
+            "direct_experience",
+            "auto_experience",
+            "none",
+        }:
+            raise ValueError(
+                "loader_mode must be skill, selector, constraint, direct_experience, auto_experience, or none"
+            )
         if self.direct_experience_content is not None:
             self.direct_experience_content = str(self.direct_experience_content).strip()
             if not self.direct_experience_content:
@@ -168,8 +189,35 @@ class BatchTrainEvalConfig:
             raise ValueError("train_trials must be > 0")
         if self.benchmark_service_url is not None and not self.benchmark_service_url.strip():
             raise ValueError("benchmark_service_url must not be empty")
+        self.casehub_dataset_ids = _normalize_text_ids(
+            self.casehub_dataset_ids,
+            label="casehub_dataset_ids",
+        )
+        self.casehub_case_ids = _normalize_text_ids(
+            self.casehub_case_ids,
+            label="casehub_case_ids",
+        )
+        self.casehub_eval_dataset_ids = _normalize_text_ids(
+            self.casehub_eval_dataset_ids,
+            label="casehub_eval_dataset_ids",
+        )
+        if self.dataset == "ark4-0" and (
+            self.casehub_dataset_ids or self.casehub_case_ids or self.casehub_eval_dataset_ids
+        ):
+            raise ValueError(
+                "ark4-0 now uses Viking directly; use --viking-train/eval-set-id, not CaseHub flags"
+            )
+        if self.casehub_case_ids and not self.casehub_dataset_ids:
+            raise ValueError("casehub_dataset_ids is required when casehub_case_ids is set")
         if self.keep_recent_results < 0:
             raise ValueError("keep_recent_results must be >= 0")
+        if self.resume_final_eval:
+            if self.clean_result:
+                raise ValueError("resume_final_eval requires clean_result=False")
+            if self.eval_split is None:
+                raise ValueError("resume_final_eval requires an eval split")
+            if self.skip_final_eval:
+                raise ValueError("resume_final_eval cannot be combined with skip_final_eval")
         if not str(self.result_dir_name or "").strip():
             raise ValueError("result_dir_name must not be empty")
 
@@ -205,6 +253,26 @@ def _normalize_index_filter(value: Any, *, label: str) -> list[int] | None:
             result.append(index)
     if not result:
         raise ValueError(f"{label} must not be empty")
+    return result
+
+
+def _normalize_text_ids(value: Any, *, label: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [value]
+    else:
+        try:
+            raw_items = list(value)
+        except TypeError as exc:
+            raise ValueError(f"{label} must be a list of strings") from exc
+    result: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text:
+            raise ValueError(f"{label} must not contain empty values")
+        if text not in result:
+            result.append(text)
     return result
 
 
@@ -248,12 +316,22 @@ class BatchTrainEvalReport:
     run_id: str = ""
     server_url: str = ""
     benchmark_service_url: str | None = None
+    benchmark_task_id: str | None = None
+    benchmark_task_ids: list[int] = field(default_factory=list)
+    viking_selection: dict[str, Any] = field(default_factory=dict)
+    casehub_dataset_ids: list[str] = field(default_factory=list)
+    casehub_case_ids: list[str] = field(default_factory=list)
+    casehub_eval_dataset_ids: list[str] = field(default_factory=list)
+    casehub_case_count: int | None = None
     eval_each_epoch: bool = False
     eval_split: str | None = "test"
     skip_baseline_eval: bool = False
     trials: int = 8
     train_trials: int = 1
     reuse_train_rollout_cache: bool = False
+    resume_final_eval: bool = False
+    resumed_eval_count: int = 0
+    executed_eval_count: int = 0
     rollouts_root: str | None = None
     rollouts_index_path: str | None = None
     latest_failed_rollout: str | None = None
@@ -291,12 +369,22 @@ class BatchTrainEvalReport:
             "run_id": self.run_id,
             "server_url": self.server_url,
             "benchmark_service_url": self.benchmark_service_url,
+            "benchmark_task_id": self.benchmark_task_id,
+            "benchmark_task_ids": self.benchmark_task_ids,
+            "viking_selection": self.viking_selection,
+            "casehub_dataset_ids": self.casehub_dataset_ids,
+            "casehub_case_ids": self.casehub_case_ids,
+            "casehub_eval_dataset_ids": self.casehub_eval_dataset_ids,
+            "casehub_case_count": self.casehub_case_count,
             "eval_each_epoch": self.eval_each_epoch,
             "eval_split": self.eval_split,
             "skip_baseline_eval": self.skip_baseline_eval,
             "trials": self.trials,
             "train_trials": self.train_trials,
             "reuse_train_rollout_cache": self.reuse_train_rollout_cache,
+            "resume_final_eval": self.resume_final_eval,
+            "resumed_eval_count": self.resumed_eval_count,
+            "executed_eval_count": self.executed_eval_count,
             "rollouts_root": self.rollouts_root,
             "rollouts_index_path": self.rollouts_index_path,
             "latest_failed_rollout": self.latest_failed_rollout,
@@ -326,7 +414,7 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
         _clean_result_dir(config)
         client = _build_http_client(config)
         await client.initialize()
-        policy_root_uri = "viking://user/memories/experiences"
+        policy_root_uri = f"viking://user/{config.user_id}/memories/experiences"
         policy_set = ExperienceSet(
             root_uri=policy_root_uri,
             policies=[],
@@ -358,6 +446,7 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             trials=config.trials,
             train_trials=config.train_trials,
             reuse_train_rollout_cache=config.reuse_train_rollout_cache,
+            resume_final_eval=config.resume_final_eval,
             clean_result=config.clean_result,
             keep_recent_results=config.keep_recent_results,
             result_dir_name=config.result_dir_name,
@@ -365,6 +454,9 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             skip_baseline_eval=config.skip_baseline_eval,
             eval_split=config.eval_split,
             skip_final_eval=config.skip_final_eval,
+            casehub_dataset_ids=config.casehub_dataset_ids,
+            casehub_case_ids=config.casehub_case_ids,
+            casehub_eval_dataset_ids=config.casehub_eval_dataset_ids,
             git=git_metadata,
             baseline_cache_path=(
                 None
@@ -385,7 +477,49 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
         )
         git_notes_hooks = [git_notes_reporter] if git_notes_reporter is not None else []
         event_recorder.default_fields["run_id"] = policy_trainer.run_id
-        pipeline = _build_pipeline(config, policy_trainer)
+        benchmark_lifecycle = RemoteBenchmarkLifecycle(
+            service_url=_require_benchmark_service_url(config)
+        )
+        benchmark_run = await benchmark_lifecycle.start(
+            run_id=policy_trainer.run_id,
+            dataset=config.dataset,
+            domain=config.domain,
+            concurrency=config.concurrency,
+            training_plan={
+                "train_epochs": config.epochs,
+                "train_trials": config.train_trials,
+                "eval_trials": config.trials,
+            },
+            casehub_dataset_ids=_lifecycle_casehub_dataset_ids(config),
+            casehub_case_ids=config.casehub_case_ids,
+            task_casehub_dataset_ids=config.casehub_dataset_ids,
+            **({"viking_selection": config.viking_selection} if config.viking_selection else {}),
+            **({"required_backend": "viking_direct"} if config.dataset == "ark4-0" else {}),
+        )
+        if benchmark_run is not None and benchmark_run.get("backend") == "viking_direct":
+            config.viking_config_fingerprint = benchmark_run["config_fingerprint"]
+            config.remote_execution_timeout_seconds = float(
+                benchmark_run["execution_timeout_seconds"]
+            )
+        benchmark_run_id = policy_trainer.run_id if benchmark_run is not None else None
+        benchmark_task_id = (
+            str(benchmark_run.get("task_id") or "") or None if benchmark_run is not None else None
+        )
+        casehub_case_count = (
+            int(benchmark_run["case_count"])
+            if benchmark_run is not None and benchmark_run.get("case_count") is not None
+            else None
+        )
+        if benchmark_task_id is not None:
+            print(
+                f"benchmark task started: {benchmark_task_id} "
+                f"(run_id={policy_trainer.run_id}, cases={casehub_case_count})"
+            )
+        pipeline = _build_pipeline(
+            config,
+            policy_trainer,
+            benchmark_run_id=benchmark_run_id,
+        )
         rollout_artifact_recorder = RolloutArtifactRecorder(
             run_dir=run_dir,
             client=client,
@@ -394,7 +528,12 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
         )
         remote_executor = getattr(pipeline, "rollout_executor", None)
         if isinstance(
-            remote_executor, (RemoteRolloutExecutor, CachedEpochZeroTrainRolloutExecutor)
+            remote_executor,
+            (
+                RemoteRolloutExecutor,
+                CachedEpochZeroTrainRolloutExecutor,
+                ResumedFinalEvalRolloutExecutor,
+            ),
         ):
             remote_executor.on_rollout_complete = (
                 rollout_artifact_recorder.record_rollout_completion
@@ -420,11 +559,14 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
                 config,
                 split=config.eval_split,
                 sample_index=effective_eval_index,
+                benchmark_run_id=benchmark_run_id,
+                casehub_dataset_ids=(config.casehub_eval_dataset_ids or config.casehub_dataset_ids),
             )
         )
         if (
             eval_loader is not None
             and not config.skip_baseline_eval
+            and not config.resume_final_eval
             and await eval_loader.split_exists()
         ):
             if git_notes_reporter is not None:
@@ -469,12 +611,6 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
                             context=None,
                         )
 
-        train_loader = _case_loader(
-            config,
-            split=config.train_split,
-            sample_index=config.train_index,
-        )
-
         train_context = _pipeline_context(
             epoch=0,
             training=True,
@@ -508,18 +644,32 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
         train_context.lifecycle_hooks = list(train_context.lifecycle_hooks) + [
             rollout_artifact_recorder
         ]
-        if git_notes_reporter is not None:
-            git_notes_reporter.mark_stage("train epoch 0", epoch=0)
-        train_result = await pipeline.train(
-            case_loader=train_loader,
-            policy_set=policy_set,
-            context=train_context,
-        )
-        policy_set = train_result.apply_result.updated_policy_set
-        # Note: per-epoch rollout artifacts are written incrementally via the
-        # rollout_artifact_recorder lifecycle hook registered on train_context.
+        train_result = None
+        if config.resume_final_eval:
+            await event_recorder.record(
+                "train_skipped_for_final_eval_resume",
+                stage="train_resume",
+            )
+        else:
+            train_loader = _case_loader(
+                config,
+                split=config.train_split,
+                sample_index=config.train_index,
+                benchmark_run_id=benchmark_run_id,
+                casehub_dataset_ids=config.casehub_dataset_ids,
+            )
+            if git_notes_reporter is not None:
+                git_notes_reporter.mark_stage("train epoch 0", epoch=0)
+            train_result = await pipeline.train(
+                case_loader=train_loader,
+                policy_set=policy_set,
+                context=train_context,
+            )
+            policy_set = train_result.apply_result.updated_policy_set
+            # Note: per-epoch rollout artifacts are written incrementally via the
+            # rollout_artifact_recorder lifecycle hook registered on train_context.
 
-        epoch_eval_reports = _epoch_eval_reports(train_result)
+        epoch_eval_reports = _epoch_eval_reports(train_result) if train_result else []
         final_eval_source: str | None = None
         if config.skip_final_eval:
             if epoch_eval_reports:
@@ -555,9 +705,23 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             final_eval = final_result.metadata["report"]
             final_eval_source = f"final_{config.eval_split}"
 
+        resume_executor = _resumed_final_eval_executor(pipeline)
+        resumed_eval_count = resume_executor.cache_hit_count if resume_executor else 0
+        executed_eval_count = resume_executor.cache_miss_count if resume_executor else 0
+        if final_eval is not None and resume_executor is not None:
+            final_eval = {
+                **final_eval,
+                "resume_cache_hit_count": resumed_eval_count,
+                "resume_executed_count": executed_eval_count,
+            }
+
         accuracy_delta = report_builder.accuracy_delta(baseline_eval, final_eval)
         rollout_artifact_index = rollout_artifact_recorder.finalize()
-        train_epoch_reports = list(train_result.metadata.get("train_reports", []))
+        train_epoch_reports = (
+            _load_existing_train_epoch_reports(_events_path(config))
+            if config.resume_final_eval
+            else list(train_result.metadata.get("train_reports", []))
+        )
         train_error_count = sum(
             len(epoch_report.get("errors") or []) for epoch_report in train_epoch_reports
         )
@@ -583,12 +747,21 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             run_id=policy_trainer.run_id,
             server_url=client_url(client),
             benchmark_service_url=config.benchmark_service_url,
+            benchmark_task_id=benchmark_task_id,
+            viking_selection=(benchmark_run.get("selections", {}) if benchmark_run else {}),
+            casehub_dataset_ids=list(config.casehub_dataset_ids),
+            casehub_case_ids=list(config.casehub_case_ids),
+            casehub_eval_dataset_ids=list(config.casehub_eval_dataset_ids),
+            casehub_case_count=casehub_case_count,
             eval_each_epoch=config.eval_each_epoch,
             eval_split=config.eval_split,
             skip_baseline_eval=config.skip_baseline_eval,
             trials=config.trials,
             train_trials=config.train_trials,
             reuse_train_rollout_cache=config.reuse_train_rollout_cache,
+            resume_final_eval=config.resume_final_eval,
+            resumed_eval_count=resumed_eval_count,
+            executed_eval_count=executed_eval_count,
             rollouts_root=rollout_artifact_index.rollouts_root,
             rollouts_index_path=str(run_dir / "rollouts_index.json"),
             latest_failed_rollout=rollout_artifact_index.latest_failed_rollout,
@@ -632,6 +805,11 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
                 "commit_case_spec_enabled": config.commit_case_spec_enabled,
                 "reuse_train_rollout_cache": config.reuse_train_rollout_cache,
                 "run_id": policy_trainer.run_id,
+                "benchmark_task_id": benchmark_task_id,
+                "casehub_dataset_ids": config.casehub_dataset_ids,
+                "casehub_case_ids": config.casehub_case_ids,
+                "casehub_eval_dataset_ids": config.casehub_eval_dataset_ids,
+                "casehub_case_count": casehub_case_count,
                 "trace_id": report.trace_id,
                 "baseline_cache_hit": report.baseline_cache_hit,
                 "skip_baseline_eval": report.skip_baseline_eval,
@@ -651,6 +829,19 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
             rollouts_index_path=report.rollouts_index_path,
             latest_failed_rollout=report.latest_failed_rollout,
         )
+        if benchmark_run_id is not None:
+            if train_error_count and not config.resume_final_eval:
+                raise RuntimeError(
+                    f"training finished with {train_error_count} commit error(s); "
+                    f"platform task {benchmark_task_id or benchmark_run_id} was not completed"
+                )
+            completion = await benchmark_lifecycle.complete(run_id=benchmark_run_id)
+            report.benchmark_task_ids = completion.get("task_ids", [])
+            _write_report(report, config)
+            print(
+                f"benchmark task completed: "
+                f"{completion.get('task_id') or benchmark_task_id or benchmark_run_id}"
+            )
         return report
     except BaseException as error:
         if git_notes_reporter is not None:
@@ -684,6 +875,9 @@ def _build_http_client(config: BatchTrainEvalConfig) -> AsyncHTTPClient:
     # identity and account/user assertion headers must not be sent.
     account = config.account_id if auth_mode == AuthMode.TRUSTED else None
     user = config.user_id if auth_mode == AuthMode.TRUSTED else None
+    client_kwargs: dict[str, Any] = {}
+    if config.server_headers:
+        client_kwargs["extra_headers"] = dict(config.server_headers)
     return AsyncHTTPClient(
         url=server_url,
         api_key=api_key,
@@ -691,6 +885,7 @@ def _build_http_client(config: BatchTrainEvalConfig) -> AsyncHTTPClient:
         user=user,
         profile_enabled=False,
         timeout=max(60.0, (config.commit_timeout_seconds or 600.0) + 30.0),
+        **client_kwargs,
     )
 
 
@@ -852,6 +1047,8 @@ def _eval_rollout_stage(kind: str, split: str | None) -> str:
 def _build_pipeline(
     config: BatchTrainEvalConfig,
     policy_trainer: SessionCommitPolicyTrainer,
+    *,
+    benchmark_run_id: str | None = None,
 ) -> OfflinePolicyOptimizationPipeline:
     rollout_options: dict[str, Any] = {
         "config_path": config.config_path,
@@ -859,6 +1056,8 @@ def _build_pipeline(
         "loader_mode": config.loader_mode,
         "max_iterations": config.max_iterations,
     }
+    if benchmark_run_id is not None:
+        rollout_options["_openviking_benchmark_run_id"] = benchmark_run_id
     if config.loader_mode == "direct_experience":
         rollout_options.update(
             {
@@ -871,6 +1070,7 @@ def _build_pipeline(
         service_url=_require_benchmark_service_url(config),
         concurrency=config.concurrency,
         continue_on_rollout_failure=config.continue_on_rollout_failure,
+        execution_timeout_seconds=config.remote_execution_timeout_seconds,
         show_progress=True,
         progress_label="rollout",
         options=rollout_options,
@@ -880,6 +1080,15 @@ def _build_pipeline(
             delegate=rollout_executor,
             cache_dir=_train_rollout_cache_dir(config),
             cache_key_prefix=_train_rollout_cache_key_prefix(config),
+            artifact_run_dir=_run_output_dir(config),
+        )
+    if config.resume_final_eval:
+        rollout_executor = ResumedFinalEvalRolloutExecutor(
+            delegate=rollout_executor,
+            run_dir=_run_output_dir(config),
+            epoch=config.epochs,
+            rollout_stage=_eval_rollout_stage("final", config.eval_split),
+            trial_index_key="eval_trial",
         )
     return OfflinePolicyOptimizationPipeline(
         snapshotter=ContentHashPolicySnapshotter(prefix=f"{config.dataset}-policy-snapshot"),
@@ -963,10 +1172,16 @@ def _case_loader(
     *,
     split: str,
     sample_index: list[int] | None,
+    benchmark_run_id: str | None = None,
+    casehub_dataset_ids: list[str] | None = None,
 ) -> RemoteCaseLoader:
     filters: dict[str, Any] = {}
     if sample_index is not None:
         filters["task_indices"] = list(sample_index)
+    if benchmark_run_id is not None:
+        filters["_openviking_benchmark_run_id"] = benchmark_run_id
+    if casehub_dataset_ids:
+        filters["_openviking_casehub_dataset_ids"] = list(casehub_dataset_ids)
     return RemoteCaseLoader(
         service_url=_require_benchmark_service_url(config),
         dataset=config.dataset,
@@ -975,6 +1190,10 @@ def _case_loader(
         batch_size=config.batch_size,
         filters=filters,
     )
+
+
+def _lifecycle_casehub_dataset_ids(config: BatchTrainEvalConfig) -> list[str]:
+    return list(dict.fromkeys(config.casehub_dataset_ids + config.casehub_eval_dataset_ids))
 
 
 @dataclass(slots=True)
@@ -989,7 +1208,33 @@ class CachedEpochZeroTrainRolloutExecutor:
     delegate: Any
     cache_dir: Path
     cache_key_prefix: str
+    artifact_run_dir: Path | None = None
     on_rollout_complete: Any | None = None
+    _artifact_cache: dict[tuple[str, int], tuple[Rollout, Path]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.artifact_run_dir is None:
+            return
+        stage_dir = self.artifact_run_dir / "rollouts"
+        for path in stage_dir.glob("*/epoch_0/*train_rollout/trial_*/rollout.json"):
+            if path.parent.parent.name.startswith("final_"):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                messages_path = path.with_name("messages.json")
+                if messages_path.exists():
+                    payload["messages"] = json.loads(messages_path.read_text(encoding="utf-8"))
+                rollout = rollout_from_dict(payload)
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                continue
+            self._artifact_cache[_train_rollout_artifact_key(rollout.case)] = (
+                rollout,
+                path,
+            )
 
     async def execute(
         self,
@@ -1054,15 +1299,25 @@ class CachedEpochZeroTrainRolloutExecutor:
 
     def _load(self, case: Case) -> Rollout | None:
         path = self._path(case)
-        if not path.exists():
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("cache_version") != 1:
+                raise ValueError(f"unsupported train rollout cache version in {path}")
+            rollout_data = payload.get("rollout")
+            if not isinstance(rollout_data, dict):
+                raise ValueError(f"train rollout cache file has no rollout: {path}")
+            return rollout_from_dict(rollout_data)
+
+        artifact_entry = self._artifact_cache.get(_train_rollout_artifact_key(case))
+        if artifact_entry is None:
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("cache_version") != 1:
-            raise ValueError(f"unsupported train rollout cache version in {path}")
-        rollout_data = payload.get("rollout")
-        if not isinstance(rollout_data, dict):
-            raise ValueError(f"train rollout cache file has no rollout: {path}")
-        return rollout_from_dict(rollout_data)
+        rollout, artifact_path = artifact_entry
+        rollout_metadata = dict(rollout.metadata or {})
+        rollout_metadata["train_rollout_artifact_cache_hit"] = True
+        rollout_metadata["train_rollout_artifact_cache_path"] = str(artifact_path)
+        rollout.metadata = rollout_metadata
+        self._write(case, rollout)
+        return rollout
 
     def _write(self, case: Case, rollout: Rollout) -> None:
         path = self._path(case)
@@ -1093,6 +1348,159 @@ class CachedEpochZeroTrainRolloutExecutor:
         )
         if inspect.isawaitable(result):
             await result
+
+
+def _train_rollout_artifact_key(case: Case) -> tuple[str, int]:
+    case_id = str(
+        case.metadata.get("platform_case_id") or case.input.get("task_id") or case.task_signature
+    )
+    trial_value = case.input.get("train_trial", case.metadata.get("train_trial", 0))
+    return case_id, int(trial_value or 0)
+
+
+@dataclass(slots=True)
+class ResumedFinalEvalRolloutExecutor:
+    """Reuse persisted final-eval rollouts and execute only missing trials."""
+
+    delegate: Any
+    run_dir: Path
+    epoch: int
+    rollout_stage: str
+    trial_index_key: str = "eval_trial"
+    on_rollout_complete: Any | None = None
+    cache_hit_count: int = 0
+    cache_miss_count: int = 0
+    _cache: dict[tuple[str, int], tuple[Rollout, Path]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        stage_dir = self.run_dir / "rollouts"
+        pattern = f"*/epoch_{self.epoch}/{self.rollout_stage}/trial_*/rollout.json"
+        for path in stage_dir.glob(pattern):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            messages_path = path.with_name("messages.json")
+            if messages_path.exists():
+                payload["messages"] = json.loads(messages_path.read_text(encoding="utf-8"))
+            rollout = rollout_from_dict(payload)
+            self._cache[_final_eval_resume_key(rollout.case, self.trial_index_key)] = (
+                rollout,
+                path,
+            )
+
+    async def execute(
+        self,
+        cases: list[Case],
+        policy_set: ExperienceSet,
+        context: ExecutionContext,
+    ) -> list[Rollout]:
+        metadata = dict(context.metadata or {})
+        if bool(metadata.get("training")) or metadata.get("stage") != self.rollout_stage:
+            return await self.delegate.execute(cases, policy_set, context)
+
+        case_list = list(cases)
+        results: list[Rollout | None] = [None] * len(case_list)
+        misses: list[tuple[int, Case]] = []
+        for index, case in enumerate(case_list):
+            cached_entry = self._cache.get(_final_eval_resume_key(case, self.trial_index_key))
+            if cached_entry is None:
+                misses.append((index, case))
+                continue
+            cached, path = cached_entry
+            cached.policy_snapshot_id = context.policy_snapshot_id
+            rollout_metadata = dict(cached.metadata or {})
+            rollout_metadata["final_eval_resume_cache_hit"] = True
+            rollout_metadata["final_eval_resume_cache_path"] = str(path)
+            cached.metadata = rollout_metadata
+            results[index] = cached
+            self.cache_hit_count += 1
+            await self._emit_rollout_complete(
+                rollout=cached,
+                index=index,
+                context=context,
+            )
+
+        if misses:
+            miss_rollouts = await self.delegate.execute(
+                [case for _, case in misses],
+                policy_set,
+                context,
+            )
+            self.cache_miss_count += len(miss_rollouts)
+            for (index, _case), rollout in zip(misses, miss_rollouts, strict=True):
+                results[index] = rollout
+                await self._emit_rollout_complete(
+                    rollout=rollout,
+                    index=index,
+                    context=context,
+                )
+
+        print(
+            f"[batch-train-eval] final eval resume: reused={self.cache_hit_count} "
+            f"executed={self.cache_miss_count}",
+            flush=True,
+        )
+        return [rollout for rollout in results if rollout is not None]
+
+    async def _emit_rollout_complete(
+        self,
+        *,
+        rollout: Rollout,
+        index: int,
+        context: ExecutionContext,
+    ) -> None:
+        if self.on_rollout_complete is None:
+            return
+        result = self.on_rollout_complete(
+            rollout=rollout,
+            index=index,
+            context=context,
+        )
+        if inspect.isawaitable(result):
+            await result
+
+
+def _final_eval_resume_key(case: Case, trial_index_key: str) -> tuple[str, int]:
+    case_id = str(
+        case.metadata.get("platform_case_id") or case.input.get("task_id") or case.task_signature
+    )
+    trial_value = case.input.get(
+        trial_index_key,
+        case.metadata.get(trial_index_key, 0),
+    )
+    return case_id, int(trial_value or 0)
+
+
+def _resumed_final_eval_executor(
+    pipeline: OfflinePolicyOptimizationPipeline,
+) -> ResumedFinalEvalRolloutExecutor | None:
+    executor = getattr(pipeline, "rollout_executor", None)
+    return executor if isinstance(executor, ResumedFinalEvalRolloutExecutor) else None
+
+
+def _load_existing_train_epoch_reports(path: Path) -> list[dict[str, Any]]:
+    """Load the latest persisted train_result event for every completed epoch."""
+
+    reports_by_epoch: dict[int, dict[str, Any]] = {}
+    if not path.exists():
+        return []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if '"event": "train_result"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") != "train_result":
+            continue
+        try:
+            epoch = int(event.get("epoch"))
+        except (TypeError, ValueError):
+            continue
+        reports_by_epoch[epoch] = event
+    return [reports_by_epoch[epoch] for epoch in sorted(reports_by_epoch)]
 
 
 def _require_benchmark_service_url(config: BatchTrainEvalConfig) -> str:
@@ -1183,6 +1591,8 @@ def _write_run_metadata(
         "result_dir_name": config.result_dir_name,
         "train_split": config.train_split,
         "commit_case_spec_enabled": config.commit_case_spec_enabled,
+        "casehub_dataset_ids": config.casehub_dataset_ids,
+        "casehub_case_ids": config.casehub_case_ids,
         "git": git_metadata,
     }
     (run_dir / "run_metadata.json").write_text(
@@ -1218,6 +1628,14 @@ def _train_rollout_cache_dir(config: BatchTrainEvalConfig) -> Path:
 
 def _train_rollout_cache_key_prefix(config: BatchTrainEvalConfig) -> str:
     payload = {
+        **(
+            {
+                "viking_selection": config.viking_selection,
+                "viking_config_fingerprint": config.viking_config_fingerprint,
+            }
+            if config.viking_selection or config.viking_config_fingerprint
+            else {}
+        ),
         "dataset": config.dataset,
         "domain": config.domain,
         "split": config.train_split,
@@ -1227,6 +1645,8 @@ def _train_rollout_cache_key_prefix(config: BatchTrainEvalConfig) -> str:
         "keep_default_tools": config.keep_default_tools,
         "loader_mode": config.loader_mode,
         "direct_experience": _direct_experience_summary(config),
+        "casehub_dataset_ids": config.casehub_dataset_ids,
+        "casehub_case_ids": config.casehub_case_ids,
     }
     stable = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     digest = sha256(stable.encode("utf-8")).hexdigest()[:16]
@@ -1240,6 +1660,14 @@ def _train_rollout_cache_key_prefix(config: BatchTrainEvalConfig) -> str:
 def _baseline_cache_key(config: BatchTrainEvalConfig) -> str:
     effective_eval_index = _effective_eval_index(config)
     payload = {
+        **(
+            {
+                "viking_selection": config.viking_selection,
+                "viking_config_fingerprint": config.viking_config_fingerprint,
+            }
+            if config.viking_selection or config.viking_config_fingerprint
+            else {}
+        ),
         "dataset": config.dataset,
         "domain": config.domain,
         "split": config.eval_split,
@@ -1249,6 +1677,8 @@ def _baseline_cache_key(config: BatchTrainEvalConfig) -> str:
         "keep_default_tools": config.keep_default_tools,
         "loader_mode": config.loader_mode,
         "direct_experience": _direct_experience_summary(config),
+        "casehub_dataset_ids": config.casehub_dataset_ids,
+        "casehub_case_ids": config.casehub_case_ids,
     }
     stable = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     digest = sha256(stable.encode("utf-8")).hexdigest()[:16]

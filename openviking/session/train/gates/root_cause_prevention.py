@@ -21,6 +21,14 @@ from .models import GateDecision, GateMode, GateTarget
 logger = get_logger(__name__)
 
 
+_TERMINAL_UNLEARNABLE_QUALITIES = {
+    "evaluator_only_requirement",
+    "external_dependency_failure",
+    "missing_required_input",
+    "tool_infrastructure_failure",
+}
+
+
 @dataclass(slots=True)
 class ExperienceRootCausePreventionGate:
     """LLM gate for extracted experience prevention quality.
@@ -140,19 +148,26 @@ class ExperienceRootCausePreventionGate:
                 )
             return None
 
+        terminal_unlearnable = _is_terminal_unlearnable_rejection(result)
+
         return GateDecision(
             gate_name=self.name,
             action="reject",
             reason=result["reason"] or "experience does not pass counterfactual prevention review",
             evidence=evidence,
-            retriable=True,
+            retriable=not terminal_unlearnable,
             repair_prompt=(
-                result["repair_prompt"]
+                ""
+                if terminal_unlearnable
+                else result["repair_prompt"]
                 or "Rewrite or remove this experience. The repaired experience must be supported "
                 "by the source trajectory, trigger before the first preventable wrong decision, "
-                "state the narrow runtime rule that replaces the mistaken decision rule, preserve "
-                "any coupled communication/action-scope distinction needed to prevent recurrence, "
-                "avoid temporal `Does not apply when` clauses that block skill loading, "
+                "state the narrow runtime rule that replaces the mistaken decision rule, explain "
+                "what result should hold, how to verify it independently, and how to repair and "
+                "repeat that verification, provide a safe fallback when evidence or capability "
+                "is unavailable, "
+                "preserve any coupled communication/action-scope distinction needed to prevent "
+                "recurrence, avoid temporal `Does not apply when` clauses that block skill loading, "
                 "and explain what future behavior changes so the next similar session succeeds "
                 "without blocking nearby correct behavior."
             ),
@@ -205,9 +220,14 @@ def _experience_root_cause_prevention_prompt(
     comparison_content = _comparison_trajectory_context(trajectory)
     trajectory_uri = trajectory.uri if trajectory is not None else ""
     trajectory_outcome = trajectory.outcome if trajectory is not None else ""
+    trajectory_recovery_evidence = (
+        dict(getattr(trajectory, "metadata", {}) or {}).get("recovery_evidence", "")
+        if trajectory is not None
+        else ""
+    )
     target_experience_was_loaded = _target_experience_was_loaded(target)
 
-    return f"""You are a senior counterfactual failure diagnostician for agent experience extraction.
+    return f"""You are a senior counterfactual failure and recovery diagnostician for agent experience extraction.
 
 Review ONE proposed experience update.  The proposed experience will be injected
 through the skill experience loader in future sessions: the agent searches
@@ -234,7 +254,11 @@ Prior experience execution:
   failure boundary.
 
 Evidence authority:
-- Direct evaluation evidence establishes whether the source trajectory failed.
+- Direct evaluation evidence establishes whether the source trajectory failed or completed.
+- A successful source trajectory is eligible only when its structured recovery evidence is
+  `observed_recovered` and the runtime trace independently proves a material failed path, an
+  actually executed compatible alternative, and a verified recovered result. In that mode, judge
+  only the narrow failure-to-alternative switch; reject the surrounding positive workflow or SOP.
 - A successful comparison trajectory may establish the required observable action
   or output delta even when the failed trajectory does not explain why it was correct.
 - Do not reject a candidate merely because that successful action appears only in
@@ -259,9 +283,11 @@ Candidate-local review rule:
   return `pass: true`. Judge those siblings as separate candidates.
 
 Pass only when all are true:
-1. Direct evaluation evidence supports the failed outcome or unmet requirement.
-   Any claimed internal cause is separately supported by an observation,
-   decision, action, verification, or output in the source trajectory.
+1. Either direct evaluation evidence supports a failed outcome or unmet requirement and the source
+   trajectory exposes the agent-controllable boundary, or the source is a successful
+   `observed_recovered` trajectory whose trace proves the failed boundary, executed alternative,
+   and final verification. A recovery candidate must encode that narrow observed switch rather
+   than the full successful path.
 2. The experience is directly preventive: it changes a future tool call, missing
    tool call, confirmation, calculation, policy branch, write, communication, or
    final answer before or at the failing boundary.
@@ -272,9 +298,12 @@ Pass only when all are true:
    evidence, decision boundary, and minimal repair. Do not fail an otherwise
    complete experience merely because the trajectory also contains unrelated
    failures that should become separate experiences.
-5. When evaluation proves a reusable requirement failure but the internal cause
-   is unknown, a narrow verification reminder at the earliest observable output
-   or action boundary is acceptable; do not invent a hidden cause.
+5. The behavior change is learnable by the agent. Missing required input, unavailable external
+   services, tool or infrastructure failures, and evaluator-only requirements are not learnable
+   by themselves. However, a successful `observed_recovered` trajectory may teach a switch to a
+   compatible alternative that the agent actually executed and verified; encode the switch and
+   preserved constraint, not a guessed outage cause. When neither a controllable prevention nor a
+   confirmed recovery action exists, reject instead of writing a generic reminder.
 6. `Does not apply when` names a real task-pattern mismatch, not a temporal
    loader stage such as still reading/writing, before final_response, or before
    writes complete. Temporal wording would make the future agent skip reading an
@@ -289,6 +318,21 @@ Pass only when all are true:
    request, source, or available tools. Never require source-case example numbers,
    dates, tab names, paths, filenames, or tool identifiers in the experience or in
    a repair instruction when a capability or semantic source role is sufficient.
+10. The six-section injection contract is complete: Situation, Reminder, Procedure,
+    Verification, Fallback, and Anti-pattern. Procedure contains only the actions for
+    the one root repair. Verification states the runtime-verifiable result or relationship,
+    checks it independently without letting the output prove itself, and repeats the same
+    check after repair. File existence, successful opening, or absence of parser errors is
+    insufficient when business correctness can be checked from authoritative input.
+11. Fallback preserves evidence integrity when a source, capability, conversion, or check
+    is unavailable. It uses a verifiable alternative when possible; otherwise it asks,
+    discloses the limitation, or stops the affected boundary instead of fabricating data,
+    silently weakening the request, or discarding unrelated correct work.
+12. The experience passes a transfer test: replacing source-case entities, dates, amounts,
+    filenames, and other instance values with different valid values from the same task family
+    leaves its applicability discriminator, decision rule, actions, verification relationship,
+    and fallback correct. If that substitution breaks the lesson, it is a source-task paraphrase,
+    not reusable Experience.
 
 Fail when the proposed experience only summarizes the task, fires too late,
 uses unsupported or hidden facts not present in the source/comparison
@@ -298,6 +342,17 @@ avoid skill loading, lacks a
 concrete future behavior change, mandates unrequested conventional content,
 hardcodes factual outputs as a substitute for implementation, or would likely
 harm correct behavior.
+
+For failures that must not become an experience, use these terminal qualities. They remain
+terminal unless a successful `observed_recovered` source proves a compatible alternative that
+actually completed and verified the requested result:
+- `missing_required_input`: required runtime evidence was not supplied and the agent
+  could not obtain an authoritative substitute.
+- `external_dependency_failure`: an external service was unavailable, reset, or timed out.
+- `tool_infrastructure_failure`: a tool, sandbox, transport, or execution environment failed.
+- `evaluator_only_requirement`: the failed requirement exists only in evaluation and is
+  absent from the user request, authoritative source, and runtime contract.
+Do not propose a rewrite for these terminal qualities. The candidate must be discarded.
 
 When suggesting a repair, preserve these same constraints: request a semantic
 runtime binding and one behavior delta, never source-case literals or a broader
@@ -317,13 +372,16 @@ If failing, set "pass": false, choose root_cause_quality from:
 surface_level, unsupported, not_preventive, too_late_boundary,
 wrong_scope, mixed_root_causes, missing_source_binding,
 missing_behavior_change, not_injectable, over_broad,
-temporal_non_applicability, unsafe, unclear.
+temporal_non_applicability, unsafe, unclear,
+missing_required_input, external_dependency_failure,
+tool_infrastructure_failure, evaluator_only_requirement.
 Set repair_prompt to one concise instruction for rewriting or removing this
 specific experience. Do not ask for any output schema.
 
 ## Source trajectory
 uri: {trajectory_uri}
 outcome: {trajectory_outcome}
+recovery_evidence: {json.dumps(trajectory_recovery_evidence, ensure_ascii=False, default=str)}
 
 {trajectory_content}
 
@@ -474,6 +532,29 @@ def _normalize_experience_prevention_result(parsed: dict[str, Any]) -> dict[str,
         "repair_prompt": str(repair_prompt or ""),
         "risks": [str(item) for item in risks if str(item)],
     }
+
+
+def _is_terminal_unlearnable_rejection(result: dict[str, Any]) -> bool:
+    quality = str(result.get("root_cause_quality") or "")
+    if quality in _TERMINAL_UNLEARNABLE_QUALITIES:
+        return True
+
+    # Keep compatibility with older model outputs that used a broad quality label
+    # but clearly described an unlearnable failure in the reason.
+    if quality not in {"not_preventive", "unsupported"}:
+        return False
+    reason = str(result.get("reason") or "")
+    return bool(
+        re.search(
+            r"(?i)(?:missing|required input|input (?:was )?not (?:provided|available)|"
+            r"external (?:service|dependency)|service (?:timeout|timed out|unavailable|reset)|"
+            r"tool (?:failure|error|unavailable)|sandbox|infrastructure|transport|"
+            r"evaluator[- ]only|unrequested evaluation requirement|"
+            r"缺少.{0,12}(?:输入|字段|附件)|外部(?:服务|依赖)|工具(?:故障|失败)|"
+            r"沙箱|基础设施|评估器独有|仅评测要求)",
+            reason,
+        )
+    )
 
 
 def _needs_candidate_local_reconsideration(result: dict[str, Any]) -> bool:

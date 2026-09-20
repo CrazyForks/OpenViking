@@ -14,6 +14,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.viking_fs import VikingFS
 from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.exceptions import InvalidArgumentError
+from openviking_cli.retrieve import ContextType, FindResult, MatchedContext
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -56,6 +57,145 @@ async def test_find_basic(client_with_resource):
 
 
 @pytest.mark.parametrize("endpoint", ["/api/v1/search/find", "/api/v1/search/search"])
+async def test_search_endpoints_inline_visible_content_when_requested(
+    client: httpx.AsyncClient, service, monkeypatch, endpoint: str
+):
+    async def fake_read_visible(uri, *, ctx):
+        assert ctx is not None
+        return f"visible content for {uri}"
+
+    async def fake_search(**kwargs):
+        del kwargs
+        return FindResult(
+            memories=[],
+            resources=[
+                MatchedContext(
+                    uri="viking://resources/visible.md",
+                    context_type=ContextType.RESOURCE,
+                )
+            ],
+            skills=[],
+        )
+
+    monkeypatch.setattr(service.fs, "read_visible", fake_read_visible)
+    monkeypatch.setattr(
+        service.search, "find" if endpoint.endswith("/find") else "search", fake_search
+    )
+
+    response = await client.post(endpoint, json={"query": "visible", "read_content": True})
+
+    assert response.status_code == 200
+    assert response.json()["result"]["resources"][0]["content"] == (
+        "visible content for viking://resources/visible.md"
+    )
+
+
+async def test_find_omits_content_when_read_is_not_requested(
+    client: httpx.AsyncClient, service, monkeypatch
+):
+    async def fake_search(**kwargs):
+        del kwargs
+        return FindResult(
+            memories=[],
+            resources=[
+                MatchedContext(
+                    uri="viking://resources/visible.md",
+                    context_type=ContextType.RESOURCE,
+                )
+            ],
+            skills=[],
+        )
+
+    monkeypatch.setattr(service.search, "find", fake_search)
+    monkeypatch.setattr(
+        service.fs,
+        "read_visible",
+        lambda *args, **kwargs: pytest.fail("read_visible must not be called"),
+    )
+
+    response = await client.post("/api/v1/search/find", json={"query": "visible"})
+
+    assert response.status_code == 200
+    assert "content" not in response.json()["result"]["resources"][0]
+
+
+async def test_find_keeps_hit_without_content_when_read_fails(
+    client: httpx.AsyncClient, service, monkeypatch
+):
+    async def fake_read_visible(uri, *, ctx):
+        del uri, ctx
+        raise RuntimeError("unavailable")
+
+    async def fake_find(**kwargs):
+        del kwargs
+        return FindResult(
+            memories=[],
+            resources=[
+                MatchedContext(
+                    uri="viking://resources/unavailable.md",
+                    context_type=ContextType.RESOURCE,
+                )
+            ],
+            skills=[],
+        )
+
+    monkeypatch.setattr(service.fs, "read_visible", fake_read_visible)
+    monkeypatch.setattr(service.search, "find", fake_find)
+
+    response = await client.post(
+        "/api/v1/search/find", json={"query": "unavailable", "read_content": True}
+    )
+
+    assert response.status_code == 200
+    assert "content" not in response.json()["result"]["resources"][0]
+
+
+async def test_search_context_rejects_read_content(client: httpx.AsyncClient):
+    response = await client.post(
+        "/api/v1/search/search",
+        json={"query": "visible", "mode": "context", "read_content": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "service_method"),
+    [
+        ("/api/v1/search/find", "find"),
+        ("/api/v1/search/search", "search"),
+    ],
+)
+async def test_search_endpoints_filter_invalid_result_tags(
+    client: httpx.AsyncClient, service, monkeypatch, endpoint: str, service_method: str
+):
+    async def fake_search(**kwargs):
+        del kwargs
+        return FindResult(
+            memories=[],
+            resources=[
+                MatchedContext(
+                    uri="viking://resources/legacy-tags.md",
+                    context_type=ContextType.RESOURCE,
+                    search_tags=["default", "team=infra", "bad=", "project=viking"],
+                )
+            ],
+            skills=[],
+        )
+
+    monkeypatch.setattr(service.search, service_method, fake_search)
+
+    response = await client.post(endpoint, json={"query": "legacy tags"})
+
+    assert response.status_code == 200
+    assert response.json()["result"]["resources"][0]["tags"] == [
+        "team=infra",
+        "project=viking",
+    ]
+
+
+@pytest.mark.parametrize("endpoint", ["/api/v1/search/find", "/api/v1/search/search"])
 async def test_search_endpoints_reject_unknown_request_fields(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -78,32 +218,38 @@ async def test_find_with_target_uri(client_with_resource):
     assert resp.json()["status"] == "ok"
 
 
-async def test_find_with_target_uri_and_tags_after_set_tags(client_with_resource):
-    client, uri = client_with_resource
+async def test_find_with_target_uri_and_tags_passes_target_and_filter(
+    client: httpx.AsyncClient, service, monkeypatch
+):
+    captured = {}
 
-    set_tags_resp = await client.post(
-        "/api/v1/fs/attrs/set_tags",
-        json={"uri": uri, "tags": ["team=search"]},
-    )
-    assert set_tags_resp.status_code == 200
-    assert set_tags_resp.json()["status"] == "ok"
+    async def fake_find(*, target_uri=None, filter=None, **kwargs):
+        captured["target_uri"] = target_uri
+        captured["filter"] = filter
+        return {"items": []}
 
-    untagged_resp = await client.post(
+    monkeypatch.setattr(service.search, "find", fake_find)
+
+    resp = await client.post(
         "/api/v1/search/find",
-        json={"query": "sample", "target_uri": uri, "limit": 10},
+        json={
+            "query": "sample",
+            "target_uri": "viking://resources/sample",
+            "tags": ["team=search", "env=prod"],
+            "limit": 10,
+        },
     )
-    assert untagged_resp.status_code == 200
-    assert untagged_resp.json()["status"] == "ok"
-    untagged_total = untagged_resp.json()["result"]["total"]
-    assert untagged_total > 0
 
-    tagged_resp = await client.post(
-        "/api/v1/search/find",
-        json={"query": "sample", "target_uri": uri, "tags": ["team=search"], "limit": 10},
-    )
-    assert tagged_resp.status_code == 200
-    assert tagged_resp.json()["status"] == "ok"
-    assert tagged_resp.json()["result"]["total"] > 0
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert captured["target_uri"] == "viking://resources/sample"
+    assert captured["filter"] == {
+        "op": "and",
+        "conds": [
+            {"op": "must", "field": "search_tags", "conds": ["team=search"]},
+            {"op": "must", "field": "search_tags", "conds": ["env=prod"]},
+        ],
+    }
 
 
 async def test_find_with_level_passes_to_service(client: httpx.AsyncClient, service, monkeypatch):
@@ -600,7 +746,7 @@ async def test_find_combines_tags_with_existing_filter(
         json={
             "query": "sample",
             "filter": {"op": "must", "field": "kind", "conds": ["email"]},
-            "tags": ["Env=Prod", " env=prod "],
+            "tags": ["Env=Prod", " env=prod ", "team=Search"],
         },
     )
 
@@ -611,6 +757,7 @@ async def test_find_combines_tags_with_existing_filter(
         "conds": [
             {"op": "must", "field": "kind", "conds": ["email"]},
             {"op": "must", "field": "search_tags", "conds": ["env=prod"]},
+            {"op": "must", "field": "search_tags", "conds": ["team=search"]},
         ],
     }
 
@@ -657,15 +804,17 @@ async def test_search_compiles_tags_only_filter(client: httpx.AsyncClient, servi
 
     resp = await client.post(
         "/api/v1/search/search",
-        json={"query": "sample", "tags": ["Team=Search"]},
+        json={"query": "sample", "tags": ["Team=Search", "env=prod"]},
     )
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert captured["filter"] == {
-        "op": "must",
-        "field": "search_tags",
-        "conds": ["team=search"],
+        "op": "and",
+        "conds": [
+            {"op": "must", "field": "search_tags", "conds": ["team=search"]},
+            {"op": "must", "field": "search_tags", "conds": ["env=prod"]},
+        ],
     }
 
 
@@ -1044,7 +1193,7 @@ async def test_glob(client_with_resource):
     client, _ = client_with_resource
     resp = await client.post(
         "/api/v1/search/glob",
-        json={"pattern": "*.md"},
+        json={"pattern": "**/*.md"},
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"

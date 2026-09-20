@@ -1,9 +1,13 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
+import asyncio
 import importlib
-from typing import Any, Dict, List, Optional, Union
+import threading
+import weakref
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 
 def _load_codex_auth_module():
@@ -42,6 +46,47 @@ class VLMCredential(BaseModel):
         default=None, description="Extra JSON body fields"
     )
     stream: Optional[bool] = Field(default=None, description="Enable streaming mode")
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="Reasoning effort for OpenAI-compatible reasoning models",
+    )
+    max_tokens: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Maximum completion output tokens for this credential. "
+            "Overrides the parent max_tokens when set."
+        ),
+    )
+
+    model_config = {"extra": "forbid"}
+
+
+class VLMMediaConfig(BaseModel):
+    """Runtime controls for audio and video inputs handled by the configured VLM."""
+
+    enabled: bool = Field(default=False, description="Enable VLM audio/video understanding")
+    max_concurrent: int = Field(
+        default=2,
+        ge=1,
+        description="Maximum concurrent audio/video VLM calls",
+    )
+    file_processing_timeout: float = Field(
+        default=1800.0,
+        gt=0.0,
+        description="Maximum provider-side media preprocessing wait in seconds",
+    )
+    file_poll_interval: float = Field(
+        default=3.0,
+        gt=0.0,
+        description="Provider-side media preprocessing poll interval in seconds",
+    )
+    video_fps: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=5.0,
+        description="Video frame sampling rate for providers that support preprocessing",
+    )
 
     model_config = {"extra": "forbid"}
 
@@ -93,7 +138,12 @@ class VLMConfig(BaseModel):
     thinking: bool = Field(default=False, description="Enable thinking mode for VolcEngine models")
 
     max_concurrent: int = Field(
-        default=64, description="Maximum number of concurrent LLM calls for semantic processing"
+        default=32, description="Maximum number of concurrent LLM calls for semantic processing"
+    )
+
+    media: VLMMediaConfig = Field(
+        default_factory=VLMMediaConfig,
+        description="Audio/video runtime controls for the configured VLM",
     )
 
     api_version: Optional[str] = Field(
@@ -117,6 +167,11 @@ class VLMConfig(BaseModel):
         default=False, description="Enable streaming mode for OpenAI-compatible providers"
     )
 
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="Reasoning effort for OpenAI-compatible reasoning models",
+    )
+
     # New multi-credential configuration
     credentials: List[VLMCredential] = Field(
         default_factory=list,
@@ -131,6 +186,11 @@ class VLMConfig(BaseModel):
     )
 
     _vlm_instance: Optional[Any] = None
+    _media_semaphores: weakref.WeakKeyDictionary[
+        asyncio.AbstractEventLoop,
+        weakref.ReferenceType[asyncio.Semaphore],
+    ] = PrivateAttr(default_factory=weakref.WeakKeyDictionary)
+    _media_semaphore_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     model_config = {"arbitrary_types_allowed": True, "extra": "forbid"}
 
@@ -222,6 +282,7 @@ class VLMConfig(BaseModel):
             or self.extra_headers
             or self.extra_request_body
             or self.stream
+            or self.reasoning_effort
             or self.forward_api_key is not None
         ):
             if self.provider not in self.providers:
@@ -244,6 +305,8 @@ class VLMConfig(BaseModel):
                 self.providers[self.provider]["extra_request_body"] = self.extra_request_body
             if self.stream and "stream" not in self.providers[self.provider]:
                 self.providers[self.provider]["stream"] = self.stream
+            if self.reasoning_effort and "reasoning_effort" not in self.providers[self.provider]:
+                self.providers[self.provider]["reasoning_effort"] = self.reasoning_effort
 
     def _normalize_credentials(self):
         """Normalize credentials configuration:
@@ -282,6 +345,8 @@ class VLMConfig(BaseModel):
                     if primary_cfg.get("stream") is not None
                     else self.stream
                 ),
+                reasoning_effort=(primary_cfg.get("reasoning_effort") or self.reasoning_effort),
+                max_tokens=self.max_tokens,
             )
             migrated_credentials.append(primary_cred)
 
@@ -310,6 +375,10 @@ class VLMConfig(BaseModel):
                     if backup_cfg.get("stream") is not None
                     else self.backup.stream
                 ),
+                reasoning_effort=(
+                    backup_cfg.get("reasoning_effort") or self.backup.reasoning_effort
+                ),
+                max_tokens=self.backup.max_tokens,
             )
             migrated_credentials.append(backup_cred)
 
@@ -349,6 +418,9 @@ class VLMConfig(BaseModel):
                             if provider_cfg.get("stream") is not None
                             else self.stream
                         ),
+                        reasoning_effort=(
+                            provider_cfg.get("reasoning_effort") or self.reasoning_effort
+                        ),
                     )
                 )
 
@@ -379,6 +451,8 @@ class VLMConfig(BaseModel):
                 cred.extra_request_body = self.extra_request_body
             if cred.stream is None:
                 cred.stream = self.stream
+            if not cred.reasoning_effort:
+                cred.reasoning_effort = self.reasoning_effort
 
     def _has_legacy_provider_config(self) -> bool:
         """Check if there's legacy provider config (not credentials-based)."""
@@ -432,6 +506,8 @@ class VLMConfig(BaseModel):
             config["extra_request_body"] = self.extra_request_body
         if self.stream and "stream" not in config:
             config["stream"] = self.stream
+        if self.reasoning_effort and "reasoning_effort" not in config:
+            config["reasoning_effort"] = self.reasoning_effort
         return config
 
     def _provider_has_usable_credentials(self, provider_name: str, config: Dict[str, Any]) -> bool:
@@ -445,6 +521,26 @@ class VLMConfig(BaseModel):
             return has_codex_auth_available()
         return False
 
+    def _get_provider_config_from_credential(self, cred: VLMCredential) -> Dict[str, Any]:
+        config: Dict[str, Any] = {}
+        if cred.api_key:
+            config["api_key"] = cred.api_key
+        if cred.api_base:
+            config["api_base"] = cred.api_base
+        if cred.api_version:
+            config["api_version"] = cred.api_version
+        if cred.forward_api_key is not None:
+            config["forward_api_key"] = cred.forward_api_key
+        if cred.extra_headers:
+            config["extra_headers"] = cred.extra_headers
+        if cred.extra_request_body:
+            config["extra_request_body"] = cred.extra_request_body
+        if cred.stream:
+            config["stream"] = cred.stream
+        if cred.reasoning_effort:
+            config["reasoning_effort"] = cred.reasoning_effort
+        return config
+
     def _match_provider(self, model: str | None = None) -> tuple[Dict[str, Any] | None, str | None]:
         """Match provider config.
 
@@ -455,18 +551,7 @@ class VLMConfig(BaseModel):
         # If credentials are configured, use the first one
         if self.credentials:
             cred = self.credentials[0]
-            return (
-                {
-                    "api_key": cred.api_key,
-                    "api_base": cred.api_base,
-                    "api_version": cred.api_version,
-                    "forward_api_key": cred.forward_api_key,
-                    "extra_headers": cred.extra_headers,
-                    "extra_request_body": cred.extra_request_body,
-                    "stream": cred.stream,
-                },
-                cred.provider,
-            )
+            return self._get_provider_config_from_credential(cred), cred.provider
 
         if self.provider:
             return self._get_provider_config_by_name(self.provider) or {}, self.provider
@@ -549,9 +634,12 @@ class VLMConfig(BaseModel):
             "timeout": self.timeout,
             "provider": credential.provider,
             "thinking": self.thinking,
-            "max_tokens": self.max_tokens,
+            "max_tokens": (
+                credential.max_tokens if credential.max_tokens is not None else self.max_tokens
+            ),
             "stream": credential.stream if credential.stream is not None else self.stream,
             "api_version": credential.api_version,
+            "media": self.media.model_dump(),
         }
 
         if credential.api_key:
@@ -564,6 +652,8 @@ class VLMConfig(BaseModel):
             result["extra_headers"] = credential.extra_headers
         if credential.extra_request_body:
             result["extra_request_body"] = credential.extra_request_body
+        if credential.reasoning_effort:
+            result["reasoning_effort"] = credential.reasoning_effort
 
         return result
 
@@ -586,6 +676,7 @@ class VLMConfig(BaseModel):
             "max_tokens": self.max_tokens,
             "stream": stream,
             "api_version": self.api_version,
+            "media": self.media.model_dump(),
         }
 
         if config:
@@ -599,6 +690,8 @@ class VLMConfig(BaseModel):
                 result["extra_headers"] = config.get("extra_headers")
             if config.get("extra_request_body"):
                 result["extra_request_body"] = config.get("extra_request_body")
+            if config.get("reasoning_effort"):
+                result["reasoning_effort"] = config.get("reasoning_effort")
 
         return result
 
@@ -663,6 +756,59 @@ class VLMConfig(BaseModel):
             tools=tools,
             messages=messages,
         )
+
+    def _get_media_semaphore(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        with self._media_semaphore_lock:
+            semaphore_ref = self._media_semaphores.get(loop)
+            semaphore = semaphore_ref() if semaphore_ref is not None else None
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(self.media.max_concurrent)
+                self._media_semaphores[loop] = weakref.ref(semaphore)
+            return semaphore
+
+    def supports_media(
+        self,
+        *,
+        media_type: str,
+        filename: str,
+        size_bytes: int,
+    ) -> bool:
+        """Return whether enabled VLM media processing supports this input."""
+        if not self.media.enabled or not self.is_available():
+            return False
+        return bool(
+            self.get_vlm_instance().supports_media(
+                media_type=media_type,
+                filename=filename,
+                size_bytes=size_bytes,
+            )
+        )
+
+    async def get_media_completion_async(
+        self,
+        *,
+        prompt: str,
+        media_path: Path,
+        filename: str,
+        media_type: str,
+        prepare_media: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> str:
+        """Stage and understand audio/video under the configured media limit."""
+        from openviking.models.vlm.base import UnsupportedMediaInputError
+
+        if not self.media.enabled:
+            raise UnsupportedMediaInputError("VLM media understanding is disabled")
+
+        async with self._get_media_semaphore():
+            if prepare_media is not None:
+                await prepare_media()
+            return await self.get_vlm_instance().get_media_completion_async(
+                prompt=prompt,
+                media_path=media_path,
+                filename=filename,
+                media_type=media_type,
+            )
 
     async def get_vision_completion_async(
         self,

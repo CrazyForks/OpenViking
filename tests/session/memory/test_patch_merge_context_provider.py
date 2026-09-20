@@ -135,6 +135,35 @@ async def test_patch_merge_context_provider_prefetch_searches_and_reads_extra_ca
 
 
 @pytest.mark.asyncio
+async def test_patch_merge_context_provider_skips_extra_candidates_for_existing_files():
+    uri = "viking://user/u/memories/experiences/booking.md"
+    provider = PatchMergeContextProvider(
+        memory_type="experiences",
+        required_file_uris=[uri],
+        patches=[
+            PatchMergePatch(
+                before_file=_memory_file(name="booking", uri=uri, content="old line"),
+                after_file=_memory_file(name="booking", uri=uri, content="new line"),
+            )
+        ],
+    )
+    provider.search_files = AsyncMock(return_value=["viking://user/u/memories/experiences/other.md"])
+    provider.read_file = AsyncMock(
+        return_value={
+            "memory_type": "experiences",
+            "experience_name": "booking",
+            "content": "1\told line",
+        }
+    )
+
+    messages = await provider.prefetch()
+
+    provider.search_files.assert_not_awaited()
+    provider.read_file.assert_awaited_once_with(uri)
+    assert len(messages) == 2
+
+
+@pytest.mark.asyncio
 async def test_patch_merge_context_provider_caps_extra_candidate_reads_at_ten():
     schema = MemoryTypeSchema(
         memory_type="experiences",
@@ -361,6 +390,38 @@ async def test_patch_merge_context_provider_hides_feedback_stats_from_patch_diff
     assert "feedback_stats" not in content
     assert "injected_count" not in content
     assert "negative_count" not in content
+    assert "(no changes)" in content
+
+
+@pytest.mark.asyncio
+async def test_patch_merge_context_provider_hides_proposed_case_identity():
+    uri = "viking://user/u/memories/cases/report.md"
+    before = MemoryFile(
+        uri=uri,
+        content="same content",
+        memory_type="cases",
+        extra_fields={
+            "memory_type": "cases",
+            "case_name": "report",
+            "case_identity": '{"goal":"canonical"}',
+            "_proposed_case_identity": '{"goal":"stale"}',
+        },
+    )
+    after = before.model_copy(deep=True)
+    after.extra_fields["_proposed_case_identity"] = '{"goal":"new proposal"}'
+    provider = PatchMergeContextProvider(
+        memory_type="cases",
+        required_file_uris=[],
+        patches=[PatchMergePatch(before_file=before, after_file=after)],
+    )
+    provider.search_files = AsyncMock(return_value=[])
+
+    messages = await provider.prefetch()
+    content = messages[0]["content"]
+
+    assert "_proposed_case_identity" not in content
+    assert "stale" not in content
+    assert "new proposal" not in content
     assert "(no changes)" in content
 
 

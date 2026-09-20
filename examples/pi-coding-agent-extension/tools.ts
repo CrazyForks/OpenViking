@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { OVClient } from "./client.js";
 import type { SyncManager } from "./sync.js";
 
@@ -17,7 +17,7 @@ export function registerTools(pi: any, client: OVClient, sync?: SyncManager): vo
     ],
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
-      scope: Type.Optional(Type.String({ description: "Viking URI prefix to scope search (e.g., 'viking://user/memories/')" })),
+      scope: Type.Optional(Type.String({ description: "Viking URI prefix to scope search (e.g., 'viking://~/memories/')" })),
       limit: Type.Optional(Type.Number({ description: "Max results (default: 10)" })),
     }),
     async execute(

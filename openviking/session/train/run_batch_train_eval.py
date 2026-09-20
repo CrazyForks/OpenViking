@@ -6,12 +6,40 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+_HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def _parse_server_header(value: str) -> tuple[str, str]:
+    """Parse one repeatable OpenViking server header CLI argument."""
+
+    raw = str(value or "").strip()
+    colon_index = raw.find(":")
+    equals_index = raw.find("=")
+    if colon_index > 0 and (equals_index < 0 or colon_index < equals_index):
+        name, header_value = raw.split(":", 1)
+    elif equals_index > 0:
+        name, header_value = raw.split("=", 1)
+    else:
+        raise argparse.ArgumentTypeError("server header must use NAME=VALUE or NAME:VALUE")
+
+    name = name.strip()
+    header_value = header_value.strip()
+    if not _HEADER_NAME_PATTERN.fullmatch(name):
+        raise argparse.ArgumentTypeError(f"invalid server header name: {name!r}")
+    if not header_value:
+        raise argparse.ArgumentTypeError(f"server header {name!r} has an empty value")
+    if "\r" in header_value or "\n" in header_value:
+        raise argparse.ArgumentTypeError("server header value must not contain newlines")
+    return name, header_value
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,20 +52,26 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Train/eval batch size. Default uses the remote case loader page size (currently 1000)."
+            "Train/eval batch size. Default uses the remote case loader page size (currently 100)."
         ),
     )
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=150,
-        help="Concurrent rollout executions for train and eval (default: 150)",
+        default=200,
+        help="Concurrent rollout executions for train and eval (default: 200)",
     )
     parser.add_argument(
         "--commit-concurrency",
         type=int,
-        default=150,
-        help="Concurrent OpenViking session.commit submissions during train (default: 150)",
+        default=200,
+        help="Concurrent OpenViking session.commit submissions during train (default: 200)",
+    )
+    parser.add_argument(
+        "--commit-timeout-seconds",
+        type=float,
+        default=None,
+        help="Maximum wait per OpenViking session.commit task; unset waits indefinitely.",
     )
     parser.add_argument(
         "--commit-case-spec",
@@ -54,6 +88,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-key", default=None, help="OpenViking API key. Defaults to ov.conf/ovcli.conf"
+    )
+    parser.add_argument(
+        "--server-header",
+        action="append",
+        type=_parse_server_header,
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Extra header sent with every OpenViking server request. Repeat for multiple "
+            "headers; accepts NAME=VALUE or NAME:VALUE."
+        ),
     )
     parser.add_argument(
         "--account-id", default="default", help="OpenViking trusted account id. Default: default"
@@ -77,6 +122,40 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Benchmark runtime service URL, e.g. http://127.0.0.1:1944",
     )
+    for phase in ("train", "eval"):
+        parser.add_argument(f"--viking-{phase}-set-id", type=int, default=None)
+        parser.add_argument(f"--viking-{phase}-version", default=None)
+        parser.add_argument(f"--viking-{phase}-row-id", type=int, action="append", default=[])
+    parser.add_argument(
+        "--casehub-dataset-id",
+        action="append",
+        default=[],
+        metavar="DATASET_ID",
+        help=(
+            "CaseHub dataset used by this benchmark run. Repeat for multiple datasets. "
+            "Not supported by the direct Viking Ark adapter."
+        ),
+    )
+    parser.add_argument(
+        "--casehub-case-id",
+        action="append",
+        default=[],
+        metavar="CASE_ID",
+        help=(
+            "CaseHub case selected for this benchmark run. Repeat for multiple cases; "
+            "omit to use all cases in the selected dataset(s)."
+        ),
+    )
+    parser.add_argument(
+        "--casehub-eval-dataset-id",
+        action="append",
+        default=[],
+        metavar="DATASET_ID",
+        help=(
+            "CaseHub dataset used only by eval. Repeat for multiple datasets; "
+            "omit to evaluate the training CaseHub dataset(s)."
+        ),
+    )
     parser.add_argument(
         "--max-iterations",
         type=int,
@@ -85,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--loader-mode",
-        choices=("skill", "constraint", "direct_experience"),
+        choices=("skill", "selector", "constraint", "direct_experience", "auto_experience", "none"),
         default="skill",
         help="Tau2 VikingBot experience loading mode (default: skill).",
     )
@@ -173,6 +252,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Skip the final held-out eval pass. When --eval-each-epoch is enabled, "
             "the last epoch eval is reused as final_eval in the report."
+        ),
+    )
+    parser.add_argument(
+        "--resume-final-eval",
+        action="store_true",
+        help=(
+            "Skip baseline/train, reuse final-eval rollout artifacts already present next "
+            "to --output, and execute only missing eval trials. Requires --no-clean-result."
         ),
     )
     parser.add_argument(
@@ -272,10 +359,12 @@ async def main_async() -> int:
             batch_size=args.batch_size,
             concurrency=args.concurrency,
             commit_concurrency=args.commit_concurrency,
+            commit_timeout_seconds=args.commit_timeout_seconds,
             commit_case_spec_enabled=args.commit_case_spec,
             config_path=str(Path(args.config).expanduser()) if args.config else None,
             server_url=args.server_url,
             api_key=args.api_key,
+            server_headers=dict(args.server_header),
             account_id=args.account_id,
             user_id=args.user_id,
             output_path=args.output,
@@ -291,6 +380,10 @@ async def main_async() -> int:
             train_index=_parse_indices_arg(args.train_index),
             eval_index=_parse_indices_arg(args.eval_index),
             benchmark_service_url=args.benchmark_service_url,
+            casehub_dataset_ids=args.casehub_dataset_id,
+            casehub_case_ids=args.casehub_case_id,
+            casehub_eval_dataset_ids=args.casehub_eval_dataset_id,
+            viking_selection=_viking_selection(args),
             baseline_force_recompute=args.force_baseline_recompute,
             eval_each_epoch=args.eval_each_epoch,
             skip_final_eval=args.skip_final_eval,
@@ -299,6 +392,7 @@ async def main_async() -> int:
             trials=args.trials,
             train_trials=args.train_trials,
             reuse_train_rollout_cache=args.reuse_train_rollout_cache,
+            resume_final_eval=args.resume_final_eval,
             continue_on_rollout_failure=args.continue_on_rollout_failure,
             clean_result=args.clean_result,
             keep_recent_results=args.keep_recent_results,
@@ -306,7 +400,25 @@ async def main_async() -> int:
             git_notes_launch_command=os.environ.get("OPENVIKING_TRAIN_LAUNCH_COMMAND"),
         )
     )
+    if args.resume_final_eval:
+        return 0
     return 1 if any(epoch.get("errors") for epoch in report.train_epochs) else 0
+
+
+def _viking_selection(args):
+    selection = {}
+    for phase in ("train", "eval"):
+        set_id = getattr(args, f"viking_{phase}_set_id")
+        version = getattr(args, f"viking_{phase}_version")
+        rows = getattr(args, f"viking_{phase}_row_id")
+        if set_id is None and version is None and not rows:
+            continue
+        if set_id is None or set_id <= 0 or not version:
+            raise ValueError(
+                f"--viking-{phase}-set-id and --viking-{phase}-version are required together"
+            )
+        selection[phase] = {"experiment_set_id": set_id, "version": version, "row_ids": rows}
+    return selection
 
 
 def _resolve_direct_experience_content(

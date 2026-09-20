@@ -43,6 +43,7 @@ from openviking.session.train.gates import (
     build_gate_retry_instruction,
     candidate_retry_draft,
     default_policy_gate_runner,
+    experience_source_rejection_reason,
     make_gate_audit_attempt,
     mark_experience_gradients_post_validated,
 )
@@ -171,7 +172,24 @@ class ExperienceGradientEstimator:
 
         requests: list[ExperienceGradientEstimateRequest] = []
         for trajectory in analysis.trajectories:
-            if not _should_update_experience_from_trajectory(trajectory):
+            if not _should_update_experience_from_trajectory(
+                trajectory,
+                evaluation=analysis.evaluation,
+            ):
+                continue
+            source_rejection = experience_source_rejection_reason(trajectory)
+            if source_rejection:
+                rejection = {
+                    "trajectory_uri": trajectory.uri,
+                    "reason": source_rejection,
+                }
+                context.metadata.setdefault("experience_source_rejections", []).append(rejection)
+                analysis.metadata.setdefault("experience_source_rejections", []).append(rejection)
+                logger.info(
+                    "Skipping Experience extraction from ineligible source trajectory %s: %s",
+                    trajectory.uri,
+                    source_rejection,
+                )
                 continue
             requests.append(
                 ExperienceGradientEstimateRequest(
@@ -238,7 +256,7 @@ class ExperienceGradientEstimator:
             operations = await self._run_extract_loop(request.trajectory, context)
             if operations is None:
                 return []
-            gradients = _operations_to_gradients(
+            gradients = await _operations_to_gradients(
                 operations=operations,
                 trajectory=request.trajectory,
                 analysis=analysis,
@@ -318,7 +336,7 @@ class ExperienceGradientEstimator:
             _sync_prefetched_comparison_trajectories(provider, trajectory)
             analysis_obj = _analysis_from_context_metadata(context)
             experience_set = _experience_set_from_context_metadata(context)
-            gradients = _operations_to_gradients(
+            gradients = await _operations_to_gradients(
                 operations=operations,
                 trajectory=trajectory,
                 analysis=analysis_obj,
@@ -715,8 +733,32 @@ def _experience_set_from_context_metadata(context: ExperienceGradientContext) ->
     return experience_set
 
 
-def _should_update_experience_from_trajectory(trajectory: Trajectory) -> bool:
-    return str(getattr(trajectory, "outcome", "") or "").strip().lower() != "success"
+def _should_update_experience_from_trajectory(
+    trajectory: Trajectory,
+    *,
+    evaluation: RubricEvaluation | None = None,
+) -> bool:
+    outcome = str(getattr(trajectory, "outcome", "") or "").strip().lower()
+    if outcome != "success":
+        return True
+    del evaluation
+    return _trajectory_recovery_status(trajectory) == "observed_recovered"
+
+
+def _trajectory_recovery_status(trajectory: Trajectory) -> str:
+    raw = dict(getattr(trajectory, "metadata", {}) or {}).get("recovery_evidence")
+    if isinstance(raw, dict):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return ""
+    else:
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("status") or "").strip().lower()
 
 
 def _merge_diagnostics(target: dict[str, Any], diagnostics: dict[str, Any]) -> None:
@@ -744,7 +786,7 @@ def _context_with_analysis_messages(
     )
 
 
-def _operations_to_gradients(
+async def _operations_to_gradients(
     *,
     operations: Any,
     trajectory: Trajectory,
@@ -758,7 +800,7 @@ def _operations_to_gradients(
         if getattr(op, "memory_type", None) != "experiences":
             continue
         fields = dict(getattr(op, "memory_fields", {}) or {})
-        after_file = render_operation_after_file(op, schema=schema)
+        after_file = await render_operation_after_file(op, schema=schema)
         if not any(
             str(
                 after_file.content if name == "content" else after_file.extra_fields.get(name) or ""
@@ -796,6 +838,8 @@ def _operations_to_gradients(
                     "uris": list(getattr(op, "uris", []) or []),
                     "trajectory_outcome": trajectory.outcome,
                     "rubric_passed": analysis.evaluation.passed,
+                    "rubric_score": analysis.evaluation.score,
+                    "recovery_status": _trajectory_recovery_status(trajectory),
                     "supersedes": fields.get("supersedes"),
                     "training_category": _trajectory_training_category(trajectory, analysis),
                 },

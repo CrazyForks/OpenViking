@@ -94,7 +94,7 @@ Configuration reference:
 
 After editing the config, restart the OpenViking service (or re-initialize the SDK client) for it to take effect.
 
-> The repository ships ready-to-use examples: [ov.conf.git-local.example](file:///cloudide/workspace/OpenViking/examples/snapshot/ov.conf.git-local.example) and [ov.conf.git-s3-tos.example](file:///cloudide/workspace/OpenViking/examples/snapshot/ov.conf.git-s3-tos.example).
+> The repository ships ready-to-use examples: [ov.conf.git-local.example](https://github.com/volcengine/OpenViking/blob/main/examples/snapshot/ov.conf.git-local.example) and [ov.conf.git-s3-tos.example](https://github.com/volcengine/OpenViking/blob/main/examples/snapshot/ov.conf.git-s3-tos.example).
 
 ## Directory Layout Change: the `.ovgit` Directory
 
@@ -129,20 +129,30 @@ Once enabled, all three surfaces expose snapshot commands. The examples below sh
 Snapshot methods live under the `client.snapshot.*` namespace.
 
 ```python
-import openviking as ov
+from openviking_sdk import SyncHTTPClient
 
-client = ov.OpenViking()
+client = SyncHTTPClient(url="http://localhost:1933", api_key="your-key")
 client.initialize()
 
 root = "viking://resources/my_project"
 
 # 1. Write initial content and commit v1
-client.write(f"{root}/guide.md", "# Guide\n\nv1 content\n", mode="create", wait=True)
+client.write(
+    uri=f"{root}/guide.md",
+    content="# Guide\n\nv1 content\n",
+    mode="create",
+    wait=True,
+)
 v1 = client.snapshot.commit(message="v1 initial import")
 print("v1:", v1["commit_oid"])
 
 # 2. Modify and commit v2
-client.write(f"{root}/guide.md", "# Guide\n\nv2 content\n", mode="replace", wait=True)
+client.write(
+    uri=f"{root}/guide.md",
+    content="# Guide\n\nv2 content\n",
+    mode="replace",
+    wait=True,
+)
 v2 = client.snapshot.commit(message="v2 update")
 
 # 3. Walk history

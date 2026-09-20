@@ -7,10 +7,11 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_fakes import InMemoryAGFS, fake_request_context
+from test_fakes import AsyncPathLockFake, fake_request_context
 
 from openviking.message import Message, TextPart
 from openviking.session.memory.dataclass import MemoryFile, StoredLink
@@ -35,17 +36,9 @@ from openviking.session.train import (
     Trajectory,
 )
 from openviking.session.train.components.reporter import ConsolePipelineReporter
+from openviking.session.train.engine import PolicyTrainingEngine
 from openviking.session.train.gates import GateReport
 from openviking.session.train.gradients import PatchSemanticGradient
-from openviking.storage.transaction import init_lock_manager, reset_lock_manager
-
-
-@pytest.fixture(autouse=True)
-def _train_lock_manager():
-    reset_lock_manager()
-    init_lock_manager(InMemoryAGFS(), redo_recovery_enabled=False)
-    yield
-    reset_lock_manager()
 
 
 def _case() -> Case:
@@ -72,6 +65,7 @@ class DummyVikingFS:
     def __init__(self):
         self.reloads = 0
         self.version = 1
+        self._async_agfs = AsyncPathLockFake()
 
     async def ls(self, uri: str, output: str = "original", ctx=None):
         del output, ctx
@@ -380,6 +374,128 @@ async def test_default_policy_optimization_pipeline_runs_one_batch():
 
 
 @pytest.mark.asyncio
+async def test_training_engine_replans_once_from_latest_version_after_cas_conflict():
+    class VersionRecordingOptimizer:
+        def __init__(self):
+            self.versions = []
+
+        async def plan(self, gradients, policy_set, context):
+            del gradients, context
+            version = policy_set.policies[0].version
+            self.versions.append(version)
+            return PolicyUpdatePlan(metadata={"planned_from_version": version})
+
+    class ConflictThenSuccessUpdater:
+        def __init__(self, fs):
+            self.fs = fs
+            self.versions = []
+            self.transaction_handles = []
+
+        async def apply(
+            self,
+            plan,
+            policy_set,
+            context,
+            *,
+            transaction_handle=None,
+        ):
+            del plan, context
+            version = policy_set.policies[0].version
+            self.versions.append(version)
+            self.transaction_handles.append(transaction_handle)
+            if len(self.versions) == 1:
+                self.fs.version = 8
+                return PolicyApplyResult(
+                    updated_policy_set=policy_set,
+                    errors=["memory version conflict"],
+                    metadata={"version_conflict": True},
+                )
+            updated = ExperienceSet(
+                root_uri=policy_set.root_uri,
+                policies=[
+                    Experience(
+                        name=policy_set.policies[0].name,
+                        uri=policy_set.policies[0].uri,
+                        version=version + 1,
+                        status=policy_set.policies[0].status,
+                        content=policy_set.policies[0].content,
+                    )
+                ],
+                viking_fs=policy_set.viking_fs,
+                request_context=policy_set.request_context,
+            )
+            return PolicyApplyResult(
+                updated_policy_set=updated,
+                written_uris=[updated.policies[0].uri],
+            )
+
+    fs = DummyVikingFS()
+    fs.version = 7
+    policy_set = _policy_set(version=7, viking_fs=fs)
+    optimizer = VersionRecordingOptimizer()
+    updater = ConflictThenSuccessUpdater(fs)
+    engine = PolicyTrainingEngine(
+        rollout_analyzer=DummyAnalyzer(),
+        gradient_estimator=DummyEstimator(),
+        policy_optimizer=optimizer,
+        policy_updater=updater,
+    )
+
+    plan, apply_result = await engine.plan_and_apply(
+        gradients=[],
+        policy_set=policy_set,
+        ctx=PipelineContext(),
+    )
+
+    assert optimizer.versions == [7, 8]
+    assert updater.versions == [7, 8]
+    assert fs.reloads == 2
+    assert plan.metadata == {
+        "planned_from_version": 8,
+        "version_conflict_replan": 1,
+    }
+    assert apply_result.errors == []
+    assert apply_result.updated_policy_set.policies[0].version == 9
+    assert updater.transaction_handles[0] is updater.transaction_handles[1]
+
+
+@pytest.mark.asyncio
+async def test_policy_set_optimizer_lock_is_exact_and_does_not_lock_experience_tree():
+    class RecordingPathLock:
+        def __init__(self):
+            self.calls = []
+            self.released = []
+
+        async def pathlock_acquire_exact_batch(self, paths, timeout_secs=None):
+            self.calls.append((list(paths), timeout_secs))
+            return {"lease_ref": "optimizer"}
+
+        async def pathlock_acquire_tree(self, *args, **kwargs):
+            raise AssertionError("optimizer planning must not hold a tree lock")
+
+        async def pathlock_release(self, lease):
+            self.released.append(lease)
+
+    pathlock = RecordingPathLock()
+    viking_fs = SimpleNamespace(
+        _async_agfs=pathlock,
+        _uri_to_path=lambda uri, ctx=None: "/" + uri.removeprefix("viking://"),
+    )
+    policy_set = ExperienceSet(
+        root_uri="viking://user/u/memories/experiences",
+        policies=[],
+        viking_fs=viking_fs,
+        request_context=fake_request_context(),
+    )
+
+    async with policy_set.lock() as lease:
+        assert lease == {"lease_ref": "optimizer"}
+
+    assert pathlock.calls == [(["/user/u/memories/experiences/.policy-optimizer.lock"], 300.0)]
+    assert pathlock.released == [{"lease_ref": "optimizer"}]
+
+
+@pytest.mark.asyncio
 async def test_training_engine_does_not_execute_gate_runner_outside_post_validation_hooks():
     class FailIfCalledGateRunner:
         async def filter_gradients(self, *args, **kwargs):
@@ -448,6 +564,34 @@ async def test_streaming_trainer_rejects_unvalidated_direct_experience_gradient(
         await trainer.submit_gradients([_unvalidated_experience_gradient()])
 
     assert await trainer.close() is None
+
+
+@pytest.mark.asyncio
+async def test_policy_optimization_pipeline_allows_zero_epochs_without_training():
+    snapshotter = DummySnapshotter()
+    pipeline = OfflinePolicyOptimizationPipeline(
+        snapshotter=snapshotter,
+        rollout_executor=DummyExecutor(),
+        rollout_analyzer=DummyAnalyzer(),
+        gradient_estimator=DummyEstimator(),
+        policy_optimizer=DummyOptimizer(),
+        policy_updater=DummyUpdater(),
+    )
+
+    initial_policy_set = _policy_set()
+    result = await pipeline.train(
+        case_loader=ListCaseLoader([_case()]),
+        policy_set=initial_policy_set,
+        context=PipelineContext(max_epochs=0),
+    )
+
+    assert result.analyses == []
+    assert result.gradients == []
+    assert result.epochs == []
+    assert result.evaluation_passes == []
+    assert result.apply_result.updated_policy_set is initial_policy_set
+    assert result.metadata["max_epochs"] == 0
+    assert result.metadata["completed_epochs"] == 0
 
 
 @pytest.mark.asyncio
@@ -1203,6 +1347,92 @@ async def test_streaming_policy_trainer_merges_same_target_across_cases_once():
 
 
 @pytest.mark.asyncio
+async def test_streaming_policy_trainer_finalizes_snapshot_before_next_flush_writes():
+    from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
+
+    writes: list[str] = []
+    snapshots: list[tuple[str, list[str], list[str]]] = []
+    first_finalizer_started = asyncio.Event()
+    release_first_finalizer = asyncio.Event()
+
+    class RecordingCore:
+        async def plan_and_apply(self, *, gradients, policy_set, ctx, analyses=None):
+            del ctx, analyses
+            uris = [gradient.target_uri for gradient in gradients]
+            writes.extend(uris)
+            return (
+                PolicyUpdatePlan(metadata={"uris": uris}),
+                PolicyApplyResult(updated_policy_set=policy_set, written_uris=uris),
+            )
+
+    trainer = StreamingPolicyTrainer(
+        policy_set=_policy_set(),
+        rollout_analyzer=DummyAnalyzer(),
+        gradient_estimator=DummyEstimator(),
+        policy_optimizer=DummyOptimizer(),
+        policy_updater=DummyUpdater(),
+        context=PipelineContext(),
+        config=StreamingPolicyTrainerConfig(
+            max_gradients_per_update=1,
+            max_wait_seconds=60.0,
+            timer_check_interval_seconds=60.0,
+        ),
+    )
+    trainer._core = RecordingCore()
+
+    async def finalize_first(result):
+        first_finalizer_started.set()
+        await release_first_finalizer.wait()
+        snapshots.append(("first", list(writes), list(result.apply_result.written_uris)))
+
+    async def finalize_second(result):
+        snapshots.append(("second", list(writes), list(result.apply_result.written_uris)))
+
+    def gradient(name: str) -> DummyGradient:
+        uri = f"viking://user/u/memories/experiences/{name}.md"
+        return DummyGradient(
+            target_name=name,
+            target_uri=uri,
+            base_version=None,
+            rationale="test",
+            links=[],
+            confidence=1.0,
+        )
+
+    first_task = asyncio.create_task(
+        trainer.submit_gradients([gradient("exp_a")], batch_finalizer=finalize_first)
+    )
+    await first_finalizer_started.wait()
+    second_task = asyncio.create_task(
+        trainer.submit_gradients([gradient("exp_b")], batch_finalizer=finalize_second)
+    )
+    await asyncio.sleep(0)
+
+    assert writes == ["viking://user/u/memories/experiences/exp_a.md"]
+
+    release_first_finalizer.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert snapshots == [
+        (
+            "first",
+            ["viking://user/u/memories/experiences/exp_a.md"],
+            ["viking://user/u/memories/experiences/exp_a.md"],
+        ),
+        (
+            "second",
+            [
+                "viking://user/u/memories/experiences/exp_a.md",
+                "viking://user/u/memories/experiences/exp_b.md",
+            ],
+            ["viking://user/u/memories/experiences/exp_b.md"],
+        ),
+    ]
+
+    assert await trainer.close() is None
+
+
+@pytest.mark.asyncio
 async def test_streaming_policy_trainer_splits_flush_by_gradient_count():
     from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
 
@@ -1470,84 +1700,6 @@ async def test_streaming_policy_trainer_mixes_categories_in_chunks():
 
 
 @pytest.mark.asyncio
-async def test_streaming_policy_trainer_flushes_on_timer():
-    from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
-
-    trainer = StreamingPolicyTrainer(
-        policy_set=_policy_set(),
-        rollout_analyzer=DummyAnalyzer(),
-        gradient_estimator=DummyEstimator(),
-        policy_optimizer=DummyOptimizer(),
-        policy_updater=DummyUpdater(),
-        context=PipelineContext(),
-        config=StreamingPolicyTrainerConfig(
-            max_gradients_per_update=10,
-            max_wait_seconds=0.01,
-            timer_check_interval_seconds=0.01,
-        ),
-    )
-    rollout = Rollout(
-        case=_case(),
-        messages=[Message(id="timer", role="user", parts=[TextPart(text="timer")])],
-        policy_snapshot_id="snapshot-1",
-    )
-
-    result = await trainer.submit_rollout(rollout)
-    assert result is not None
-    assert result.metadata["flush_reason"] == "time"
-    assert result.metadata["gradient_count"] == 1
-    assert trainer.last_apply_result is not None
-    assert trainer.last_apply_result.updated_policy_set.policies[0].version == 2
-    assert await trainer.get_buffered_gradient_count() == 0
-
-    assert await trainer.close() is None
-    assert trainer.closed is True
-
-
-@pytest.mark.asyncio
-async def test_streaming_policy_trainer_close_flushes_buffer_and_rejects_submit():
-    from openviking.session.train import StreamingPolicyTrainer, StreamingPolicyTrainerConfig
-
-    trainer = StreamingPolicyTrainer(
-        policy_set=_policy_set(),
-        rollout_analyzer=DummyAnalyzer(),
-        gradient_estimator=DummyEstimator(),
-        policy_optimizer=DummyOptimizer(),
-        policy_updater=DummyUpdater(),
-        context=PipelineContext(),
-        config=StreamingPolicyTrainerConfig(
-            max_gradients_per_update=10,
-            max_wait_seconds=0.01,
-            timer_check_interval_seconds=0.01,
-        ),
-    )
-    rollout = Rollout(
-        case=_case(),
-        messages=[Message(id="close", role="user", parts=[TextPart(text="close")])],
-        policy_snapshot_id="snapshot-1",
-    )
-
-    submit_task = asyncio.create_task(trainer.submit_rollout(rollout))
-    await asyncio.sleep(0)
-    assert await trainer.get_buffered_gradient_count() == 1
-
-    result = await trainer.close()
-
-    assert result is not None
-    assert result.metadata["flush_reason"] == "close"
-    assert result.metadata["gradient_count"] == 1
-    submit_result = await submit_task
-    assert submit_result.batch_result is result
-    assert trainer.closed is True
-    assert await trainer.get_buffered_gradient_count() == 0
-    assert trainer.last_apply_result is result.apply_result
-    assert await trainer.close() is None
-
-    with pytest.raises(RuntimeError, match="closed"):
-        await trainer.submit_rollout(rollout)
-
-
-@pytest.mark.asyncio
 async def test_get_streaming_policy_trainer_returns_process_global_instance():
     from openviking.session.train import (
         StreamingPolicyTrainerConfig,
@@ -1594,8 +1746,8 @@ class FakeSessionCommitClient:
         self.task_poll_counts = {}
         self.tasks = []
 
-    async def create_session(self, *, session_id, memory_policy=None):
-        self.created_sessions.append((session_id, memory_policy))
+    async def create_session(self, *, session_id, options=None):
+        self.created_sessions.append((session_id, options))
 
     async def get_session(self, session_id, *, auto_create=False):
         return {"session_id": session_id, "message_count": len(self.messages.get(session_id, []))}
@@ -1665,8 +1817,10 @@ async def test_session_commit_policy_trainer_records_commit_trace_id():
         (
             commit_result["session_id"],
             {
-                "memory_types": ["cases", "trajectories", "experiences"],
-                "working_memory": {"enabled": False},
+                "memory_policy": {
+                    "memory_types": ["cases", "trajectories", "experiences"],
+                    "working_memory": {"enabled": False},
+                },
             },
         )
     ]
@@ -2031,10 +2185,10 @@ async def test_session_commit_policy_trainer_retries_transient_create_session():
     async def fake_sleep(delay):
         sleep_delays.append(delay)
 
-    async def flaky_create_session(*, session_id, memory_policy=None):
+    async def flaky_create_session(*, session_id, options=None):
         if transient_errors:
             raise transient_errors.pop(0)
-        await original_create_session(session_id=session_id, memory_policy=memory_policy)
+        await original_create_session(session_id=session_id, options=options)
 
     client.create_session = flaky_create_session
     trainer = SessionCommitPolicyTrainer(
@@ -2051,7 +2205,10 @@ async def test_session_commit_policy_trainer_retries_transient_create_session():
 
     assert sleep_delays == [0.5, 1.0, 2.0, 2.0]
     assert len(client.created_sessions) == 1
-    assert client.created_sessions[0] == ("retry-session", {"memory_types": ["experiences"]})
+    assert client.created_sessions[0] == (
+        "retry-session",
+        {"memory_policy": {"memory_types": ["experiences"]}},
+    )
 
 
 @pytest.mark.asyncio
@@ -2064,7 +2221,7 @@ async def test_session_commit_policy_trainer_does_not_retry_nontransient_create_
     async def fake_sleep(delay):
         sleep_delays.append(delay)
 
-    async def failing_create_session(*, session_id, memory_policy=None):
+    async def failing_create_session(*, session_id, options=None):
         raise RuntimeError("bad request")
 
     client.create_session = failing_create_session

@@ -38,6 +38,7 @@ from openviking.session.train.domain import (
 
 CaseLoaderFactory = Callable[[str, str, str, dict[str, Any]], Any]
 RolloutExecutorFactory = Callable[[dict[str, Any]], Any]
+CasesQueriedHook = Callable[[list[Case], "CasesQueryRequest"], None]
 logger = logging.getLogger(__name__)
 _rollout_worker_state = threading.local()
 
@@ -317,6 +318,7 @@ def create_dataset_service_app(
     service_name: str,
     make_case_loader: CaseLoaderFactory,
     make_rollout_executor: RolloutExecutorFactory,
+    on_cases_queried: CasesQueriedHook | None = None,
     max_rollout_concurrency: int | None = None,
     rollout_thread_workers: int | None = None,
 ) -> FastAPI:
@@ -331,6 +333,7 @@ def create_dataset_service_app(
     app.state.service_name = service_name
     app.state.make_case_loader = make_case_loader
     app.state.make_rollout_executor = make_rollout_executor
+    app.state.on_cases_queried = on_cases_queried
     app.state.rollout_executions = RolloutExecutionStore()
     app.state.max_rollout_concurrency = max_rollout_concurrency
     app.state.rollout_semaphore = (
@@ -375,6 +378,8 @@ def create_dataset_service_app(
             cursor=request.cursor,
             limit=request.limit,
         )
+        if app.state.on_cases_queried is not None:
+            app.state.on_cases_queried(cases, request)
         next_offset = int(request.cursor or "0") + len(cases)
         next_cursor = str(next_offset) if len(cases) >= request.limit else None
         return {
@@ -637,11 +642,21 @@ def rollout_from_dict(data: dict[str, Any]) -> Rollout:
 
     return Rollout(
         case=case_from_dict(data["case"]),
-        messages=[Message.from_dict(item) for item in data.get("messages", [])],
+        messages=[
+            Message.from_dict(_message_dict_with_defaults(item, index))
+            for index, item in enumerate(data.get("messages", []))
+        ],
         policy_snapshot_id=data["policy_snapshot_id"],
         evaluation=evaluation_from_dict(data.get("evaluation")),
         metadata=dict(data.get("metadata") or {}),
     )
+
+
+def _message_dict_with_defaults(data: dict[str, Any], index: int) -> dict[str, Any]:
+    """Accept lightweight remote message payloads that omit OpenViking-only ids."""
+    item = dict(data)
+    item.setdefault("id", f"remote_message_{index}")
+    return item
 
 
 def evaluation_from_dict(data: dict[str, Any] | None) -> RubricEvaluation | None:

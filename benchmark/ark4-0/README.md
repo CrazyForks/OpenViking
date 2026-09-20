@@ -1,389 +1,107 @@
-# Ark 4.0 standalone training adapter
+# Ark：直接接入 Viking
 
-This directory exposes the Ark external-training platform through the generic remote service
-contract consumed by OpenViking's native `run_batch_train_eval` command. The adapter and the
-trainer are deliberately separate processes.
+旧自进化网关已移除，不再创建 `/inspect/training/tasks`、等待 OV_WAIT 或发送完成信号。
 
-The adapter owns the platform-facing lifecycle:
+## 现在怎么跑
 
-1. Create a platform `ov_external_training` Task, or resume a configured/state-file Task.
-2. Wait until the Task reaches `OV_WAIT`.
-3. Load CaseHub cases.
-4. Serve the generic Case and Rollout endpoints on a fixed address.
-5. Translate OpenViking rollout requests to platform rollout-eval requests and poll through the
-   same gateway.
-6. Expose an explicit local admin endpoint for `external-training-completed`.
+`run_batch_train_eval → 本地 adapter → Viking 实验 → Agent + 评判 → 拉取结果和轨迹 → OpenViking commit`
 
-The adapter never starts OpenViking training and never sends the completion signal merely because
-its process exits. Start OpenViking's native runner separately, inspect its result, and then call
-the completion admin endpoint.
+- 每次启动 runner 新建一个本地 run；每个页批次、epoch、trial 对应新的 Viking 实验。
+- 一个实验包含多道题，不是每道题创建一个实验。Viking 的 `run_times` 固定为 1，多轮由 runner 控制。
+- `--concurrency` 设置实验总并发及未单独配置的组并发；`viking.group_concurrency` 可按组覆盖。当前 G1 跟随 runner，G2～G4 各为 20。同一个 run 的实验依次启动，避免 trial 把并发翻倍。
+- 只跑 Eval：`--epochs 0 --skip-baseline-eval`。不会 Train，也不会 commit。
+- Memory 是否启用由下面的 `sandbox_config` 控制，`--loader-mode none` **不代表关闭远端 Memory**。
 
-## 1. Create a local configuration
+## 唯一配置文件
 
-Copy the example; local JSON files are git-ignored because they contain credentials:
+`benchmark/ark4-0/adapter_config.local.json`。启动脚本默认找自己同目录的这个文件，`--config` 可省略。
 
-```bash
-cp benchmark/ark4-0/adapter_config.example.json \
-  benchmark/ark4-0/adapter_config.local.json
+| 字段 | 用途 |
+| --- | --- |
+| service.port | 本地 adapter 端口，默认 8765 |
+| viking.base_url | Viking 地址：`https://viking-exp.byted.org` |
+| viking.api_token | Viking API Token。不是旧网关 API Key |
+| viking.template_task_id | 已有实验的编排模板，当前 3327；只复制算子、分组、资源，不复用实验 |
+| viking.group_concurrency | 可选，按模板的 group key 指定题目并发，例如 `{"group_2":20,"group_3":20,"group_4":20}`；未配置的组跟随 `--concurrency`，组名不存在则报错 |
+| viking.train / viking.eval | 分别指定 `experiment_set_id`、`version`；可加 `row_ids` 选题 |
+| viking.sandbox_config | 发给 Agent 算子的完整运行配置，包含 headers 和 Memory |
+| viking.score_column | 读取哪个评分列，默认 `answer_score`，保留原始 0～1 分数 |
+| viking.task_time_limit_seconds | 单个 Viking 实验总时限，默认 14400 秒；算子时限保留模板设置 |
+| memory_proxy | 保留原来的本地 OpenViking 地址、配置文件路径、鉴权读取位置 |
+| kubevpn | 保留原来的 kubeconfig、namespace |
+
+没有配置的可选项使用代码默认值。旧 `platform`、`training_task`、`rollout` 配置会报错，不会悄悄继续走旧接口。
+
+平台 HTTP 请求只带 `Authorization: Bearer <Viking Token>`。
+Agent 的 header 放在 `viking.sandbox_config.extra_headers`，例如：
+
+```json
+{
+  "x-tt-backend": "evolving",
+  "x-vaka-request-source": "ark-lx",
+  "x-tt-sandbox": "{\"multi-agents-md-id\":\"stg-default-agentmd-20260901\",\"env\":{\"VAKA_REQUEST_SOURCE\":\"ark-lx\"}}"
+}
 ```
 
-Edit `adapter_config.local.json`:
+Memory 放在 `viking.sandbox_config.extra_payload.extra_data.extra.memory`。
+跑空 Memory baseline 时设置 `enabled: false`。
+访问本地 Memory 时设置 `enabled: true`、`mode: read_only` 和 `openviking_target: evolving-dutao`，并开启 KubeVPN。
+当前迁移配置使用独立本地身份 `default/default`，不会复制模板里的 `memory_case_*` 身份；远端是否接受这个身份仍需真实联调确认。
 
-- `platform.gateway_base_url`: gateway origin only; do not append `/inspect`.
-- `platform.api_key` and `platform.project_id`: gateway authentication and project selection.
-  `project_id` must be the 32-character id returned by `GET /api/projects`, not the project
-  display name. For example, `ov-ark-test` is a name and cannot be put in this field.
-- `platform.headers`: optional additional gateway headers.
-- `casehub.dataset_ids`: dataset ids used for Task creation and CaseHub loading.
-- `casehub.case_ids`: optional case id whitelist for one-case/small-batch testing.
-- `casehub.caseset_id`: optional caseset restriction.
-- `training_task.task_id`: leave empty to create a Task; set it to resume a specific Task.
-- `service.host` / `service.port`: fixed address given to OpenViking.
-- `service.admin_token`: required in the `X-Ark4-Admin-Token` header when configured.
-- `memory_proxy`: Tool Server callback proxy. It adds the local OpenViking user API key and
-  exposes the four `/api/v1/search/*`, `/api/v1/content/*`, and `/api/v1/fs/stat` compatibility
-  routes on the same adapter port.
+## 启动和停止
 
-All adapter behavior and platform credentials come from this JSON file. The adapter does not read
-`ARK4_*` environment variables.
-
-The `state_file` path is resolved relative to the configuration file. A newly created Task id is
-written there. On restart, an empty `training_task.task_id` resumes the Task recorded in that state
-file. Remove the local state file when intentionally creating a fresh Task.
-
-## 2. Start the adapter
+在仓库根目录执行：
 
 ```bash
+# 1. 先填配置里的 Viking API Token，再启动 adapter（前台；Ctrl+C 停止）
 bash benchmark/ark4-0/start_adapter.sh
-```
 
-`--config` is optional. Without it, the launcher reads `adapter_config.local.json` next to
-`start_adapter.sh`. To use another file:
-
-```bash
-bash benchmark/ark4-0/start_adapter.sh --config /path/to/another-adapter.json
-```
-
-Expected startup output:
-
-```text
-[ark4-adapter] created platform task task_xxx
-[ark4-adapter] platform task task_xxx is ready at OV_WAIT
-[ark4-adapter] loaded N CaseHub case(s)
-[ark4-adapter] listening at http://127.0.0.1:1944
-[ark4-adapter] OpenViking argument: --benchmark-service-url http://127.0.0.1:1944
-```
-
-The process stays running while OpenViking executes rollouts.
-
-Check the adapter and platform Task from another terminal:
-
-```bash
-curl http://127.0.0.1:1944/health
-
-curl http://127.0.0.1:1944/admin/platform-task \
-  -H 'X-Ark4-Admin-Token: replace-with-a-local-admin-token'
-```
-
-## 3. Run OpenViking's native trainer separately
-
-Make sure the OpenViking server is already running, then invoke the repository's original runner:
-
-```bash
-python3 -m openviking.session.train.run_batch_train_eval \
-  --dataset ark4-0 \
-  --domain ark \
-  --benchmark-service-url http://127.0.0.1:1944 \
-  --server-url http://127.0.0.1:1933 \
-  --api-key "$(jq -r '.bot.ov_server.api_key' /Users/bytedance/.openviking/ov-eval-vaka.conf)" \
-  --epochs 1 \
-  --train-index 0 \
-  --batch-size 1 \
-  --train-trials 1 \
-  --concurrency 1 \
-  --commit-concurrency 1 \
-  --eval-split none \
-  --skip-baseline-eval \
-  --skip-final-eval
-```
-
-The `--api-key` must be a local OpenViking user/admin key. In `api_key` auth mode the server root
-key can pass health checks but cannot create tenant-scoped training sessions.
-
-This is the unmodified OpenViking CLI in
-`openviking.session.train.run_batch_train_eval`; the Ark adapter only supplies its
-`--benchmark-service-url`.
-
-Training output is written under:
-
-```text
-result/ark4-0/train/run_ark_<timestamp>/
-  report.json
-  events.jsonl
-  rollouts_index.json
-  rollouts/
-```
-
-## 4. Send the completion signal explicitly
-
-Only after `run_batch_train_eval` exits successfully and `report.json` has no training commit
-errors:
-
-```bash
-curl -X POST http://127.0.0.1:1944/admin/external-training-completed \
-  -H 'X-Ark4-Admin-Token: replace-with-a-local-admin-token'
-```
-
-The adapter translates this to:
-
-```text
-POST /inspect/training/tasks/{task_id}/signals/external-training-completed
-```
-
-The completion request uses a stable idempotency key. Do not complete a Task that still needs
-additional training or evaluation; a completed Task cannot be resumed at `OV_WAIT`.
-
-## Train/eval split
-
-Without `casehub.split_field`, all cases belong to `casehub.default_split` (`train` by default), so
-use `--eval-split none`.
-
-If CaseHub envelopes contain, for example:
-
-```json
-{
-  "metadata": {
-    "split": "train"
-  }
-}
-```
-
-set this in the adapter configuration:
-
-```json
-{
-  "casehub": {
-    "split_field": "metadata.split"
-  }
-}
-```
-
-The native runner can then use `--eval-split test`. Supported aliases include
-`training -> train`, `validation/valid -> dev`, and `evaluation/eval -> test`.
-
-## Rollout message contract
-
-Training requires the platform result to contain a useful trajectory in `result.messages`. The
-adapter supports:
-
-- OpenViking-style `{id, role, parts}` messages;
-- OpenAI-style `{role, content, tool_calls}` messages;
-- separate `role=tool` result messages.
-
-When `rollout.require_messages_for_training` is `true`, an empty training trajectory fails instead
-of silently learning only from `final_answer`. Set it to `false` only for temporary connectivity
-testing; the adapter then synthesizes user/assistant messages.
-
-## Tests
-
-```bash
-python3 -m pytest -q --no-cov benchmark/ark4-0/tests
-ruff check benchmark/ark4-0
-bash -n benchmark/ark4-0/start_adapter.sh
-```
-
-## OpenViking memory callback through KubeVPN
-
-KubeVPN is used only for the Tool Server's OpenViking memory callback. It is not on the rollout
-control path and it is not used to download traces. The actual data flow is:
-
-```text
-run_batch_train_eval -> local Ark adapter -> four platform APIs
-  -> Ark Connector -> evolution Homepage/Agent/Tool Server
-  -> openviking.target_urls[ov-ark-test]
-  -> ov-proxy-ov-ark-test:8765
-  -> KubeVPN -> local Ark adapter:1944
-  -> local OpenViking:1933
-```
-
-Do not proxy `ai-search-rec-vaka-agent-server-evolution`. That workload is selected by the frozen
-lane header, but it is not the local-memory callback target.
-
-Three names must match exactly:
-
-1. `rollout.runtime_params.memory.openviking_target` in `adapter_config.local.json`;
-2. `memory_proxy.openviking_target` and `openviking.target_urls` in the evolution Tool Server's
-   full Nacos runtime configuration;
-3. the KubeVPN placeholder deployment name `ov-proxy-<openviking_target>`.
-
-`openviking_target` is a Tool Server routing name and is independent of the platform Project.
-It may be named `ov-ark-test` even when the training Task belongs to the default Project.
-
-For this directory the intended target is `ov-ark-test`, so the required Tool Server entry is:
-
-```json
-{
-  "openviking": {
-    "target_urls": {
-      "ov-ark-test": "http://ov-proxy-ov-ark-test.ai-search-rec.svc.cluster.local:8765"
-    }
-  }
-}
-```
-
-The entry must be merged into the complete `tool_server_runtime_config_evolution`; do not replace
-that Nacos document with this small fragment. The `ov-proxy-ov-ark-test` Deployment and Service
-must also exist in namespace `ai-search-rec` before starting KubeVPN.
-
-The matching Deployment and Service manifest is provided as
-`kubevpn_target.example.yaml`. Review it before applying it to the shared STG cluster:
-
-```bash
-kubectl --kubeconfig /Users/bytedance/work/space/OV-train/evolution/.kube/config_stg \
-  diff -f benchmark/ark4-0/kubevpn_target.example.yaml
-
-kubectl --kubeconfig /Users/bytedance/work/space/OV-train/evolution/.kube/config_stg \
-  apply -f benchmark/ark4-0/kubevpn_target.example.yaml
-```
-
-`kubectl diff` is read-only. `kubectl apply` changes the shared cluster and should only be run
-after the target owner approves it. The manifest mirrors evolution's existing dedicated
-`ov-proxy-*` placeholder pattern.
-
-### Header injection
-
-The lane header is required on the rollout path, but it is not a KubeVPN matcher for the dedicated
-`ov-proxy-*` callback service:
-
-- The Task's frozen binding injects `x-tt-backend: evolution`. It is protected and cannot appear
-  in `rollout.extra_header`.
-- `x-tt-sandbox.env.VAKA_REQUEST_SOURCE=ov-ark-test` selects the isolated source profile.
-- `X-OpenViking-Target: ov-ark-test`/the hydrated target selects the Tool Server callback target.
-- Neither header turns memory on. They only take effect after the Connector has set
-  `extra.memory.enabled=true`.
-
-The platform API documentation says `runtime_params` is Connector-defined. The adapter can send
-the following block, but the currently deployed `ark@1` Connector does not consume it as a memory
-enable switch:
-
-```json
-{
-  "rollout": {
-    "runtime_params": {
-      "memory": {
-        "enabled": true,
-        "mode": "read_only",
-        "openviking_target": "ov-ark-test"
-      }
-    },
-    "extra_header": {
-      "x-vaka-request-source": "vaka-agentmemory"
-    }
-  }
-}
-```
-
-This limitation was verified against the default Project on 2026-08-09: Agent Server trace data
-contained `extra.memory.enabled=false` while `openviking_target=ov-ark-test` was present. Variants
-under `runtime_params`, `runtime_config`, `connector_config.options`, and `extra` produced the same
-result. The Connector's published execution contract currently exposes only `model_ep`.
-
-Consequently, the four external-training APIs and native OpenViking training work end to end, but
-automatic memory recall will not call the local proxy until the `ark@1` Connector exposes and
-honours a memory-enable field. KubeVPN and the target mapping can be validated independently; do
-not treat `call_count=0` as a KubeVPN failure when the Agent trace says memory is disabled.
-
-### Local OpenViking authentication
-
-Tool Server does not know the local OpenViking user API key. The adapter's `memory_proxy` adds it
-before forwarding to `http://127.0.0.1:1933`. Put the key directly in the ignored local JSON, or
-read it from an existing OpenViking JSON config without an environment variable:
-
-```json
-{
-  "memory_proxy": {
-    "enabled": true,
-    "openviking_target": "ov-ark-test",
-    "openviking_url": "http://127.0.0.1:1933",
-    "openviking_api_key": "",
-    "openviking_config_file": "/Users/bytedance/.openviking/ov-eval-vaka.conf",
-    "openviking_api_key_json_path": "bot.ov_server.api_key",
-    "event_log_file": "memory_proxy_events.local.jsonl"
-  }
-}
-```
-
-The event log records only path, status, field names, timing, and a request hash. It does not
-persist the API key or the query/body values.
-
-### Start and verify
-
-Create the local proxy config:
-
-```bash
-cp benchmark/ark4-0/kubevpn_config.example.json \
-  benchmark/ark4-0/kubevpn_config.local.json
-```
-
-Start the local OpenViking server first. Then start the adapter, KubeVPN, and the native trainer as
-three separate processes:
-
-```bash
-bash benchmark/ark4-0/start_adapter.sh
+# 2. 需要读本地 Memory 时，在另一个终端开启 KubeVPN
 bash benchmark/ark4-0/start_kubevpn_proxy.sh
-python3 -m openviking.session.train.run_batch_train_eval \
-  --dataset ark4-0 \
-  --domain ark \
-  --benchmark-service-url http://127.0.0.1:1944 \
-  --server-url http://127.0.0.1:1933 \
-  --api-key "$(jq -r '.bot.ov_server.api_key' /Users/bytedance/.openviking/ov-eval-vaka.conf)" \
-  --epochs 1 --train-index 0 --batch-size 1 --train-trials 1 \
-  --concurrency 1 --commit-concurrency 1 \
-  --eval-split none --skip-baseline-eval --skip-final-eval
-```
 
-Check local callback status and evidence:
+# 3. 只测一道题（下面是 Viking 行 ID，不是 data.case_id）
+.venv/bin/python -m openviking.session.train.run_batch_train_eval \
+  --dataset ark4-0 --domain ark \
+  --config /Users/bytedance/.openviking/ov-eval-ark.conf \
+  --benchmark-service-url http://127.0.0.1:8765 \
+  --epochs 0 --trials 1 --concurrency 36 --skip-baseline-eval \
+  --viking-eval-set-id 300 --viking-eval-version V11 \
+  --viking-eval-row-id 175403
 
-```bash
-curl http://127.0.0.1:1944/admin/memory-proxy \
-  -H 'X-Ark4-Admin-Token: replace-with-a-local-admin-token'
-
-tail -f benchmark/ark4-0/memory_proxy_events.local.jsonl
-```
-
-To prove the reverse path independently of Agent auto-recall, send the same source Header from an
-STG Tool Server Pod through the dedicated callback Service:
-
-```bash
-POD=$(kubectl --kubeconfig /Users/bytedance/work/space/OV-train/evolution/.kube/config_stg \
-  -n ai-search-rec get pod \
-  -l app.kubernetes.io/instance=ai-search-rec-tool-server-evolution \
-  -o jsonpath='{.items[0].metadata.name}')
-
-kubectl --kubeconfig /Users/bytedance/work/space/OV-train/evolution/.kube/config_stg \
-  -n ai-search-rec exec "$POD" -- curl -sS -m 30 -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'x-vaka-request-source: vaka-agentmemory' \
-  -d '{"query":"kubevpn network proof","limit":1}' \
-  http://ov-proxy-ov-ark-test.ai-search-rec.svc.cluster.local:8765/api/v1/search/find
-```
-
-A response containing `result`, plus a new event with `status_code=200`, proves the complete
-`STG Pod -> ov-proxy Service -> KubeVPN -> local adapter -> local OpenViking` path.
-
-`call_count > 0` or a new event proves the native rollout's Tool Server reached this machine. A
-successful event then proves the adapter also reached the authenticated local OpenViking server.
-
-The optional `probe.enabled=true` mode in `kubevpn_config.local.json` is only for an isolated
-network proof. It starts `traffic_probe.py` on `local_port` and deliberately returns HTTP 503 with
-marker `ARK4_LOCAL_TRAFFIC_PROBE`; do not use probe mode for a real training run.
-
-Inspect or stop it with:
-
-```bash
-python3 benchmark/ark4-0/kubevpn_proxy.py status
+# 4. 关闭 KubeVPN
 bash benchmark/ark4-0/stop_kubevpn_proxy.sh
 ```
 
-`--config` is optional for both KubeVPN launchers. Their default is
-`kubevpn_config.local.json` next to the scripts.
+runner 的 `--config` 是 OpenViking 配置，与 adapter 配置不同；请使用和 `memory_proxy.openviking_config_file` 相同的文件/服务，避免 Train 写入与 Agent 读取的不是同一个目录。
+
+不传 `--viking-*-*` 时使用 adapter 配置；传入时覆盖本次 run，不修改配置文件。
+Train 可用 `--viking-train-set-id`、`--viking-train-version`、可重复的 `--viking-train-row-id`。
+Eval 同理。省略行 ID 表示使用该集合该版本的全部行。
+不再使用 `--casehub-*`。
+
+## 查结果、恢复与取消
+
+- 最终 runner 报告里的 `benchmark_task_ids` 是本次 Viking 实验 ID。
+- `GET /v1/runs/{run_id}` 查看每批实验 ID、行 ID、状态。
+- 原始结果、轨迹、提交记录保存在脚本同目录 `.adapter-state/`；含完整请求数据，不要提交到 Git。
+- 重启 adapter 会复用本地记录，runner 继续查询即可。**重新启动 runner 是一个新 run**。
+- 创建请求超时时，按唯一实验名查回原实验；查不到或有重名时停在待核对状态，不自动再创建。查询执行状态的 `error` 会给出待核对名称。
+- 需要取消远端实验：`POST /v1/runs/{run_id}/cancel`。只关 adapter 或 runner 不等于取消 Viking 实验。
+- 模板含告警、资源预检失败或资源池容量低于请求并发时，拒绝提交，不自动创建/扩容资源池。
+
+## 失败如何处理
+
+- Agent 已成功，但评判失败：原始结果和完整轨迹仍保存，评分为“无有效评分”，不是 0。
+- 报告中 `invalid_evaluation_count` 单列失败数量；平均分只统计有效评分。
+- 无有效评分、轨迹缺失、存在无法区分的重试分支：跳过 commit，避免生成错误 Memory；报告保留跳过数量。
+- 轨迹支持两种格式：`session_trace.messages` 会话，以及节点式工作流。节点式只提取原始问题、真实工具调用及返回、最终回答，不导入系统提示词；工具结果或最终回答缺失时仍跳过 commit。读取结果不会自动 commit。
+- 多轮对话从逐题日志补齐每轮轨迹；只读取 `session_trace.messages`，不把内部模型完整提示词当作 Agent 对话。
+- 大轨迹不会静默截断；超过内容接口限制时走签名下载，最高 128 MiB，失败会明确记录。
+
+## 本地测试
+
+```bash
+.venv/bin/pytest --no-cov -q benchmark/ark4-0/tests
+```
+
+本地模拟通过不等于远端联调成功。真实验证需要有效 Viking API Token，以及模板资源和本地 Memory 路由可用。

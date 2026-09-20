@@ -91,8 +91,8 @@ openclaw --version
 
 **If `openclaw` is missing:**
 
-> (CN) 你的系统没有安装 OpenClaw。请先安装 OpenClaw（>= 2026.4.8），然后再回来找我。
-> (EN) OpenClaw is not installed. Please install OpenClaw (>= 2026.4.8) first, then come back.
+> (CN) 你的系统没有安装 OpenClaw。请先安装 OpenClaw（>= 2026.5.27），然后再回来找我。
+> (EN) OpenClaw is not installed. Please install OpenClaw (>= 2026.5.27) first, then come back.
 
 **Stop. Do NOT continue.**
 
@@ -590,7 +590,7 @@ These are the keys under `plugins.entries.openviking.config` in `openclaw.json`.
 | `peer_prefix` | `""` | Optional prefix for assistant `peer_id` / actor peer values when `peer_role=assistant`. Letters / digits / `_` / `-`. |
 | `accountId` | — | Required when `apiKey` is a root key. |
 | `userId` | — | Required when `apiKey` is a root key. |
-| `targetUri` | `viking://user/memories` | Default search scope URI. |
+| `targetUri` | `viking://~/memories` | Default search scope URI. |
 | `timeoutMs` | (plugin default) | HTTP timeout for OpenViking calls. |
 | `autoCapture` | `true` | Auto-append turn messages to the OpenViking session at `afterTurn`; extraction runs only after a threshold commit, `/compact`, or explicit `memory_store`. |
 | `captureMode` | `"semantic"` | Filter mode used by the server-side extraction pipeline: `semantic` or `keyword`. |
@@ -736,7 +736,7 @@ Match against actual stderr / JSON `error` strings.
 
 | Symptom (exact string) | Likely cause | Fix |
 |---|---|---|
-| `command not found: openclaw` | OpenClaw not installed | Stop. Ask user to install OpenClaw >= 2026.4.8. |
+| `command not found: openclaw` | OpenClaw not installed | Stop. Ask user to install OpenClaw >= 2026.5.27. |
 | `command not found: node` / `'node' is not recognized` | Node missing | Stop. Ask user to install Node.js >= 22. |
 | `429` / `rate limit` / `Too Many Requests` from `plugins install` | ClawHub throttle | Switch to backup Path B (`ov-install`). |
 | `not logged in` / `please log in` from `plugins install` | Anonymous user hit limit | Switch to backup Path B (`ov-install`). |

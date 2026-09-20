@@ -14,9 +14,10 @@ OpenViking supports multiple skill definition formats:
 
 ### Skill Storage Structure
 
-Skills are stored under the current user's skills root. The short URI
-`viking://user/skills/` resolves to `viking://user/{user_id}/skills/` for the
-authenticated request:
+Skills are stored under the current user's skills root. The home alias
+`viking://~/skills/` expands to `viking://user/{user_id}/skills/` for the
+authenticated request (the uid-less spelling `viking://user/skills/` is no longer
+accepted):
 
 ```
 viking://user/{user_id}/skills/
@@ -93,7 +94,7 @@ OpenViking automatically detects and converts MCP tool definitions to skill form
 **Conversion Example**:
 
 Input (MCP format):
-```python
+```json
 {
     "name": "search_web",
     "description": "Search the web",
@@ -115,7 +116,7 @@ Input (MCP format):
 ```
 
 Output (Skill format):
-```python
+```json
 {
     "name": "search-web",
     "description": "Search the web",
@@ -158,7 +159,7 @@ Skills are a special type of resource that define actions or tools agents can pe
 5. If `wait=true`, wait for vectorization to complete
 
 **Code Entry Points**:
-- `openviking/client/local.py:LocalClient.add_skill` - SDK entry point (embedded)
+- `sdk/python/openviking_sdk/client.py:AsyncHTTPClient.add_skill` - Python SDK entry point
 - `openviking_cli/client/http.py:AsyncHTTPClient.add_skill` - SDK entry point (HTTP)
 - `openviking/server/routers/resources.py:add_skill` - HTTP router
 - `openviking/service/resource_service.py:ResourceService.add_skill` - Core service implementation
@@ -183,13 +184,13 @@ Skills are a special type of resource that define actions or tools agents can pe
     - Send structured skill data directly in `data`
     - Send raw `SKILL.md` content in `data`
     - First call `POST /api/v1/resources/temp_upload` to upload a local `SKILL.md` file/zip directory, then call `POST /api/v1/skills` with `temp_file_id`
-    - `temp_upload` defaults to local temporary storage; pass `upload_mode=shared` only when you explicitly need distributed shared temporary uploads. In Python HTTP client / CLI flows, this can also be driven by `ovcli.conf` via `upload.mode = "shared"`
+    - `temp_upload` defaults to local temporary storage; pass `upload_mode=shared` only when you explicitly need distributed shared temporary uploads. Python HTTP clients can set `upload.mode = "shared"` in `ovcli.conf`; the Rust `ov` CLI instead uses `OPENVIKING_UPLOAD_MODE=shared`
   - `POST /api/v1/skills` does not accept direct host filesystem paths in `data`.
 
 - **Targeting**:
   - Skills are always user-scoped. `add_skill` does not accept `to`, `parent`, or `root_uri`.
   - Peer-scoped skill roots are not supported; actor peer filtering only applies to peer memories/resources, not peer skills.
-  - Use `viking://user/skills/...` as current-user shorthand when listing, reading, deleting, or searching skills.
+  - Use the home alias `viking://~/skills/...` to address your own skills when listing, reading, deleting, or searching. The uid-less `viking://user/skills/...` spelling returns an error with a corrective hint.
 
 - **Supported data formats**:
   1. **Dict (Skill format)**: Includes `name`, `description`, `content`, etc.
@@ -286,7 +287,7 @@ Search the web for current information.
 - **limit** (integer, optional): Max results, default 10
 """
 }
-result = client.add_skill(skill)
+result = client.add_skill(data=skill)
 print(f"Added: {result['root_uri']}")
 
 # Approach 2: Using MCP Tool format (auto-detected and converted
@@ -304,21 +305,27 @@ mcp_tool = {
         "required": ["expression"]
     }
 }
-result = client.add_skill(mcp_tool)
+result = client.add_skill(data=mcp_tool)
 print(f"Added: {result['uri']}")
 
 # Approach 3: Add from local SKILL.md file
-result = client.add_skill("./skills/search-web/SKILL.md")
+result = client.add_skill(data="./skills/search-web/SKILL.md")
 print(f"Added: {result['uri']}")
 
 # Approach 4: Add from directory containing SKILL.md (auxiliary files included
-result = client.add_skill("./skills/code-runner/")
+result = client.add_skill(data="./skills/code-runner/")
 print(f"Added: {result['uri']}")
 print(f"Auxiliary files: {result['auxiliary_files']}")
 
 # Wait for processing completion
-result = client.add_skill("./skills/my-skill/", wait=True)
+result = client.add_skill(data="./skills/my-skill/", wait=True)
 client.wait_processed()
+```
+
+**TypeScript SDK**
+
+```typescript
+await client.addSkill("./my-skill", { wait: true });
 ```
 
 **Go SDK**
@@ -442,6 +449,12 @@ for skill in skills["skills"]:
     print(skill["name"])
 ```
 
+**TypeScript SDK**
+
+```typescript
+console.log(await client.listSkills());
+```
+
 **Go SDK**
 
 ```go
@@ -461,9 +474,19 @@ curl -X GET "http://localhost:1933/api/v1/skills?node_limit=1000" \
 **Python SDK**
 
 ```python
-skill = client.get_skill("search-web", include_content=True, include_files=True)
+skill = client.get_skill(
+    skill_name="search-web",
+    include_content=True,
+    include_files=True,
+)
 print(skill["name"])
 print(skill.get("content"))
+```
+
+**TypeScript SDK**
+
+```typescript
+console.log(await client.getSkill("my-skill"));
 ```
 
 **Go SDK**
@@ -488,10 +511,16 @@ curl -X GET "http://localhost:1933/api/v1/skills/search-web?include_content=true
 **Python SDK**
 
 ```python
-results = client.find_skills("search the internet", limit=5)
+results = client.find_skills(query="search the internet", limit=5)
 
 for skill in results["skills"]:
     print(skill["name"], skill["score"])
+```
+
+**TypeScript SDK**
+
+```typescript
+console.log(await client.findSkills("database migration"));
 ```
 
 **Go SDK**
@@ -520,8 +549,22 @@ curl -X POST http://localhost:1933/api/v1/skills/find \
 **Python SDK**
 
 ```python
-validated = client.validate_skill({"name": "search-web", "description": "..."})
-updated = client.update_skill("search-web", "./skills/search-web", wait=True)
+validated = client.validate_skill(data={"name": "search-web", "description": "..."})
+updated = client.update_skill(
+    skill_name="search-web",
+    data="./skills/search-web",
+    wait=True,
+)
+```
+
+**TypeScript SDK**
+
+```typescript
+console.log(await client.validateSkill({
+  name: "search-web",
+  description: "Search the web for current information",
+  content: "# search-web\n\nSearch the web for current information.",
+}));
 ```
 
 **Go SDK**
@@ -540,10 +583,24 @@ _, _ = validated, updated
 **HTTP API**
 
 ```bash
+# Validate skill data
 curl -X POST http://localhost:1933/api/v1/skills/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
   -d '{"data": {"name": "search-web", "description": "..."}}'
+
+# Replace an existing skill with new content
+curl -X PUT http://localhost:1933/api/v1/skills/search-web \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{
+    "data": {
+      "name": "search-web",
+      "description": "Search the web for current information",
+      "content": "# search-web\n\nUpdated instructions."
+    },
+    "wait": true
+  }'
 ```
 
 ### Delete Skills
@@ -551,7 +608,13 @@ curl -X POST http://localhost:1933/api/v1/skills/validate \
 **Python SDK**
 
 ```python
-client.delete_skill("old-skill")
+client.delete_skill(skill_name="old-skill")
+```
+
+**TypeScript SDK**
+
+```typescript
+await client.deleteSkill("my-skill");
 ```
 
 **Go SDK**
@@ -568,6 +631,82 @@ curl -X DELETE "http://localhost:1933/api/v1/skills/old-skill" \
   -H "X-API-Key: your-key"
 ```
 
+### Skill Management Responses
+
+List and search return a `skills` array and `total`. Without `target_uri`, `root_uris` identifies the private user and shared Agent roots; with a target, the response contains a single `root_uri`.
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "root_uris": [
+      "viking://user/default/skills",
+      "viking://agent/skills"
+    ],
+    "skills": [
+      {
+        "type": "skill",
+        "name": "search-web",
+        "uri": "viking://user/default/skills/search-web",
+        "root_uri": "viking://user/default/skills/search-web",
+        "skill_md_uri": "viking://user/default/skills/search-web/SKILL.md",
+        "description": "Search the web for current information",
+        "tags": [],
+        "allowed_tools": [],
+        "score": 0.87,
+        "match_reason": "semantic",
+        "level": 0
+      }
+    ],
+    "total": 1
+  }
+}
+```
+
+Reading one skill returns the metadata above and conditionally adds `abstract`, `overview`, `content`, `files`, and `source` according to `level` and the `include_*` parameters.
+
+Validation returns `valid`, `strict`, normalized metadata, `body_lines`, `errors`, and `warnings`. Invalid input still uses a successful response envelope with `valid=false`:
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "valid": false,
+    "strict": false,
+    "name": "search-web",
+    "description": "",
+    "tags": [],
+    "allowed_tools": [],
+    "body_lines": 0,
+    "errors": [
+      {
+        "rule": "description_required",
+        "message": "description is required",
+        "field": "description"
+      }
+    ],
+    "warnings": []
+  }
+}
+```
+
+A successful update returns the same processing result as `add_skill` with an additional `"action": "update"`. A successful delete returns:
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "name": "old-skill",
+    "uri": "viking://user/default/skills/old-skill",
+    "root_uri": "viking://user/default/skills/old-skill",
+    "estimated_deleted_count": 4,
+    "privacy_deleted": false
+  }
+}
+```
+
+`estimated_deleted_count` appears only when the filesystem can estimate the number of deleted entries.
+
 ## Best Practices
 
 ### Clear Descriptions
@@ -577,14 +716,14 @@ curl -X DELETE "http://localhost:1933/api/v1/skills/old-skill" \
 skill = {
     "name": "search-web",
     "description": "Search the web for current information using Google",
-    ...
+    # Additional skill fields
 }
 
 # Less helpful - too vague
 skill = {
     "name": "search",
     "description": "Search",
-    ...
+    # Additional skill fields
 }
 ```
 

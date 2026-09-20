@@ -1,4 +1,4 @@
-# Verification SOP — codex plugin (v0.5.0)
+# Verification SOP — codex plugin (v0.6.0)
 
 End-to-end smoke test against a live OpenViking server. Run this whenever the
 hook scripts change. Takes ~3 minutes; the only async wait is OV's memory
@@ -125,7 +125,10 @@ Expect: `appended 2 turn(s) to OpenViking session cx-verify-sess`.
 
 `source=startup` and `source=clear` both run the same logic
 (matcher = `clear|startup|resume`). `source=resume` never commits or sweeps;
-it may inject latest archive context if a committed archive exists.
+all three sources inject the shared profile/background block by default, and
+resume may additionally inject latest archive context if a committed archive
+exists. Set `OPENVIKING_NO_AUTO_INJECT=1` when a cleanup-only smoke test needs
+the historical `{}` output.
 See `DESIGN.md` §3 + §5 for the full decision tree.
 
 ### 6a. `1 active` → commit
@@ -142,7 +145,9 @@ echo '{"session_id":"new-after-verify","source":"startup","cwd":"/tmp","model":"
     node $PLUGIN/scripts/session-start-commit.mjs
 ```
 
-Expect: `OpenViking session cx-verify-sess is committed`.
+Expect: `hookSpecificOutput.additionalContext` contains the OpenViking profile
+block, and `systemMessage` is
+`OpenViking session cx-verify-sess is committed`.
 After this `verify-sess.json` is gone from `$STATE_DIR/state`.
 
 ### 6b. `0 active` → no-op
@@ -154,7 +159,8 @@ echo '{"session_id":"another-fresh","source":"startup","cwd":"/tmp","model":"x",
     OPENVIKING_CODEX_STATE_DIR=$STATE_DIR/state \
     CODEX_PLUGIN_ROOT=$PLUGIN \
     node $PLUGIN/scripts/session-start-commit.mjs
-# Expect: {} (no orphan to commit)
+# Expect: profile context in hookSpecificOutput.additionalContext.
+# Add OPENVIKING_NO_AUTO_INJECT=1 to expect {} (no orphan to commit).
 ```
 
 ### 6c. `≥2 active` → skip; rely on idle TTL
@@ -180,7 +186,7 @@ echo '{"session_id":"sess-ccc","source":"startup","cwd":"/tmp","model":"x","perm
     node $PLUGIN/scripts/session-start-commit.mjs
 ```
 
-Expect: `{}` on stdout. In `~/.openviking/logs/codex-hooks.log` look for
+Expect: profile context on stdout. In `~/.openviking/logs/codex-hooks.log` look for
 `"branch":">=2_active","action":"skip; rely on idle TTL"`. The two state
 files are still present — the skip path does not clear them.
 
@@ -190,7 +196,7 @@ files are still present — the skip path does not clear them.
 # Backdate one of the state files to be older than IDLE_TTL_MS (default 30 min).
 OLD=$(node -e 'console.log(Date.now() - 60*60*1000)')   # 1 hour ago
 cat > "$STATE_DIR/state/sess-aaa.json" <<EOF
-{"codexSessionId":"sess-aaa","ovSessionId":null,"capturedTurnCount":0,"createdAt":$OLD,"lastUpdatedAt":$OLD}
+{"codexSessionId":"sess-aaa","ovSessionId":"cx-sess-aaa","capturedTurnCount":2,"createdAt":$OLD,"lastUpdatedAt":$OLD}
 EOF
 
 echo '{"session_id":"sess-ddd","source":"startup","cwd":"/tmp","model":"x","permission_mode":"default","transcript_path":null,"hook_event_name":"SessionStart"}' \
@@ -200,11 +206,30 @@ echo '{"session_id":"sess-ddd","source":"startup","cwd":"/tmp","model":"x","perm
     node $PLUGIN/scripts/session-start-commit.mjs
 ```
 
-Expect: log shows `idle_sweep` for `sess-aaa` (committed and cleared).
-`sess-bbb.json` is still present (still fresh). `sess-aaa.json` is gone.
+Expect: log shows `idle_sweep` for `sess-aaa` (committed).
+`sess-bbb.json` is still present (still fresh). `sess-aaa.json` is also
+present with `ovSessionId: null` and `capturedTurnCount: 2` for resume.
 If `sess-bbb` was in `≥2 active` from 6c, the heuristic on this call sees
 just `sess-bbb` (1 active) and commits it — that's expected and shows the
 heuristic + sweep working together.
+
+### 6d-2. Cursor retention
+
+```bash
+# sess-aaa is now cursor-only (ovSessionId: null, capturedTurnCount: 2).
+# Re-run the same SessionStart with a 1 s committed TTL.
+echo '{"session_id":"sess-eee","source":"startup","cwd":"/tmp","model":"x","permission_mode":"default","transcript_path":null,"hook_event_name":"SessionStart"}' \
+  | OPENVIKING_CONFIG_FILE=$OV_CONF \
+    OPENVIKING_CODEX_STATE_DIR=$STATE_DIR/state \
+    OPENVIKING_CODEX_COMMITTED_TTL_MS=1000 \
+    CODEX_PLUGIN_ROOT=$PLUGIN \
+    OPENVIKING_DEBUG=1 \
+    node $PLUGIN/scripts/session-start-commit.mjs
+```
+
+Expect: log shows `state_retire` for `sess-aaa` and the file is gone. With
+the default 30-day TTL it stays, and no `/commit` is issued for it either
+way — a cursor-only state has nothing left to commit.
 
 ### 6e. `source=resume` → no commit/sweep; optional archive inject
 
@@ -214,9 +239,11 @@ echo '{"session_id":"any","source":"resume","cwd":"/tmp","model":"x","permission
     OPENVIKING_CODEX_STATE_DIR=$STATE_DIR/state \
     CODEX_PLUGIN_ROOT=$PLUGIN \
     node $PLUGIN/scripts/session-start-commit.mjs
-# Expect without an existing archive: {}
-# Expect with an existing archive for cx-any: hookSpecificOutput.additionalContext
-# containing "OpenViking session archive digest" and a viking://user/sessions/cx-any/history/ URI.
+# Expect without an existing archive: hookSpecificOutput.additionalContext
+# containing the OpenViking profile block.
+# Expect with an existing archive for cx-any: the same additionalContext also
+# contains "OpenViking session archive digest" and a
+# viking://user/sessions/cx-any/history/ URI.
 ```
 
 ### 6f. Compressor profile detect can be disabled for hook smoke tests

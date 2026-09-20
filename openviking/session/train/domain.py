@@ -20,7 +20,15 @@ from openviking.session.memory.dataclass import StoredLink
 if TYPE_CHECKING:
     from openviking.session.train.gradients import PatchSemanticGradient
 
-PolicyStatus = Literal["draft", "staging", "production", "deprecated", "archived"]
+PolicyStatus = Literal[
+    "draft",
+    "promoted",
+    "degraded",
+    "staging",
+    "production",
+    "deprecated",
+    "archived",
+]
 TrajectoryOutcome = Literal["success", "failure", "partial", "unfinished", "unknown"]
 PolicyPlanItemKind = Literal["upsert", "delete"]
 
@@ -65,11 +73,13 @@ class PolicySet:
 
     @asynccontextmanager
     async def lock(self):
-        """Acquire a tree lock for the whole policy root directory.
+        """Serialize optimizers for this policy root without locking its files.
 
-        Policy updates serialize on this lock so concurrent realtime/batch
-        training jobs plan and apply against a freshly reloaded policy set.
-        ``timeout=None`` means wait indefinitely until the lock is available.
+        Model planning can take minutes.  Holding a tree lock during that work
+        blocks unrelated pathlock-protected mutations below the Experience directory.
+        A dedicated exact-path coordination lock keeps optimizer/model QPS to
+        one in-flight plan per policy root, while the updater acquires a short
+        exact-batch lease for the concrete files it finally changes.
         """
 
         if self.viking_fs is None:
@@ -80,19 +90,16 @@ class PolicySet:
         if uri_to_path is None:
             raise RuntimeError("PolicySet.viking_fs must provide _uri_to_path for locking")
 
-        from openviking.storage.transaction import get_lock_manager
-
-        lock_manager = get_lock_manager()
-        handle = lock_manager.create_handle()
-        path = uri_to_path(self.root_uri, ctx=self.request_context)
-        acquired = await lock_manager.acquire_tree(handle, path, timeout=None)
-        if not acquired:
-            await lock_manager.release(handle)
-            raise RuntimeError(f"Failed to acquire policy tree lock for {self.root_uri}")
+        coordination_uri = f"{self.root_uri.rstrip('/')}/.policy-optimizer.lock"
+        path = uri_to_path(coordination_uri, ctx=self.request_context)
+        lease = await self.viking_fs._async_agfs.pathlock_acquire_exact_batch(
+            [path],
+            timeout_secs=300.0,
+        )
         try:
-            yield handle
+            yield lease
         finally:
-            await lock_manager.release(handle)
+            await self.viking_fs._async_agfs.pathlock_release(lease)
 
     async def reload(self) -> "PolicySet":
         """Reload this policy set from its backing VikingFS under the same ctx."""

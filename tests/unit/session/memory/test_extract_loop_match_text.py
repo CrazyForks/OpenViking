@@ -38,7 +38,9 @@ class TestResolveOperations:
             directory="viking://user/{{ user_space }}/memories/entities",
             filename_template="{{ name }}.md",
             fields=[
-                MemoryField(name="name", field_type=FieldType.STRING, merge_op=MergeOp.REPLACE),
+                MemoryField(name="name", field_type=FieldType.STRING, merge_op=MergeOp.IMMUTABLE),
+                MemoryField(name="owner", field_type=FieldType.STRING, merge_op=MergeOp.REPLACE),
+                MemoryField(name="count", field_type=FieldType.INT64, merge_op=MergeOp.SUM),
                 MemoryField(name="content", field_type=FieldType.STRING, merge_op=MergeOp.PATCH),
             ],
         )
@@ -47,7 +49,7 @@ class TestResolveOperations:
             uri=existing_uri,
             content="old content",
             memory_type="entities",
-            extra_fields={"name": "Melanie"},
+            extra_fields={"name": "Melanie", "owner": "Alice", "count": 2},
         )
 
         context_provider = Mock()
@@ -71,7 +73,7 @@ class TestResolveOperations:
 
         operations, _ = await loop.resolve_operations(
             AttrDict(
-                entities=[{"name": "WrongName", "content": "new content", "page_id": 7}],
+                entities=[{"content": "new content", "page_id": 7}],
                 delete_uris=[],
             )
         )
@@ -80,6 +82,8 @@ class TestResolveOperations:
         assert operation.uris == [existing_uri]
         assert operation.old_memory_file_content is old_file
         assert operation.memory_fields["name"] == "Melanie"
+        assert "owner" not in operation.memory_fields
+        assert "count" not in operation.memory_fields
         assert operation.memory_fields["content"] == "new content"
         isolation_handler.calculate_memory_uris.assert_not_called()
 
@@ -131,6 +135,56 @@ class TestResolveOperations:
         assert refetched == {}
         context_provider.execute_tool.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_existing_page_id_keeps_new_replace_and_sum_values(self):
+        schema = MemoryTypeSchema(
+            memory_type="entities",
+            description="entity memory",
+            fields=[
+                MemoryField(name="name", field_type=FieldType.STRING, merge_op=MergeOp.IMMUTABLE),
+                MemoryField(name="owner", field_type=FieldType.STRING, merge_op=MergeOp.REPLACE),
+                MemoryField(name="count", field_type=FieldType.INT64, merge_op=MergeOp.SUM),
+            ],
+        )
+        existing_uri = "viking://user/alice/memories/entities/Melanie.md"
+        old_file = MemoryFile(
+            uri=existing_uri,
+            content="old content",
+            memory_type="entities",
+            extra_fields={"name": "Melanie", "owner": "Alice", "count": 2},
+        )
+
+        context_provider = Mock()
+        context_provider.get_memory_schemas.return_value = [schema]
+        context_provider.read_file_contents = {existing_uri: old_file}
+
+        isolation_handler = Mock()
+        isolation_handler.get_read_scope.return_value = None
+        isolation_handler.fill_identity_fields.side_effect = lambda item, role_scope=None: item
+
+        loop = ExtractLoop(
+            vlm=Mock(model="test-model"),
+            viking_fs=Mock(),
+            context_provider=context_provider,
+            isolation_handler=isolation_handler,
+        )
+        loop._extract_context = SimpleNamespace(
+            page_id_map=SimpleNamespace(resolve=lambda page_id: existing_uri)
+        )
+
+        operations, _ = await loop.resolve_operations(
+            AttrDict(
+                entities=[
+                    {"name": "Ignored", "owner": "Bob", "count": 3, "page_id": 7}
+                ]
+            )
+        )
+
+        operation = operations.upsert_operations[0]
+        assert operation.memory_fields["name"] == "Melanie"
+        assert operation.memory_fields["owner"] == "Bob"
+        assert operation.memory_fields["count"] == 3
+
     def test_unresolved_page_ids_logs_at_info(self):
         loop = ExtractLoop(vlm=Mock(model="test-model"), viking_fs=Mock(), context_provider=Mock())
         loop._extract_context = Mock()
@@ -145,19 +199,9 @@ class TestResolveOperations:
 
         raw_links = [WikiLink(f=100, t=102, match_text="trip")]
 
-        with (
-            patch("openviking.session.memory.extract_loop.tracer.info") as mock_info,
-            patch("openviking.session.memory.extract_loop.tracer.error") as mock_error,
-        ):
-            resolved = loop._resolve_links(raw_links, upsert_operations=[])
+        resolved = loop._resolve_links(raw_links, upsert_operations=[])
 
         assert resolved == []
-        mock_error.assert_not_called()
-        mock_info.assert_any_call(
-            "Skipping link with unresolved page_ids: f=100, t=102, "
-            "from_uri=viking://user/user_sample_0/memories/trajectories/a.md, to_uri=None, "
-            "op_page_map_keys=[]"
-        )
 
 
 class TestResolveLinksMultiUri:
@@ -203,6 +247,28 @@ class TestResolveLinksMultiUri:
                 "viking://user/b/memories/experiences/target.md",
             ),
         }
+
+    def test_shared_page_id_self_link_is_ignored(self):
+        loop = ExtractLoop(vlm=Mock(model="test-model"), viking_fs=Mock(), context_provider=Mock())
+        loop._extract_context = Mock()
+        loop._extract_context.page_id_map = Mock()
+        loop._extract_context.page_id_map._id_to_uri = {}
+        loop._extract_context.page_id_map.resolve.return_value = None
+
+        raw_links = [WikiLink(f=100, t=100, match_text="trip")]
+        upsert_operations = [
+            ResolvedOperation(
+                memory_fields={},
+                memory_type="experiences",
+                uris=[
+                    "viking://user/a/memories/experiences/source.md",
+                    "viking://user/b/memories/experiences/source.md",
+                ],
+                page_id=100,
+            )
+        ]
+
+        assert loop._resolve_links(raw_links, upsert_operations=upsert_operations) == []
 
 
 class TestPageIdInstruction:
@@ -256,7 +322,10 @@ class TestPageIdInstruction:
             ) as mock_create_model,
         ):
             mock_config.return_value = SimpleNamespace(memory=SimpleNamespace(link_enabled=False))
-            mock_create_model.return_value = SimpleNamespace(model_json_schema=lambda: {})
+            mock_create_model.return_value = SimpleNamespace(
+                model_fields={"experiences": object()},
+                model_json_schema=lambda: {},
+            )
 
             await loop.run()
 
@@ -271,7 +340,7 @@ class TestPageIdInstruction:
         )
         assert "each visible line is prefixed with `line_number<TAB>`" in system_content
         assert (
-            "Never include the line-number prefix itself in `search` or `replace`."
+            "Never include the line-number prefix itself in `search`, `replace`, or `delete`."
             in system_content
         )
         assert "For existing items, use the page_id shown in read/search results." in system_content
@@ -330,7 +399,10 @@ class TestPageIdInstruction:
             ) as mock_create_model,
         ):
             mock_config.return_value = SimpleNamespace(memory=SimpleNamespace(link_enabled=True))
-            mock_create_model.return_value = SimpleNamespace(model_json_schema=lambda: {})
+            mock_create_model.return_value = SimpleNamespace(
+                model_fields={"experiences": object(), "links": object()},
+                model_json_schema=lambda: {},
+            )
 
             await loop.run()
 
@@ -397,7 +469,10 @@ class TestFinalOperationsHydration:
             patch("openviking.session.memory.extract_loop.tracer.info") as mock_tracer_info,
         ):
             mock_config.return_value = SimpleNamespace(memory=SimpleNamespace(link_enabled=False))
-            mock_create_model.return_value = SimpleNamespace(model_json_schema=lambda: {})
+            mock_create_model.return_value = SimpleNamespace(
+                model_fields={"experiences": object()},
+                model_json_schema=lambda: {},
+            )
 
             final_operations, _ = await loop.run()
 

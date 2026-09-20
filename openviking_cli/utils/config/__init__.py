@@ -51,8 +51,8 @@ from .consts import (
     SYSTEM_CONFIG_DIR,
 )
 from .embedding_config import EmbeddingConfig
-from .grep_config import GrepConfig, GrepEngine
 from .git_config import GitConfig, GitLocalConfig, GitS3Config
+from .grep_config import GrepConfig, GrepEngine
 from .log_config import LogConfig
 from .open_viking_config import (
     OpenVikingConfig,
@@ -65,6 +65,7 @@ from .open_viking_config import (
 from .ovcli_config import OVCLIConfig, load_ovcli_config
 from .parser_config import (
     PARSER_CONFIG_REGISTRY,
+    AnydocConfig,
     AudioConfig,
     CodeConfig,
     HTMLConfig,
@@ -146,6 +147,7 @@ __all__ = [
     "AudioConfig",
     "VideoConfig",
     "MarkdownConfig",
+    "AnydocConfig",
     "HTMLConfig",
     "TextConfig",
     "get_parser_config",

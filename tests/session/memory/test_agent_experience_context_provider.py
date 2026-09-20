@@ -15,12 +15,16 @@ from openviking.session.memory.agent_experience_context_provider import (
     AgentExperienceContextProvider,
     CandidateExperienceEvidence,
     ExperienceEvidenceBundle,
+    ExperienceEvidenceLoader,
+    ExperienceEvidenceQuery,
     TrajectoryEvidence,
 )
 from openviking.session.memory.agent_trajectory_context_provider import (
     AgentTrajectoryContextProvider,
 )
 from openviking.session.memory.dataclass import MemoryFile
+from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
+from openviking.session.memory.memory_updater import ExtractContext
 from openviking.session.memory.session_extract_context_provider import (
     SessionExtractContextProvider,
 )
@@ -72,6 +76,33 @@ def test_user_memory_provider_splits_but_trajectory_provider_keeps_messages_whol
     assert trajectory_provider.get_extract_context().messages[0] is messages[0]
 
 
+def test_agent_only_schemas_are_excluded_from_peer_user_memory_extraction():
+    messages = [
+        Message(
+            id="1",
+            role="user",
+            parts=[TextPart(text="帮我导出 B 站投稿数据")],
+            peer_id="case_demo_peer",
+        )
+    ]
+    ctx = RequestContext(
+        user=UserIdentifier(account_id="acc", user_id="default"),
+        role=Role.USER,
+    )
+    provider = SessionExtractContextProvider(messages=messages)
+    provider._isolation_handler = MemoryIsolationHandler(
+        ctx,
+        ExtractContext(messages),
+        allow_self=False,
+        allowed_peer_ids={"case_demo_peer"},
+    )
+
+    schema_types = {schema.memory_type for schema in provider.get_memory_schemas(ctx)}
+
+    assert "experiences" not in schema_types
+    assert "trajectories" not in schema_types
+
+
 def test_agent_experience_instruction_owns_closed_world_comparison_workflow():
     provider = AgentExperienceContextProvider(
         trajectory_summary="scope and communication failure",
@@ -86,7 +117,14 @@ def test_agent_experience_instruction_owns_closed_world_comparison_workflow():
     assert "create it" in instruction
     assert "output no changes" in instruction
     assert "Do not output `trigger_code`" in instruction
-    assert "`situation`, `reminder`, `procedure`, `anti_pattern`" in instruction
+    assert (
+        "`situation`, `reminder`, `procedure`, `verification`, `fallback`, `anti_pattern`"
+        in instruction
+    )
+    assert "First controllable divergence" in instruction
+    assert "Independent proof" in instruction
+    assert "Transfer test" in instruction
+    assert "do not paraphrase the source task" in instruction
     assert "storage template defines the Markdown structure and order" in instruction
     assert "Authoritative outcome evidence" not in instruction
     assert "cancellation_allowed" not in instruction
@@ -99,6 +137,33 @@ def test_agent_experience_instruction_owns_closed_world_comparison_workflow():
         "Raw Evidence",
     ):
         assert removed_section not in instruction
+
+
+@pytest.mark.asyncio
+async def test_experience_evidence_loader_prefetches_global_semantic_candidates():
+    semantic_uri = "viking://user/user_1/memories/experiences/verify_source_mapping.md"
+    viking_fs = SimpleNamespace(
+        find=AsyncMock(return_value=SimpleNamespace(memories=[SimpleNamespace(uri=semantic_uri)]))
+    )
+    loader = ExperienceEvidenceLoader(viking_fs)
+    loader._load_case_file = AsyncMock(return_value=None)
+    loader._load_candidates = AsyncMock(return_value=[])
+    loader._load_comparison_trajectories = AsyncMock(return_value=[])
+    query = ExperienceEvidenceQuery(
+        trajectory_summary="Wrong source column was selected before calculation.",
+        trajectory_uri="viking://user/user_1/memories/trajectories/current.md",
+        trajectory_dir="viking://user/user_1/memories/trajectories",
+        case_name="planning spreadsheet",
+        task_signature="map source fields into a calculated workbook",
+    )
+
+    await loader.load(query, _ctx())
+
+    viking_fs.find.assert_awaited_once()
+    assert viking_fs.find.await_args.kwargs["target_uri"] == (
+        "viking://user/user_1/memories/experiences"
+    )
+    assert loader._load_candidates.await_args.args[0] == [semantic_uri]
 
 
 def test_agent_experience_instruction_lists_custom_template_content_fields():
@@ -142,6 +207,19 @@ def test_experience_schema_uses_target_comparison_guidance_without_authoritative
     assert "preserve that gate instead of weakening it" not in description
 
 
+def test_experience_instruction_allows_only_observed_successful_recovery():
+    provider = AgentExperienceContextProvider(
+        trajectory_summary="successful recovery",
+        trajectory_uri="viking://user/u/memories/trajectories/recovered.md",
+    )
+
+    instruction = provider.instruction()
+
+    assert "recovery_evidence.status=observed_recovered" in instruction
+    assert "same-path retry" in instruction
+    assert "Do not turn the rest of the successful run" in instruction
+
+
 @pytest.mark.asyncio
 async def test_agent_experience_prefetch_starts_with_new_trajectory_without_conversation():
     evidence_loader = _loader(ExperienceEvidenceBundle())
@@ -157,7 +235,7 @@ async def test_agent_experience_prefetch_starts_with_new_trajectory_without_conv
     ) as add_tool_call_pair:
         messages = await provider.prefetch()
 
-    assert provider.get_output_language() == "中文"
+    assert provider.get_output_language() == "zh-CN"
     assert all("Conversation History" not in message.get("content", "") for message in messages)
     assert add_tool_call_pair.call_count == 1
     assert add_tool_call_pair.call_args_list[0].kwargs["result"]["context_role"] == "new_trajectory"

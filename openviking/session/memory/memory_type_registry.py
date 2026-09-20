@@ -132,25 +132,6 @@ class MemoryTypeRegistry:
             return list(self._types.keys())
         return [mt.memory_type for mt in self._types.values() if mt.enabled]
 
-    def list_search_uris(self, user_space: str) -> List[str]:
-        """List all directory URIs for search scope.
-
-        Args:
-            user_space: User space name
-
-        Returns:
-            List of directory URIs from enabled schemas
-        """
-        uris = []
-        for schema in self.list_all(include_disabled=False):
-            if schema.directory:
-                dir_path = TemplateUtils.render(
-                    schema.directory,
-                    {"user_space": user_space},
-                )
-                uris.append(dir_path)
-        return uris
-
     def load_from_yaml(self, yaml_path: str, replace: bool = False) -> None:
         """
         Load memory type from a YAML file.
@@ -229,6 +210,11 @@ class MemoryTypeRegistry:
         """Parse memory type from YAML data."""
         fields_data = data.get("fields", [])
         fields = []
+        stage = data.get("stage")
+        if stage is None and data.get("agent_only", False):
+            stage = "agent"
+        if stage is None:
+            stage = "user"
 
         for field_data in fields_data:
             field = MemoryField(
@@ -251,7 +237,7 @@ class MemoryTypeRegistry:
             directory=data.get("directory", ""),
             enabled=data.get("enabled", data.get("enable", True)),
             operation_mode=data.get("operation_mode", "upsert"),
-            stage=data.get("stage", "user"),
+            stage=stage,
             peer_enabled=data.get("peer_enabled", True),
             overview_template=data.get("overview_template"),
         )
@@ -296,9 +282,11 @@ class MemoryTypeRegistry:
             if "{{" in schema.filename_template:
                 continue
 
-            # Check if any field has init_value
+            # Seed template variables with every field so that placeholders for
+            # fields without an explicit init_value render as empty instead of
+            # leaking the literal "{{ field }}" text into the initialized file.
             fields_with_init = {
-                f.name: f.init_value for f in schema.fields if f.init_value is not None
+                f.name: f.init_value if f.init_value is not None else "" for f in schema.fields
             }
             if not fields_with_init:
                 continue

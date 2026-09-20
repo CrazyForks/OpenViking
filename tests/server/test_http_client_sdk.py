@@ -152,7 +152,11 @@ async def test_sdk_ls(http_client):
 
 async def test_sdk_mkdir_and_ls(http_client):
     client, _ = http_client
-    await client.mkdir("viking://resources/sdk_dir/")
+    uri = "viking://resources/sdk_dir/"
+
+    await client.mkdir(uri)
+
+    assert await client.abstract(uri) == "# sdk_dir"
     result = await client.ls("viking://resources/")
     assert isinstance(result, list)
 
@@ -164,8 +168,11 @@ async def test_sdk_mkdir_with_description_sets_abstract(http_client):
 
     await client.mkdir(uri, description=description)
 
-    abstract = await client.abstract(uri)
-    assert abstract == description
+    assert await client.abstract(uri) == description
+
+    await client.mkdir(uri)
+
+    assert await client.abstract(uri) == description
 
 
 async def test_sdk_tree(http_client):
@@ -289,6 +296,44 @@ async def test_sdk_commit_session_keeps_telemetry_as_second_positional_argument(
     ]
 
 
+async def test_sdk_commit_session_sends_turn_budget_retention_fields():
+    calls = []
+
+    class _FakeHTTP:
+        async def post(self, path, json):
+            calls.append((path, json))
+            return httpx.Response(
+                200,
+                json={"status": "success", "result": {"task_id": "task-turn"}},
+            )
+
+    client = AsyncHTTPClient(url="http://127.0.0.1:1933")
+    client._http = _FakeHTTP()
+
+    result = await client.commit_session(
+        "s1",
+        retention_mode="turn_budget",
+        keep_recent_turn_count=3,
+        retained_message_token_budget=12_000,
+        min_raw_tail_steps=1,
+    )
+
+    assert result == {"task_id": "task-turn"}
+    assert calls == [
+        (
+            "/api/v1/sessions/s1/commit",
+            {
+                "keep_recent_count": 0,
+                "telemetry": False,
+                "retention_mode": "turn_budget",
+                "keep_recent_turn_count": 3,
+                "retained_message_token_budget": 12_000,
+                "min_raw_tail_steps": 1,
+            },
+        )
+    ]
+
+
 async def test_sdk_get_session_archive(http_client):
     client, svc = http_client
 
@@ -299,7 +344,6 @@ async def test_sdk_get_session_archive(http_client):
         return []
 
     svc.session_compressor.extract_long_term_memories = _no_memories
-    svc.session_compressor.extract_execution_memories = _no_memories
 
     session_info = await client.create_session()
     session_id = session_info["session_id"]

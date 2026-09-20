@@ -40,6 +40,8 @@ class PipelineReportBuilder:
             "epoch": result.epoch,
             **_eval_metadata_fields(result.metadata),
             "case_count": case_count,
+            "invalid_evaluation_count": result.metadata.get("invalid_evaluation_count", 0),
+            "requested_case_count": case_count + result.metadata.get("invalid_evaluation_count", 0),
             "accuracy": _ratio(passed_count, case_count),
             "passed_count": passed_count,
             "average_reward": _average(rewards),
@@ -69,6 +71,11 @@ class PipelineReportBuilder:
             {
                 "trial": trial_index,
                 **self.evaluation_summary_from_analyses(analyses_by_trial.get(trial_index, [])),
+                "invalid_evaluation_count": sum(
+                    1
+                    for item in result.metadata.get("invalid_evaluations", [])
+                    if item.get("trial") == trial_index
+                ),
             }
             for trial_index in range(trial_count)
         ]
@@ -87,7 +94,8 @@ class PipelineReportBuilder:
             "trial_count": trial_count,
             "case_count_per_trial": case_counts[0] if len(set(case_counts)) == 1 else None,
             "case_counts_per_trial": case_counts,
-            "total_rollout_count": len(result.analyses),
+            "total_rollout_count": len(result.analyses)
+            + result.metadata.get("invalid_evaluation_count", 0),
             "accuracy_mean": _average(accuracies),
             "accuracy_std": _stddev(accuracies),
             "average_reward_mean": _average(average_rewards),
@@ -162,6 +170,12 @@ class PipelineReportBuilder:
             "snapshot_id": snapshot_id,
             "snapshot_ids": [snapshot_id],
             **train_eval,
+            "invalid_evaluation_count": sum(
+                r.metadata.get("evaluation_valid") is False for r in rollouts
+            ),
+            "commit_ineligible_count": sum(
+                r.metadata.get("commit_eligible") is False for r in rollouts
+            ),
             "cache_hit_count": len(cache_hits),
             "cache_miss_count": max(len(rollouts) - len(cache_hits), 0),
             "from_cache": bool(cache_hits) and len(cache_hits) == len(rollouts),
@@ -188,7 +202,12 @@ class PipelineReportBuilder:
             "train_eval": train_eval,
             "batch_count": len(snapshot_ids),
             "gradient_count": len(epoch_result.gradients),
-            "committed_rollout_count": len(commit_results),
+            "committed_rollout_count": sum(
+                not item.get("skipped_reason") for item in commit_results
+            ),
+            "skipped_rollout_count": sum(
+                bool(item.get("skipped_reason")) for item in commit_results
+            ),
             "errors": errors,
             "failed_commit_trace_ids": _failed_commit_trace_ids(commit_results),
             "failed_commit_telemetry_ids": _failed_commit_telemetry_ids(commit_results),
@@ -386,6 +405,8 @@ def _eval_metadata_fields(metadata: dict[str, Any]) -> dict[str, Any]:
 def _analyses_from_rollout_evaluations(rollouts: list[Rollout]) -> list[RolloutAnalysis]:
     analyses: list[RolloutAnalysis] = []
     for idx, rollout in enumerate(rollouts):
+        if rollout.metadata.get("evaluation_valid") is False:
+            continue
         if rollout.evaluation is None:
             raise ValueError(
                 "report builder requires rollout.evaluation; "

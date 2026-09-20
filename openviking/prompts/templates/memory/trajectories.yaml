@@ -17,6 +17,7 @@ directory: "viking://user/{{ user_space }}/memories/trajectories"
 filename_template: "{{ extract_context.get_session_timestamp()[:4] }}/{{ extract_context.get_session_timestamp()[4:6] }}/{{ extract_context.get_session_timestamp()[6:8] }}/{{ trajectory_name }}.md"
 enabled: true
 operation_mode: "add_only"
+stage: agent
 agent_only: true
 
 fields:
@@ -38,6 +39,45 @@ fields:
       partial means some important work succeeded but one material requirement failed.
       unfinished means the task stopped before the necessary terminal action/answer.
       unknown means the evidence is insufficient.
+    merge_op: immutable
+
+  - name: recovery_evidence
+    type: string
+    description: |
+      Machine-readable JSON object describing whether this run visibly recovered from a material
+      failed path. Output ONLY a valid compact JSON object, not markdown and not a code block.
+
+      Required shape:
+      {"status":"none","failed_boundary":"","alternative_action":"","verification":""}
+
+      status must be exactly one of: none, observed_recovered, attempted_not_recovered, unknown.
+      Use observed_recovered only when all of the following are visible in the trajectory:
+      - a primary action, tool, source, or implementation path materially failed;
+      - the agent actually executed a different compatible path, not merely retried the same action;
+      - the alternative completed the requested result; and
+      - the final result was independently checked or directly confirmed by authoritative evidence.
+
+      failed_boundary: the observable failure that triggered the switch.
+      alternative_action: the different path that was actually executed successfully.
+      verification: the observed check or evidence that confirmed the recovered result.
+      Use attempted_not_recovered when an alternative was tried but the requested result still failed.
+      Use unknown when the trace is insufficient. Otherwise use none. Do not infer or propose an
+      untried fallback, and do not treat a same-path retry, cleanup, or minor syntax correction as a
+      material recovery.
+    merge_op: immutable
+
+  - name: task_query
+    type: string
+    description: |
+      Write a self-contained user task that can be copied and rerun to reproduce the intent represented by this trajectory.
+
+      Rules:
+      - Reconstruct the complete task from the relevant conversation context instead of copying unrelated turns or the whole session.
+      - Preserve the user's objective, target, constraints, requested output, and acceptance criteria that are necessary to execute the task independently.
+      - Preserve non-secret concrete inputs such as the requested topic, time range, and target object when they are required to rerun the task. Never include credentials, tokens, or authentication secrets.
+      - Remove conversational references such as "above", "continue", or "why did it stop" by resolving them into explicit task context.
+      - Do not include the assistant's solution, tool results, execution outcome, trajectory analysis, or any experience-memory content.
+      - Write in the user's voice and in {{ language }}. Use concise sentences, but include all information required to rerun the task.
     merge_op: immutable
 
   - name: retrieval_anchor

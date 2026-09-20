@@ -101,7 +101,11 @@ class SessionCommitPolicyTrainer:
             ),
             concurrency=self.commit_concurrency,
         )
-        analysis_list = [_analysis_from_rollout(rollout) for rollout in rollout_list]
+        analysis_list = [
+            _analysis_from_rollout(rollout)
+            for rollout in rollout_list
+            if rollout.metadata.get("evaluation_valid") is not False
+        ]
         errors = [item["error"] for item in commit_results if item.get("error")]
         committed_rollout_count = sum(
             1 for item in commit_results if not item.get("skipped_reason")
@@ -139,6 +143,16 @@ class SessionCommitPolicyTrainer:
         *,
         execution_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if rollout.metadata.get("commit_eligible") is False:
+            return {
+                "index": index,
+                "session_id": "",
+                "score": None,
+                "skipped_reason": "invalid_evaluation_or_incomplete_trace",
+                "error": None,
+                "viking_task_id": rollout.metadata.get("viking_task_id"),
+                "viking_row_id": rollout.metadata.get("viking_row_id"),
+            }
         session_id = _session_id_for_rollout(
             rollout,
             run_id=self.run_id,
@@ -190,10 +204,7 @@ class SessionCommitPolicyTrainer:
         try:
             messages = (
                 ([_case_spec_message_to_request(rollout)] if case_spec_enabled else [])
-                + [
-                    _message_to_request(message)
-                    for message in rollout_messages
-                ]
+                + [_message_to_request(message) for message in rollout_messages]
                 + [_evaluation_message_to_request(rollout)]
             )
             stage = "create_session"
@@ -314,7 +325,7 @@ class SessionCommitPolicyTrainer:
             try:
                 await self.client.create_session(
                     session_id=session_id,
-                    memory_policy=memory_policy,
+                    options={"memory_policy": memory_policy},
                 )
                 return
             except Exception as exc:
@@ -461,7 +472,7 @@ class SessionCommitPolicyTrainer:
                     }
                 await asyncio.sleep(min(self.poll_interval_seconds * transient_errors, 10.0))
                 continue
-            if task and task.get("status") in {"completed", "failed"}:
+            if task and task.get("status") in {"completed", "failed", "cancelled"}:
                 return task
             if deadline is not None and asyncio.get_running_loop().time() >= deadline:
                 return {"task_id": task_id, "status": "timeout", "error": "commit task timeout"}
@@ -596,6 +607,8 @@ def _task_error(task: dict[str, Any] | None) -> str | None:
         return None
     if task.get("status") == "failed":
         return str(task.get("error") or "task failed")
+    if task.get("status") == "cancelled":
+        return str(task.get("error") or "task cancelled")
     if task.get("status") == "timeout":
         return str(task.get("error") or "task timeout")
     return None
@@ -742,6 +755,8 @@ def _stable_task_signature(rollout: Rollout) -> str:
 
 def _stable_case_metadata(rollout: Rollout) -> dict[str, Any]:
     metadata = dict(rollout.case.metadata or {})
+    # Adapter batch routing (including other rows) is not training evidence.
+    metadata.pop("_viking_batch", None)
     metadata.setdefault("rollout_case_name", rollout.case.name)
     metadata.setdefault("rollout_task_signature", rollout.case.task_signature)
     return metadata

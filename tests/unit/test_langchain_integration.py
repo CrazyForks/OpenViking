@@ -7,13 +7,12 @@ import pytest
 
 pytest.importorskip("langchain_core")
 pytest.importorskip("langgraph")
+pytest.importorskip("langchain_openviking")
 
+import langchain_openviking.client as client_helpers
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
-from langgraph.store.base import PutOp
-
-import openviking.integrations.langchain.client as client_helpers
-from openviking.integrations.langchain import (
+from langchain_openviking import (
     InMemoryOpenVikingClient,
     OpenVikingChatMessageHistory,
     OpenVikingCommitPolicy,
@@ -24,19 +23,20 @@ from openviking.integrations.langchain import (
     create_openviking_tools,
     with_openviking_context,
 )
-from openviking.integrations.langchain.client import (
+from langchain_openviking.client import (
     OpenVikingConnection,
     apply_commit_policy,
     call_openviking,
     ensure_client,
 )
-from openviking.integrations.langchain.history import (
+from langchain_openviking.history import (
     langchain_message_to_openviking,
     openviking_message_to_langchain,
 )
-from openviking.integrations.langchain.middleware import _message_signature
-from openviking.integrations.langchain.tools import _archive_grep_pattern, _resolve_resource_source
-from openviking_cli.exceptions import InvalidArgumentError
+from langchain_openviking.middleware import _message_signature
+from langchain_openviking.tools import _archive_grep_pattern, _resolve_resource_source
+from langgraph.store.base import PutOp
+from openviking_sdk.errors import InvalidArgumentError
 
 
 def test_langchain_client_exposes_apply_commit_policy_without_legacy_alias():
@@ -61,16 +61,26 @@ def _schema_enums(schema: dict[str, Any]) -> set[str]:
     return values
 
 
+def _schema_has_description(schema: dict[str, Any]) -> bool:
+    if schema.get("description"):
+        return True
+    return any(
+        _schema_has_description(child)
+        for child_key in ("anyOf", "oneOf", "allOf")
+        for child in schema.get(child_key, [])
+    )
+
+
 def test_retriever_returns_langchain_documents():
     client = InMemoryOpenVikingClient(
         {
-            "viking://user/memories/preferences.md": "The user prefers azure deploys.",
+            "viking://~/memories/preferences.md": "The user prefers azure deploys.",
             "viking://resources/runbooks/release.md": "Release notes mention LangChain.",
         }
     )
     retriever = OpenVikingRetriever(
         client=client,
-        target_uri=["viking://user/memories", "viking://resources"],
+        target_uri=["viking://~/memories", "viking://resources"],
         limit=3,
     )
 
@@ -78,18 +88,18 @@ def test_retriever_returns_langchain_documents():
 
     assert {doc.metadata["openviking_uri"] for doc in docs} == {
         "viking://resources/runbooks/release.md",
-        "viking://user/memories/preferences.md",
+        "viking://~/memories/preferences.md",
     }
     assert all(doc.page_content for doc in docs)
 
 
 def test_retriever_keeps_peer_id_out_of_retrieval():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/preferences.md": "The peer prefers azure deploys."}
+        {"viking://~/memories/preferences.md": "The peer prefers azure deploys."}
     )
     retriever = OpenVikingRetriever(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
         actor_peer_id="peer-1",
     )
 
@@ -98,9 +108,24 @@ def test_retriever_keeps_peer_id_out_of_retrieval():
     assert "peer_id" not in client.find_calls[-1]
 
 
+def test_retriever_passes_tags_to_retrieval():
+    client = InMemoryOpenVikingClient(
+        {"viking://resources/runbooks/release.md": "Release notes mention LangChain."}
+    )
+    retriever = OpenVikingRetriever(
+        client=client,
+        target_uri="viking://resources",
+        tags=["env=prod", "team=search"],
+    )
+
+    retriever.invoke("LangChain")
+
+    assert client.find_calls[-1]["tags"] == ["env=prod", "team=search"]
+
+
 def test_create_openviking_tools_exposes_common_viking_primitives():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "The user likes LangGraph agents."}
+        {"viking://~/memories/profile.md": "The user likes LangGraph agents."}
     )
     tools = create_openviking_tools(client=client, profile="agent")
     names = {tool.name for tool in tools}
@@ -121,9 +146,7 @@ def test_create_openviking_tools_exposes_common_viking_primitives():
     assert "viking_forget" not in names
 
     find_tool = next(tool for tool in tools if tool.name == "viking_find")
-    assert "viking://user/memories/profile.md" in find_tool.invoke(
-        {"query": "LangGraph", "limit": 2}
-    )
+    assert "viking://~/memories/profile.md" in find_tool.invoke({"query": "LangGraph", "limit": 2})
 
     store_tool = next(tool for tool in tools if tool.name == "viking_store")
     assert "explicit durable memories" in store_tool.description
@@ -154,7 +177,7 @@ def test_create_openviking_tools_exposes_common_viking_primitives():
 
 def test_create_openviking_tools_uses_peer_id_only_for_message_attribution():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "The peer likes LangGraph agents."}
+        {"viking://~/memories/profile.md": "The peer likes LangGraph agents."}
     )
     tools = {
         tool.name: tool for tool in create_openviking_tools(client=client, peer_id="peer-tools")
@@ -337,7 +360,9 @@ def test_openviking_tool_schemas_describe_model_visible_arguments():
     for tool in tools:
         schema = _tool_schema(tool)
         for name, property_schema in schema.get("properties", {}).items():
-            assert property_schema.get("description"), f"{tool.name}.{name} lacks a description"
+            assert _schema_has_description(property_schema), (
+                f"{tool.name}.{name} lacks a description"
+            )
 
 
 def test_openviking_health_tool_returns_safe_summary():
@@ -410,7 +435,7 @@ def test_ensure_client_defaults_to_http_client(monkeypatch):
         def initialize(self):
             self._initialized = True
 
-    import openviking.client as client_module
+    import openviking_sdk as client_module
 
     monkeypatch.setattr(client_module, "SyncHTTPClient", FakeHTTPClient)
 
@@ -426,30 +451,6 @@ def test_ensure_client_defaults_to_http_client(monkeypatch):
     assert created["api_key"] == "test-key"
     assert created["user_id"] == "test-user"
     assert created["url"] is None
-
-
-def test_ensure_client_keeps_local_path_clients_direct(monkeypatch, tmp_path):
-    created = {}
-
-    class FakeLocalClient:
-        def __init__(self, path, actor_peer_id=None):
-            created["path"] = path
-            created["actor_peer_id"] = actor_peer_id
-            self._initialized = False
-
-        def initialize(self):
-            self._initialized = True
-
-    import openviking.sync_client as sync_client_module
-
-    monkeypatch.setattr(sync_client_module, "SyncOpenViking", FakeLocalClient)
-
-    client = ensure_client(OpenVikingConnection(path=str(tmp_path)))
-
-    assert isinstance(client, FakeLocalClient)
-    assert client._initialized is True
-    assert created["path"] == str(tmp_path)
-    assert created["actor_peer_id"] is None
 
 
 def test_openviking_client_retries_recoverable_read_with_fresh_client(monkeypatch):
@@ -483,7 +484,7 @@ def test_openviking_client_retries_recoverable_read_with_fresh_client(monkeypatc
                 "skills": [],
             }
 
-    import openviking.client as client_module
+    import openviking_sdk as client_module
 
     monkeypatch.setattr(client_module, "SyncHTTPClient", FlakyHTTPClient)
 
@@ -507,7 +508,7 @@ def test_openviking_client_handle_filters_kwargs_for_direct_calls(monkeypatch):
         def find(self, query):
             return {"query": query}
 
-    import openviking.client as client_module
+    import openviking_sdk as client_module
 
     monkeypatch.setattr(client_module, "SyncHTTPClient", FakeHTTPClient)
 
@@ -515,6 +516,73 @@ def test_openviking_client_handle_filters_kwargs_for_direct_calls(monkeypatch):
     result = client.find("recover", unsupported="ignored")
 
     assert result == {"query": "recover"}
+
+
+def test_call_openviking_adapts_flat_kwargs_to_sdk_options():
+    calls = []
+
+    class OptionsClient:
+        def find(self, query, options=None):
+            calls.append(("find", query, options))
+            return {"query": query}
+
+        def create_session(self, options=None):
+            calls.append(("create_session", options))
+            return {"session_id": options["session_id"]}
+
+        def add_message(self, session_id, message):
+            calls.append(("add_message", session_id, message))
+            return {"ok": True}
+
+        def write(self, uri, content, options=None):
+            calls.append(("write", uri, content, options))
+            return {"ok": True}
+
+    client = OptionsClient()
+
+    call_openviking(
+        client,
+        "find",
+        query="recover",
+        target_uri="viking://resources",
+        limit=5,
+    )
+    call_openviking(client, "create_session", session_id="session-1")
+    call_openviking(
+        client,
+        "add_message",
+        session_id="session-1",
+        role="user",
+        content="hello",
+    )
+    call_openviking(
+        client,
+        "write",
+        uri="viking://resources/a.md",
+        content="hello",
+        mode="replace",
+        wait=False,
+    )
+
+    assert calls == [
+        (
+            "find",
+            "recover",
+            {"target_uri": "viking://resources", "limit": 5},
+        ),
+        ("create_session", {"session_id": "session-1"}),
+        (
+            "add_message",
+            "session-1",
+            {"role": "user", "content": "hello"},
+        ),
+        (
+            "write",
+            "viking://resources/a.md",
+            "hello",
+            {"mode": "replace", "wait": False},
+        ),
+    ]
 
 
 def test_openviking_client_evicts_but_does_not_retry_mutating_call(monkeypatch):
@@ -535,7 +603,7 @@ def test_openviking_client_evicts_but_does_not_retry_mutating_call(monkeypatch):
         def add_message(self, **_kwargs):
             raise ConnectionError("OpenViking connection dropped during write")
 
-    import openviking.client as client_module
+    import openviking_sdk as client_module
 
     monkeypatch.setattr(client_module, "SyncHTTPClient", FlakyHTTPClient)
 
@@ -586,7 +654,7 @@ def test_retriever_recovers_from_stale_cached_remote_client(monkeypatch):
                 "skills": [],
             }
 
-    import openviking.client as client_module
+    import openviking_sdk as client_module
 
     monkeypatch.setattr(client_module, "SyncHTTPClient", FlakyHTTPClient)
 
@@ -614,7 +682,10 @@ def test_in_memory_openviking_client_batch_add_messages_records_messages():
         ],
     )
 
-    assert result == {"session_id": "batch-session", "message_count": 2, "added": 2}
+    assert result["session_id"] == "batch-session"
+    assert result["message_count"] == 2
+    assert result["added"] == 2
+    assert result["pending_tokens"] > 0
     assert [message["role"] for message in client.sessions["batch-session"]] == [
         "user",
         "assistant",
@@ -745,17 +816,86 @@ def test_session_context_assembler_uses_archive_active_messages_and_recall():
 
 def test_session_context_assembler_keeps_peer_id_out_of_recall():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/peer.md": "Peer memory mentions azure."}
+        {"viking://~/memories/peer.md": "Peer memory mentions azure."}
     )
     assembler = OpenVikingSessionContextAssembler(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
         actor_peer_id="peer-assembler",
     )
 
     assembler.assemble(session_id="assembler-peer-session", query="azure")
 
     assert "peer_id" not in client.search_calls[-1]
+
+
+def test_session_context_assembler_creates_only_after_not_found():
+    class RecordingClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__()
+            self.create_calls = 0
+            self.context_calls = 0
+
+        def create_session(self, session_id=None):
+            self.create_calls += 1
+            return super().create_session(session_id=session_id)
+
+        def get_session_context(self, session_id, token_budget=128_000, **kwargs):
+            self.context_calls += 1
+            return super().get_session_context(
+                session_id,
+                token_budget=token_budget,
+                **kwargs,
+            )
+
+    client = RecordingClient()
+    assembler = OpenVikingSessionContextAssembler(
+        client=client,
+        include_recall=False,
+    )
+
+    assembler.assemble(session_id="read-before-create", query="")
+    assembler.assemble(session_id="read-before-create", query="")
+
+    assert client.context_calls == 2
+    assert client.create_calls == 1
+    assert "read-before-create" in client.sessions
+
+
+def test_session_context_assembler_creates_on_code_not_found():
+    class ForeignNotFound(Exception):
+        def __init__(self):
+            super().__init__("session missing")
+            self.code = "NOT_FOUND"
+
+    class RecordingClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__()
+            self.create_calls = 0
+
+        def create_session(self, session_id=None):
+            self.create_calls += 1
+            return super().create_session(session_id=session_id)
+
+        def get_session_context(self, session_id, token_budget=128_000, **kwargs):
+            if session_id not in self.sessions:
+                raise ForeignNotFound()
+            return super().get_session_context(
+                session_id,
+                token_budget=token_budget,
+                **kwargs,
+            )
+
+    client = RecordingClient()
+    assembler = OpenVikingSessionContextAssembler(
+        client=client,
+        include_recall=False,
+    )
+
+    assembler.assemble(session_id="foreign-not-found", query="")
+
+    assert client.create_calls == 1
+    assert "foreign-not-found" in client.sessions
 
 
 def test_with_openviking_context_wraps_runnable_with_history():
@@ -1118,11 +1258,11 @@ def test_langgraph_store_batch_rejects_ttl_writes():
 
 
 @pytest.mark.parametrize(
-    ("root_uri", "shorthand_prefix", "canonical_prefix"),
+    ("root_uri", "alias_prefix", "canonical_prefix"),
     [
         (
-            "viking://user/memories/langgraph_store",
-            "viking://user/memories",
+            "viking://~/memories/langgraph_store",
+            "viking://~/memories",
             "viking://user/default/memories",
         ),
     ],
@@ -1130,15 +1270,15 @@ def test_langgraph_store_batch_rejects_ttl_writes():
         "user-memory",
     ],
 )
-def test_langgraph_store_accepts_canonical_result_uris_for_shorthand_root(
+def test_langgraph_store_accepts_canonical_result_uris_for_home_alias_root(
     root_uri,
-    shorthand_prefix,
+    alias_prefix,
     canonical_prefix,
 ):
     class CanonicalizingClient(InMemoryOpenVikingClient):
         def _canonicalize(self, value):
             if isinstance(value, str):
-                return value.replace(f"{shorthand_prefix}/", f"{canonical_prefix}/", 1)
+                return value.replace(f"{alias_prefix}/", f"{canonical_prefix}/", 1)
             if isinstance(value, list):
                 return [self._canonicalize(item) for item in value]
             return value
@@ -1173,7 +1313,7 @@ def test_langgraph_store_accepts_canonical_result_uris_for_shorthand_root(
 def test_langgraph_store_ignores_unrelated_canonical_result_uris():
     store = OpenVikingStore(
         client=InMemoryOpenVikingClient(),
-        root_uri="viking://user/memories/langgraph_store",
+        root_uri="viking://~/memories/langgraph_store",
     )
 
     assert (
@@ -1232,7 +1372,7 @@ def test_langgraph_store_uses_create_first_and_preserves_created_at_on_replace()
     store.put(("users",), "ada", {"color": "teal"})
     second = store.get(("users",), "ada")
 
-    data_uri = "viking://user/memories/langgraph_store/data/users/ada.json"
+    data_uri = "viking://~/memories/langgraph_store/data/users/ada.json"
     assert client.write_modes[0] == (data_uri, "create")
     assert (data_uri, "replace") in client.write_modes
     assert second.created_at == first.created_at
@@ -1252,13 +1392,37 @@ def test_pending_token_commit_does_not_create_missing_session():
     assert "missing-commit-session" not in client.sessions
 
 
+def test_pending_token_commit_uses_persisted_value_without_session_lookup():
+    class RecordingClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__()
+            self.get_session_calls = 0
+
+        def get_session(self, session_id, auto_create=False):
+            self.get_session_calls += 1
+            return super().get_session(session_id, auto_create=auto_create)
+
+    client = RecordingClient()
+    client.create_session("persisted-hint-session")
+
+    result = apply_commit_policy(
+        client,
+        "persisted-hint-session",
+        OpenVikingCommitPolicy(mode="pending_tokens", pending_token_threshold=1),
+        persisted_pending_tokens=0,
+    )
+
+    assert result is None
+    assert client.get_session_calls == 0
+
+
 def test_langgraph_middleware_injects_recall_and_captures_messages():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "The user prefers azure deployments."}
+        {"viking://~/memories/profile.md": "The user prefers azure deployments."}
     )
     middleware = OpenVikingContextMiddleware(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
         session_id_resolver=lambda state, runtime: "middleware-session",
         commit_on_after_agent=True,
     )
@@ -1300,13 +1464,65 @@ def test_langgraph_middleware_injects_recall_and_captures_messages():
     assert any(part["type"] == "context" for part in assistant_parts)
 
 
+def test_langgraph_middleware_batches_persistence_before_separate_commit():
+    class RecordingClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+            self._inside_batch = False
+
+        def add_message(self, *args, **kwargs):
+            if not self._inside_batch:
+                self.events.append("add_message")
+            return super().add_message(*args, **kwargs)
+
+        def batch_add_messages(self, *args, **kwargs):
+            self.events.append("batch_add_messages")
+            self._inside_batch = True
+            try:
+                return super().batch_add_messages(*args, **kwargs)
+            finally:
+                self._inside_batch = False
+
+        def get_session(self, *args, **kwargs):
+            self.events.append("get_session")
+            return super().get_session(*args, **kwargs)
+
+        def commit_session(self, *args, **kwargs):
+            self.events.append("commit_session")
+            return super().commit_session(*args, **kwargs)
+
+    client = RecordingClient()
+    middleware = OpenVikingContextMiddleware(
+        client=client,
+        session_id_resolver=lambda state, runtime: "middleware-batch-commit",
+        commit_policy=OpenVikingCommitPolicy(
+            mode="pending_tokens",
+            pending_token_threshold=1,
+        ),
+    )
+
+    middleware.after_agent(
+        {
+            "messages": [
+                HumanMessage(content="Persist me in one batch."),
+                AIMessage(content="Then commit separately."),
+            ]
+        },
+        runtime=None,
+    )
+
+    assert client.events == ["batch_add_messages", "commit_session"]
+    assert client.archives["middleware-batch-commit"]
+
+
 def test_langgraph_middleware_uses_peer_id_only_for_message_capture():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "The middleware peer prefers azure."}
+        {"viking://~/memories/profile.md": "The middleware peer prefers azure."}
     )
     middleware = OpenVikingContextMiddleware(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
         session_id_resolver=lambda state, runtime: "middleware-peer-session",
     )
 
@@ -1343,7 +1559,7 @@ def test_langgraph_middleware_uses_peer_id_only_for_message_capture():
 
 def test_langgraph_middleware_does_not_duplicate_active_messages_in_context():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "Middleware recall uses green context."}
+        {"viking://~/memories/profile.md": "Middleware recall uses green context."}
     )
     client.add_message(
         "middleware-active-session",
@@ -1357,7 +1573,7 @@ def test_langgraph_middleware_does_not_duplicate_active_messages_in_context():
     )
     middleware = OpenVikingContextMiddleware(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
         session_id_resolver=lambda state, runtime: "middleware-active-session",
     )
     captured_request = {}
@@ -1385,11 +1601,11 @@ def test_langgraph_middleware_does_not_duplicate_active_messages_in_context():
 
 def test_langgraph_middleware_uses_runtime_thread_id():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "Runtime thread users prefer teal."}
+        {"viking://~/memories/profile.md": "Runtime thread users prefer teal."}
     )
     middleware = OpenVikingContextMiddleware(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
     )
     captured_request = {}
 
@@ -1430,11 +1646,11 @@ def test_langgraph_middleware_uses_runtime_thread_id():
 
 def test_langgraph_middleware_requires_explicit_session_id():
     client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "Shared fallback should never be used."}
+        {"viking://~/memories/profile.md": "Shared fallback should never be used."}
     )
     middleware = OpenVikingContextMiddleware(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
     )
 
     class Request:
@@ -1608,12 +1824,10 @@ def test_langgraph_middleware_signature_includes_dict_tool_output():
 
 
 def test_langgraph_middleware_clears_pending_context_on_duplicate_retry():
-    client = InMemoryOpenVikingClient(
-        {"viking://user/memories/profile.md": "Retry cleanup context."}
-    )
+    client = InMemoryOpenVikingClient({"viking://~/memories/profile.md": "Retry cleanup context."})
     middleware = OpenVikingContextMiddleware(
         client=client,
-        target_uri="viking://user/memories",
+        target_uri="viking://~/memories",
         session_id_resolver=lambda state, runtime: "middleware-pending-cleanup",
     )
 
@@ -1662,3 +1876,112 @@ def test_langgraph_middleware_clears_pending_context_on_duplicate_retry():
 
     unrelated_assistant_parts = client.sessions["middleware-pending-cleanup"][-1]["parts"]
     assert unrelated_assistant_parts == [{"type": "text", "text": "Unrelated turn stored."}]
+
+
+def test_langgraph_middleware_retries_failed_batch_with_pending_context():
+    class FailFirstBatchClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__({"viking://~/memories/profile.md": "Retained retry context."})
+            self.batch_attempts = 0
+
+        def batch_add_messages(self, session_id, messages, **kwargs):
+            self.batch_attempts += 1
+            if self.batch_attempts == 1:
+                raise RuntimeError("batch write failed")
+            return super().batch_add_messages(session_id, messages, **kwargs)
+
+    client = FailFirstBatchClient()
+    middleware = OpenVikingContextMiddleware(
+        client=client,
+        target_uri="viking://~/memories",
+        session_id_resolver=lambda state, runtime: "middleware-batch-retry",
+    )
+
+    class Request:
+        messages = [HumanMessage(content="What retry context?")]
+        system_message = None
+
+        def override(self, **overrides):
+            new_request = Request()
+            new_request.messages = overrides.get("messages", self.messages)
+            new_request.system_message = overrides.get("system_message", self.system_message)
+            return new_request
+
+    middleware.wrap_model_call(Request(), lambda request: AIMessage(content="ok"))
+    state = {
+        "messages": [
+            HumanMessage(content="What retry context?"),
+            AIMessage(content="Retry context stored."),
+        ]
+    }
+
+    with pytest.raises(RuntimeError, match="batch write failed"):
+        middleware.after_agent(state, runtime=None)
+    middleware.after_agent(state, runtime=None)
+
+    assert client.batch_attempts == 2
+    assert len(client.sessions["middleware-batch-retry"]) == 2
+    assistant_parts = client.sessions["middleware-batch-retry"][1]["parts"]
+    assert sum(part["type"] == "context" for part in assistant_parts) == 1
+
+
+def test_langgraph_middleware_chunks_batches_at_server_limit():
+    class CappedBatchClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__()
+            self.batch_sizes = []
+
+        def batch_add_messages(self, session_id, messages, **kwargs):
+            if len(messages) > 100:
+                raise RuntimeError("server batch limit exceeded")
+            self.batch_sizes.append(len(messages))
+            return super().batch_add_messages(session_id, messages, **kwargs)
+
+    client = CappedBatchClient()
+    middleware = OpenVikingContextMiddleware(
+        client=client,
+        session_id_resolver=lambda state, runtime: "middleware-large-batch",
+    )
+    state = {"messages": [HumanMessage(content=f"Message {index}") for index in range(101)]}
+
+    middleware.after_agent(state, runtime=None)
+    middleware.after_agent(state, runtime=None)
+
+    assert client.batch_sizes == [100, 1]
+    assert len(client.sessions["middleware-large-batch"]) == 101
+
+
+def test_langgraph_middleware_retries_only_failed_batch_chunk():
+    class FailSecondBatchClient(InMemoryOpenVikingClient):
+        def __init__(self):
+            super().__init__()
+            self.batch_sizes = []
+
+        def batch_add_messages(self, session_id, messages, **kwargs):
+            self.batch_sizes.append(len(messages))
+            if len(self.batch_sizes) == 2:
+                raise RuntimeError("second batch failed")
+            return super().batch_add_messages(session_id, messages, **kwargs)
+
+    client = FailSecondBatchClient()
+    middleware = OpenVikingContextMiddleware(
+        client=client,
+        session_id_resolver=lambda state, runtime: "middleware-chunk-retry",
+    )
+    middleware._pending_context_parts[("middleware-chunk-retry", "")] = [
+        {"type": "context", "uri": "viking://resources/retry.md"}
+    ]
+    messages = [HumanMessage(content="First"), AIMessage(content="Context holder")]
+    messages.extend(HumanMessage(content=f"Message {index}") for index in range(98))
+    messages.append(AIMessage(content="Retry only this message"))
+    state = {"messages": messages}
+
+    with pytest.raises(RuntimeError, match="second batch failed"):
+        middleware.after_agent(state, runtime=None)
+    middleware.after_agent(state, runtime=None)
+    middleware.after_agent(state, runtime=None)
+
+    assert client.batch_sizes == [100, 1, 1]
+    stored = client.sessions["middleware-chunk-retry"]
+    assert len(stored) == 101
+    assert sum(part["type"] == "context" for message in stored for part in message["parts"]) == 1

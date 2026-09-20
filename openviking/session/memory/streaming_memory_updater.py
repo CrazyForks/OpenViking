@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Hashable, Optional, Union
 
@@ -35,6 +36,7 @@ from openviking.session.memory.case_aggregation import (
     case_identity_generalization_violations,
     case_input_generalization_violations,
     fallback_case_identity,
+    generalize_case_year_literals,
     merged_case_pending_sources,
     merged_case_source_state,
     normalize_case_status,
@@ -49,7 +51,16 @@ from openviking.session.memory.dataclass import (
     MemoryTypeSchema,
     ResolvedOperation,
     ResolvedOperations,
+    SkippedMemoryOperation,
     StoredLink,
+)
+from openviking.session.memory.experience_case_links import (
+    acquire_case_link_lease,
+    release_case_link_lease,
+)
+from openviking.session.memory.experience_lifecycle import (
+    experience_case_link_uris,
+    experience_is_case_linkable,
 )
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
 from openviking.session.memory.memory_type_registry import (
@@ -67,6 +78,7 @@ from openviking.session.memory.memory_updater import (
 )
 from openviking.session.memory.merge_op import MergeOp, MergeOpFactory
 from openviking.session.memory.merge_op.base import get_python_type_for_field
+from openviking.session.memory.merge_op.link_merge import merge_links
 from openviking.session.memory.patch_merge_context_provider import (
     PatchMergeContextProvider,
     PatchMergePatch,
@@ -74,7 +86,7 @@ from openviking.session.memory.patch_merge_context_provider import (
 )
 from openviking.session.memory.session_extract_context_provider import SessionExtractContextProvider
 from openviking.session.memory.utils.json_parser import parse_json_strict
-from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
+from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils, bump_memory_version
 from openviking.session.memory.utils.streaming_batcher import (
     StreamingBatcher,
     StreamingBatcherConfig,
@@ -84,10 +96,14 @@ from openviking.session.memory.utils.streaming_batcher import (
 from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import tracer
 from openviking.telemetry.tracer import get_trace_id
+from openviking_cli.exceptions import NotFoundError
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
 
 logger = get_logger(__name__)
+
+_MEMORY_APPLY_LOCK_TIMEOUT_SECONDS = 300.0
+_MEMORY_APPLY_LOCK_MAX_ACQUISITIONS = 3
 
 
 class MemoryMergePlanError(ValueError):
@@ -225,10 +241,6 @@ class StreamingMemoryUpdater:
     def closed(self) -> bool:
         return self._closed
 
-    @property
-    def last_result(self) -> StreamingMemoryUpdateResult | None:
-        return self._last_result
-
     async def get_buffered_operation_count(self) -> int:
         async with self._group_batchers_lock:
             batchers = list(self._group_batchers.values())
@@ -260,12 +272,33 @@ class StreamingMemoryUpdater:
         if request.ctx is None:
             raise ValueError("MemoryUpdateRequest.ctx is required")
         attach_source_to_request_operations(request)
+        # Collect embedded relations before splitting memory types. Otherwise
+        # the Case group can finish before a same-request EXP exists and lose
+        # the only copy of its deferred link.
+        _extract_case_experience_links(request.operations)
         append_only_request, merge_request = self._split_append_only_request(request)
         append_result = (
             await self._apply_append_only_request_now(append_only_request)
             if append_only_request is not None
             else None
         )
+        if (
+            append_only_request is not None
+            and append_result is not None
+            and merge_request is not None
+        ):
+            allocated_uris = {}
+            for before, after in zip(
+                append_only_request.operations.upsert_operations,
+                append_result.operations.upsert_operations,
+                strict=True,
+            ):
+                for previous_uri, allocated_uri in zip(before.uris, after.uris, strict=True):
+                    allocated_uris.setdefault(previous_uri, allocated_uri)
+            merge_request.operations.resolved_links = _remap_allocated_links_once(
+                merge_request.operations.resolved_links,
+                allocated_uris,
+            )
         merge_result = (
             await self._submit_grouped_merge_request(merge_request)
             if merge_request is not None
@@ -288,6 +321,7 @@ class StreamingMemoryUpdater:
             f"written_uris={scoped_result.apply_result.written_uris} "
             f"edited_uris={scoped_result.apply_result.edited_uris} "
             f"deleted_uris={scoped_result.apply_result.deleted_uris} "
+            f"skipped_reason_codes={_skipped_reason_codes(scoped_result.apply_result)} "
             f"errors={scoped_result.apply_result.errors}",
             console=self.config.trace_console,
         )
@@ -332,24 +366,111 @@ class StreamingMemoryUpdater:
                 **dict(getattr(result.operations, "link_replacements", {}) or {}),
             },
         )
-        valid_links = await filter_valid_links(
-            links,
-            upsert_operations=result.operations.upsert_operations,
-            delete_file_contents=result.operations.delete_file_contents,
-            ctx=request.ctx,
-            trace_console=self.config.trace_console,
-        )
-        if not valid_links:
-            return
         viking_fs = safe_get_viking_fs()
-        if viking_fs is not None:
-            updated_uris = await write_stored_links(valid_links, request.ctx, viking_fs)
-            for uri in dict.fromkeys(updated_uris):
-                result.apply_result.add_edited(uri)
-        result.operations.resolved_links = merge_link_lists(
-            list(getattr(result.operations, "resolved_links", []) or []),
-            valid_links,
+        lock_paths = _uri_lock_paths(_link_endpoint_uri_set(links), viking_fs, request.ctx)
+        async with self._apply_lock:
+            lease = None
+            if lock_paths:
+                lease = await acquire_case_link_lease(
+                    viking_fs._async_agfs,
+                    lock_paths,
+                )
+            try:
+                valid_links = await filter_valid_links(
+                    links,
+                    # Group writes have finished. Their operation previews may
+                    # be stale (or may have failed to persist); only the current
+                    # endpoint files read under this lease can authorize links.
+                    upsert_operations=[],
+                    delete_file_contents=result.operations.delete_file_contents,
+                    ctx=request.ctx,
+                    trace_console=self.config.trace_console,
+                )
+                if not valid_links:
+                    return
+                if viking_fs is not None:
+                    case_links = [link for link in valid_links if _is_case_experience_link(link)]
+                    valid_links = [
+                        link for link in valid_links if not _is_case_experience_link(link)
+                    ]
+                    updated_uris = await write_stored_links(
+                        valid_links,
+                        request.ctx,
+                        viking_fs,
+                        lease_ref=lease,
+                    )
+                    for uri in dict.fromkeys(updated_uris):
+                        result.apply_result.add_edited(uri)
+                    valid_links.extend(
+                        await self._write_case_experience_links(
+                            case_links, request.ctx, viking_fs, lease, result.apply_result
+                        )
+                    )
+                result.operations.resolved_links = merge_link_lists(
+                    list(getattr(result.operations, "resolved_links", []) or []),
+                    valid_links,
+                )
+            finally:
+                if lease is not None:
+                    await release_case_link_lease(viking_fs._async_agfs, lease)
+
+    async def _write_case_experience_links(
+        self,
+        links: list[StoredLink],
+        ctx: RequestContext,
+        viking_fs: Any,
+        lease: Any,
+        result: MemoryUpdateResult,
+    ) -> list[StoredLink]:
+        """Publish validated links under their endpoint lease, backlink first.
+
+        A failed EXP write must not expose a forward link. A failed Case write
+        may leave a backlink, which retains the information needed for repair.
+        """
+        if not links:
+            return []
+        case_uris = {link.from_uri for link in links}
+        updated_experiences = set(
+            await write_stored_links(links, ctx, viking_fs, skip_uris=case_uris, lease_ref=lease)
         )
+        for uri in {link.to_uri for link in links} - updated_experiences:
+            result.add_error(uri, RuntimeError("Failed to persist Case/Experience backlink"))
+        for uri in sorted(updated_experiences):
+            if uri not in result.written_uris and uri not in result.edited_uris:
+                result.add_edited(uri)
+            # The operation cache predates the link-only write.
+            result.files_by_uri.pop(uri, None)
+
+        schema = (self.registry or create_default_registry()).get(CASE_MEMORY_TYPE)
+        published: list[StoredLink] = []
+        for case_uri in sorted(case_uris):
+            case_links = [
+                link
+                for link in links
+                if link.from_uri == case_uri and link.to_uri in updated_experiences
+            ]
+            if not case_links:
+                continue
+            try:
+                raw = await viking_fs.read_file(case_uri, ctx=ctx)
+                case = MemoryFileUtils.read(raw, uri=case_uri)
+                case.links = merge_links(case.links, [link.model_dump() for link in case_links])
+                trace_id = get_trace_id()
+                if trace_id:
+                    case.extra_fields["last_update_trace_id"] = trace_id
+                bump_memory_version(case)
+                rendered = MemoryFileUtils.write(
+                    case, content_template=getattr(schema, "content_template", None)
+                )
+                await viking_fs.write_file(case_uri, rendered, ctx=ctx, lease_ref=lease)
+                result.cache_file(case_uri, MemoryFileUtils.read(rendered, uri=case_uri))
+                if case_uri not in result.written_uris and case_uri not in result.edited_uris:
+                    result.add_edited(case_uri)
+                published.extend(case_links)
+            except Exception as exc:
+                result.add_error(case_uri, exc)
+                tracer.error(f"Failed to publish Case/Experience links to {case_uri}: {exc}")
+        return published
 
     async def _get_group_batcher(
         self,
@@ -458,6 +579,7 @@ class StreamingMemoryUpdater:
             delete_file_contents=operations.delete_file_contents,
             ctx=request.ctx,
             trace_console=self.config.trace_console,
+            defer_case_experience_links=True,
         )
         apply_result = await self._apply_operations(
             operations=operations,
@@ -480,6 +602,7 @@ class StreamingMemoryUpdater:
             f"written_uris={apply_result.written_uris} "
             f"edited_uris={apply_result.edited_uris} "
             f"deleted_uris={apply_result.deleted_uris} "
+            f"skipped_reason_codes={_skipped_reason_codes(apply_result)} "
             f"errors={apply_result.errors}",
             console=self.config.trace_console,
         )
@@ -669,6 +792,7 @@ class StreamingMemoryUpdater:
             f"written_uris={apply_result.written_uris} "
             f"edited_uris={apply_result.edited_uris} "
             f"deleted_uris={apply_result.deleted_uris} "
+            f"skipped_reason_codes={_skipped_reason_codes(apply_result)} "
             f"errors={apply_result.errors}",
             console=self.config.trace_console,
         )
@@ -681,46 +805,211 @@ class StreamingMemoryUpdater:
         request: MemoryUpdateRequest,
         messages: list[Message],
     ) -> MemoryUpdateResult:
-        updater = MemoryUpdater(
-            registry=self.registry,
-            vikingdb=self.vikingdb,
-            transaction_handle=None,
-        )
         extract_context = ExtractContext(messages)
         isolation_handler = _make_isolation_handler(request, extract_context)
+        # Links embedded in upsert fields must follow the same publication rule
+        # as resolved_links, never bypass it through field merging.
+        deferred_links = _extract_case_experience_links(operations)
+        original_uris = [
+            (operation, list(operation.uris)) for operation in operations.upsert_operations
+        ]
         async with self._apply_lock:
-            return await updater.apply_operations(
+            viking_fs = safe_get_viking_fs()
+            MemoryUpdater._convert_experience_deletes_to_archives(operations)
+            lease = await _acquire_stable_operation_lease(
                 operations,
+                viking_fs,
                 request.ctx,
-                extract_context=extract_context,
-                isolation_handler=isolation_handler,
             )
+            updater = MemoryUpdater(
+                registry=self.registry,
+                vikingdb=self.vikingdb,
+                transaction_handle=lease,
+                defer_archived_vector_cleanup=True,
+            )
+            try:
+                operations.resolved_links = [
+                    link for link in operations.resolved_links if not _is_case_experience_link(link)
+                ]
+                apply_result = await updater.apply_operations(
+                    operations,
+                    request.ctx,
+                    extract_context=extract_context,
+                    isolation_handler=isolation_handler,
+                )
+            finally:
+                if lease is not None:
+                    await viking_fs._async_agfs.pathlock_release(lease)
+            await updater._remove_archived_vectors(apply_result, request.ctx)
+        if deferred_links and not operations.has_errors():
+            # Acquire a fresh endpoint lease for the actual files; never reuse
+            # the old URI's lease or publish from an operation preview.
+            allocated_uris = {}
+            for operation, previous_uris in original_uris:
+                for previous_uri, allocated_uri in zip(previous_uris, operation.uris, strict=True):
+                    allocated_uris.setdefault(previous_uri, allocated_uri)
+            await self._apply_post_group_links(
+                clone_memory_update_request(
+                    request,
+                    operations=operations.model_copy(
+                        update={
+                            "resolved_links": _remap_allocated_links_once(
+                                deferred_links, allocated_uris
+                            )
+                        }
+                    ),
+                ),
+                StreamingMemoryUpdateResult(
+                    operations=operations, apply_result=apply_result, request_count=1
+                ),
+            )
+        return apply_result
 
     async def _merge_requests(self, requests: list[MemoryUpdateRequest]) -> ResolvedOperations:
-        all_ops = ResolvedOperations(
-            upsert_operations=[],
-            delete_file_contents=[],
-            errors=[],
-            resolved_links=[],
-            delete_replacements={},
-            link_replacements={},
-        )
+        all_ops = _combine_resolved_operations(request.operations for request in requests)
+        if all_ops.has_errors():
+            return all_ops
+
+        requests_by_kind: dict[str, list[MemoryUpdateRequest]] = {
+            "add": [],
+            "update": [],
+            "delete": [],
+        }
         for request in requests:
-            ops = request.operations
-            all_ops.upsert_operations.extend(list(ops.upsert_operations or []))
-            all_ops.delete_file_contents.extend(list(ops.delete_file_contents or []))
-            all_ops.errors.extend(list(ops.errors or []))
-            all_ops.resolved_links.extend(list(getattr(ops, "resolved_links", []) or []))
-            all_ops.delete_replacements.update(dict(getattr(ops, "delete_replacements", {}) or {}))
-            all_ops.link_replacements.update(dict(getattr(ops, "link_replacements", {}) or {}))
-        return await merge_memory_operations(
-            operations=all_ops,
-            messages=_combined_request_messages(requests),
-            ctx=requests[0].ctx,
-            registry=self.registry or create_default_registry(),
-            strict_extract_errors=any(request.strict_extract_errors for request in requests),
-            trace_console=self.config.trace_console,
+            adds = [
+                op
+                for op in request.operations.upsert_operations
+                if op.old_memory_file_content is None
+            ]
+            updates = [
+                op
+                for op in request.operations.upsert_operations
+                if op.old_memory_file_content is not None
+            ]
+            for kind, upserts, deletes in (
+                ("add", adds, []),
+                ("update", updates, []),
+                ("delete", [], list(request.operations.delete_file_contents or [])),
+            ):
+                if not upserts and not deletes:
+                    continue
+                requests_by_kind[kind].append(
+                    clone_memory_update_request(
+                        request,
+                        operations=ResolvedOperations(
+                            upsert_operations=upserts,
+                            delete_file_contents=deletes,
+                            errors=[],
+                            resolved_links=[],
+                            delete_replacements={
+                                file.uri: replacement_uri
+                                for file in deletes
+                                if file.uri
+                                if (
+                                    replacement_uri := request.operations.delete_replacements.get(
+                                        file.uri
+                                    )
+                                )
+                            },
+                            link_replacements=dict(
+                                getattr(request.operations, "link_replacements", {}) or {}
+                            ),
+                        ),
+                    )
+                )
+
+        async def merge_kind(kind_requests: list[MemoryUpdateRequest]) -> ResolvedOperations:
+            operations = _combine_resolved_operations(
+                request.operations for request in kind_requests
+            )
+            spans_sessions = _requests_span_sessions(kind_requests)
+            if spans_sessions:
+                return await merge_memory_operations(
+                    operations=operations,
+                    messages=_combined_request_messages(kind_requests),
+                    ctx=kind_requests[0].ctx,
+                    registry=self.registry or create_default_registry(),
+                    strict_extract_errors=any(
+                        request.strict_extract_errors for request in kind_requests
+                    ),
+                    trace_console=self.config.trace_console,
+                    force_merge=True,
+                )
+
+            case_upserts = [
+                operation
+                for operation in operations.upsert_operations
+                if operation.memory_type == CASE_MEMORY_TYPE
+            ]
+            if not case_upserts:
+                return operations
+
+            # Case upserts require system-managed identity, lifecycle, and source
+            # fields even for a single session. Keep other memory types on the
+            # existing same-session passthrough path.
+            case_result = await merge_memory_operations(
+                operations=ResolvedOperations(
+                    upsert_operations=case_upserts,
+                    delete_file_contents=[],
+                    errors=[],
+                    resolved_links=[],
+                    delete_replacements={},
+                    link_replacements={},
+                ),
+                messages=_combined_request_messages(kind_requests),
+                ctx=kind_requests[0].ctx,
+                registry=self.registry or create_default_registry(),
+                strict_extract_errors=any(
+                    request.strict_extract_errors for request in kind_requests
+                ),
+                trace_console=self.config.trace_console,
+                force_merge=False,
+            )
+            passthrough = operations.model_copy(
+                update={
+                    "upsert_operations": [
+                        operation
+                        for operation in operations.upsert_operations
+                        if operation.memory_type != CASE_MEMORY_TYPE
+                    ]
+                }
+            )
+            return _combine_resolved_operations([passthrough, case_result])
+
+        kind_batches = [
+            (kind, kind_requests)
+            for kind, kind_requests in requests_by_kind.items()
+            if kind_requests
+        ]
+        kind_results = await asyncio.gather(
+            *(merge_kind(kind_requests) for _, kind_requests in kind_batches)
         )
+        uri_kinds: dict[str, str] = {}
+        conflicting_uris: set[str] = set()
+        for (kind, _), operations in zip(kind_batches, kind_results, strict=True):
+            for uri in _operation_uri_set(operations):
+                previous_kind = uri_kinds.setdefault(uri, kind)
+                if previous_kind != kind:
+                    conflicting_uris.add(uri)
+        if conflicting_uris:
+            return ResolvedOperations(
+                upsert_operations=[],
+                delete_file_contents=[],
+                errors=[
+                    "Conflicting add/update/delete results for URIs: "
+                    + ", ".join(sorted(conflicting_uris))
+                ],
+                resolved_links=[],
+                delete_replacements={},
+                link_replacements={},
+            )
+        merged = _combine_resolved_operations(kind_results)
+        merged.resolved_links = merge_link_lists(
+            list(all_ops.resolved_links or []),
+            list(merged.resolved_links or []),
+        )
+        merged.link_replacements.update(all_ops.link_replacements)
+        return merged
 
 
 def split_request_by_merge_group(
@@ -785,6 +1074,9 @@ def split_request_by_merge_group(
         )
 
     if passthrough_upserts:
+        # Unresolved upserts keep their original standalone passthrough group.
+        # Deletes remain in their normal peer/type groups, including replacement
+        # metadata, so diagnostics cannot change write/delete ordering.
         group_key = MemoryMergeGroupKey(peer_id=None, memory_type="")
         grouped_requests.append(
             (
@@ -869,6 +1161,7 @@ async def merge_memory_operations(
     registry: MemoryTypeRegistry | None = None,
     strict_extract_errors: bool = False,
     trace_console: bool = False,
+    force_merge: bool = False,
 ) -> ResolvedOperations:
     """Merge resolved memory operations by memory type/URI using patch context."""
 
@@ -933,6 +1226,7 @@ async def merge_memory_operations(
                 registry=registry,
                 peer_id=peer_id,
                 trace_console=trace_console,
+                force_merge=force_merge,
             )
             for (peer_id, memory_type) in all_group_keys
         ]
@@ -959,12 +1253,20 @@ async def merge_memory_operations(
             list(getattr(merged, "resolved_links", []) or []),
         )
 
+    final_delete_uris = {file.uri for file in merged_deletes if file.uri}
+    for deleted_uri, replacement_uri in dict(
+        getattr(operations, "delete_replacements", {}) or {}
+    ).items():
+        if deleted_uri in final_delete_uris:
+            merged_delete_replacements.setdefault(deleted_uri, replacement_uri)
+
     merged_links = await filter_valid_links(
         merged_links,
         upsert_operations=merged_upserts,
         delete_file_contents=merged_deletes,
         ctx=ctx,
         trace_console=trace_console,
+        defer_case_experience_links=True,
     )
     return ResolvedOperations(
         upsert_operations=merged_upserts,
@@ -986,6 +1288,7 @@ async def merge_one_memory_type_operations(
     registry: MemoryTypeRegistry | None = None,
     peer_id: str | None = None,
     trace_console: bool = False,
+    force_merge: bool = False,
 ) -> ResolvedOperations:
     registry = registry or create_default_registry()
     schema = registry.get(memory_type)
@@ -1005,7 +1308,7 @@ async def merge_one_memory_type_operations(
     )
 
     # Fast path: no upserts, only deletes — passthrough directly
-    if not operations and delete_files:
+    if not force_merge and not operations and delete_files:
         tracer.info(
             "[streaming_memory_updater] memory_type merge decision "
             f"memory_type={memory_type} mode=no_merge "
@@ -1031,13 +1334,16 @@ async def merge_one_memory_type_operations(
         )
         return ResolvedOperations(
             upsert_operations=list(operations),
-            delete_file_contents=[],
+            delete_file_contents=list(delete_files),
             errors=[],
             resolved_links=[],
             delete_replacements={},
         )
 
-    fast_path, fast_path_reason = classify_memory_merge_mode(operations, schema=schema)
+    if force_merge:
+        fast_path, fast_path_reason = False, "cross_session_batch"
+    else:
+        fast_path, fast_path_reason = await classify_memory_merge_mode(operations, schema=schema)
     if fast_path:
         tracer.info(
             "[streaming_memory_updater] memory_type merge decision "
@@ -1071,7 +1377,7 @@ async def merge_one_memory_type_operations(
         raise ValueError(f"Memory schema not found: {memory_type}")
 
     extract_context = ExtractContext(messages)
-    proposals = build_memory_merge_proposals(
+    proposals = await build_memory_merge_proposals(
         operations=operations,
         delete_files=delete_files,
         schema=schema,
@@ -1216,7 +1522,7 @@ async def merge_one_memory_type_operations(
             )
         return plan
 
-    def resolve_parsed_merge_plan(plan: BaseModel) -> ResolvedOperations:
+    async def resolve_parsed_merge_plan(plan: BaseModel) -> ResolvedOperations:
         if memory_type == CASE_MEMORY_TYPE:
             validate_case_merge_plan(
                 plan,
@@ -1228,7 +1534,7 @@ async def merge_one_memory_type_operations(
             required_proposals=proposals,
             all_proposals=all_proposals,
         )
-        merged = reconstruct_memory_operations_from_plan(
+        merged = await reconstruct_memory_operations_from_plan(
             plan,
             required_proposals=proposals,
             all_proposals=all_proposals,
@@ -1257,8 +1563,24 @@ async def merge_one_memory_type_operations(
                 "[streaming_memory_updater] repairing malformed merge plan JSON",
                 console=trace_console,
             )
-            repair_response = await vlm.get_completion_async(
-                messages=[
+            if memory_type == CASE_MEMORY_TYPE:
+                repair_messages = [
+                    *merge_messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous MERGE_PLAN was malformed or incomplete. Regenerate "
+                            "one complete, concise MERGE_PLAN from the original context. Keep "
+                            "every required case_comparison, but do not explain labels. For a "
+                            "group that does not require full Case compaction, use an empty "
+                            "field_operations object. When compaction is required, keep each "
+                            "replacement field concise and use at most three observable rubric "
+                            "criteria. Output one complete JSON object only."
+                        ),
+                    },
+                ]
+            else:
+                repair_messages = [
                     {
                         "role": "system",
                         "content": (
@@ -1278,7 +1600,9 @@ async def merge_one_memory_type_operations(
                             "Return the complete syntax-repaired JSON object only."
                         ),
                     },
-                ],
+                ]
+            repair_response = await vlm.get_completion_async(
+                messages=repair_messages,
                 tools=None,
                 thinking=False,
             )
@@ -1299,7 +1623,7 @@ async def merge_one_memory_type_operations(
     content = completion_content(response)
     plan, content = await parse_merge_plan_with_json_repair(content)
     try:
-        merged = resolve_parsed_merge_plan(plan)
+        merged = await resolve_parsed_merge_plan(plan)
     except MemoryMergePlanError as exc:
         if memory_type == CASE_MEMORY_TYPE and str(exc).startswith(
             "Case comparison coverage mismatch:"
@@ -1329,7 +1653,7 @@ async def merge_one_memory_type_operations(
                 }
             )
             try:
-                merged = resolve_parsed_merge_plan(plan)
+                merged = await resolve_parsed_merge_plan(plan)
             except MemoryMergePlanError as repaired_exc:
                 exc = repaired_exc
             else:
@@ -1402,7 +1726,7 @@ async def merge_one_memory_type_operations(
                 )
             corrected_content = completion_content(response)
             corrected_plan, _ = await parse_merge_plan_with_json_repair(corrected_content)
-            merged = resolve_parsed_merge_plan(corrected_plan)
+            merged = await resolve_parsed_merge_plan(corrected_plan)
     tracer.info(
         "[streaming_memory_updater] llm merge output "
         f"memory_type={memory_type} upserts={len(merged.upsert_operations)} "
@@ -1481,74 +1805,90 @@ async def repair_missing_case_comparisons(
     missing_pairs: list[tuple[str, str]],
     all_proposals: dict[str, MemoryMergeProposal],
     completion_content: Any,
+    max_attempts: int = 3,
 ) -> list[CaseIdentityComparison]:
     if not missing_pairs:
         return []
+    expected_pairs = set(missing_pairs)
+    remaining_pairs = list(missing_pairs)
+    comparison_by_pair: dict[tuple[str, str], CaseIdentityComparison] = {}
     proposal_ids = sorted({proposal_id for pair in missing_pairs for proposal_id in pair})
     identities = {
         proposal_id: _compact_case_proposal_context(all_proposals[proposal_id])
         for proposal_id in proposal_ids
     }
-    response = await vlm.get_completion_async(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Classify only the requested Case identity pairs. For each pair, label "
-                    "goal, subject, action_pattern, success_boundary, and "
-                    "context_constraints as MATCH, COMPATIBLE, UNKNOWN, or CONFLICT. "
-                    'Return JSON only with shape {"case_comparisons":[...]}; include '
-                    "every requested pair exactly once and no other pairs."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "pairs": [
-                            {"proposal_id": left, "candidate_id": right}
-                            for left, right in missing_pairs
-                        ],
-                        "identities": identities,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            },
-        ],
-        tools=None,
-        thinking=False,
-    )
-    content = completion_content(response)
-    payload, parse_error = parse_json_strict(content)
-    if parse_error is not None:
-        raise MemoryMergePlanError(f"Invalid Case comparison repair JSON: {parse_error}")
-    try:
-        repaired = _CaseComparisonRepairResponse.model_validate(payload, strict=True)
-    except ValidationError as exc:
-        raise MemoryMergePlanError(f"Invalid Case comparison repair schema: {exc}") from exc
-    expected_pairs = set(missing_pairs)
-    comparison_by_pair = normalized_case_comparison_map(
-        repaired.case_comparisons,
-        expected_pairs=expected_pairs,
-    )
-    if set(comparison_by_pair) != expected_pairs:
-        missing = sorted(expected_pairs - set(comparison_by_pair))
-        raise MemoryMergePlanError(f"Case comparison repair coverage mismatch: missing={missing}")
+    last_error = ""
+    for _attempt in range(max(1, max_attempts)):
+        response = await vlm.get_completion_async(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify only the requested Case identity pairs. For each pair, label "
+                        "goal, subject, action_pattern, success_boundary, and "
+                        "context_constraints as MATCH, COMPATIBLE, UNKNOWN, or CONFLICT. "
+                        'Return JSON only with shape {"case_comparisons":[...]}; include '
+                        "every requested pair exactly once and no other pairs."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "pairs": [
+                                {"proposal_id": left, "candidate_id": right}
+                                for left, right in remaining_pairs
+                            ],
+                            "identities": identities,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                },
+            ],
+            tools=None,
+            thinking=False,
+        )
+        content = completion_content(response)
+        payload, parse_error = parse_json_strict(content)
+        if parse_error is not None:
+            last_error = f"Invalid Case comparison repair JSON: {parse_error}"
+            continue
+        try:
+            repaired = _CaseComparisonRepairResponse.model_validate(payload, strict=True)
+        except ValidationError as exc:
+            last_error = f"Invalid Case comparison repair schema: {exc}"
+            continue
+        accepted = normalized_case_comparison_map(
+            repaired.case_comparisons,
+            expected_pairs=set(remaining_pairs),
+        )
+        comparison_by_pair.update(accepted)
+        remaining_pairs = sorted(expected_pairs - set(comparison_by_pair))
+        if not remaining_pairs:
+            break
+        last_error = f"Case comparison repair coverage mismatch: missing={remaining_pairs}"
+    if remaining_pairs:
+        raise MemoryMergePlanError(last_error)
     return [comparison_by_pair[pair] for pair in missing_pairs]
 
 
 def _compact_case_proposal_context(proposal: MemoryMergeProposal) -> dict[str, Any]:
     if proposal.operation is not None:
         fields = dict(proposal.operation.memory_fields or {})
+        identity = (
+            parse_case_identity(fields.get(PROPOSED_CASE_IDENTITY_FIELD))
+            or parse_case_identity(fields.get(CASE_IDENTITY_FIELD))
+            or fallback_case_identity(fields)
+        )
     else:
         memory_file = proposal.patch.before_file or proposal.patch.after_file
         fields = dict(memory_file.extra_fields or {})
-    identity = (
-        parse_case_identity(fields.get(PROPOSED_CASE_IDENTITY_FIELD))
-        or parse_case_identity(fields.get(CASE_IDENTITY_FIELD))
-        or fallback_case_identity(fields)
-    )
+        # Stored candidates only have a canonical identity. Ignore legacy
+        # operation-scoped proposals that may have leaked into older files.
+        identity = parse_case_identity(fields.get(CASE_IDENTITY_FIELD)) or fallback_case_identity(
+            fields
+        )
     return {
         "case_name": str(fields.get("case_name") or ""),
         "case_identity": identity.model_dump(mode="json"),
@@ -1556,7 +1896,7 @@ def _compact_case_proposal_context(proposal: MemoryMergeProposal) -> dict[str, A
     }
 
 
-def build_memory_merge_proposals(
+async def build_memory_merge_proposals(
     *,
     operations: list[ResolvedOperation],
     delete_files: list[MemoryFile],
@@ -1566,7 +1906,7 @@ def build_memory_merge_proposals(
     proposals: list[MemoryMergeProposal] = []
     for index, operation in enumerate(operations):
         proposal_id = _operation_proposal_id(operation, index)
-        patch = operation_to_patch(
+        patch = await operation_to_patch(
             operation,
             schema=schema,
             extract_context=extract_context,
@@ -2068,6 +2408,12 @@ def finalize_case_merge_operations(
                 raise MemoryMergePlanError(
                     "Draft Case promotion requires generalized_case_identity"
                 )
+            generalized_identity, generalized_input = generalize_case_year_literals(
+                generalized_identity,
+                fields.get("input"),
+            )
+            if generalized_input is not None:
+                fields["input"] = generalized_input
             identity_violations = case_identity_generalization_violations(generalized_identity)
             input_violations = case_input_generalization_violations(fields.get("input"))
             if identity_violations or input_violations:
@@ -2124,7 +2470,7 @@ def _retarget_case_variant(operation: ResolvedOperation, proposal_id: str) -> No
         operation.uris = [f"{directory}/{variant_name}.md"]
 
 
-def reconstruct_memory_operations_from_plan(
+async def reconstruct_memory_operations_from_plan(
     plan: BaseModel,
     *,
     required_proposals: list[MemoryMergeProposal],
@@ -2142,7 +2488,7 @@ def reconstruct_memory_operations_from_plan(
             field_name: getattr(group.field_operations, field_name)
             for field_name in group.field_operations.model_fields_set
         }
-        resolved_operation = _reconstruct_canonical_operation(
+        resolved_operation = await _reconstruct_canonical_operation(
             canonical=canonical,
             grouped_proposals=[all_proposals[proposal_id] for proposal_id in group.proposal_ids],
             field_operations=field_operations,
@@ -2189,7 +2535,7 @@ def reconstruct_memory_operations_from_plan(
     )
 
 
-def _reconstruct_canonical_operation(
+async def _reconstruct_canonical_operation(
     *,
     canonical: MemoryMergeProposal,
     grouped_proposals: list[MemoryMergeProposal],
@@ -2208,7 +2554,7 @@ def _reconstruct_canonical_operation(
             raise MemoryMergePlanError(f"Unknown field operation: {field_name}")
         current_value = final_fields.get(field_name)
         try:
-            final_fields[field_name] = MergeOpFactory.from_field(memory_field).apply(
+            final_fields[field_name] = await MergeOpFactory.from_field(memory_field).apply(
                 current_value,
                 patch_value,
             )
@@ -2351,14 +2697,14 @@ def memory_file_to_delete_patch(
     )
 
 
-def operation_to_patch(
+async def operation_to_patch(
     op: ResolvedOperation,
     *,
     schema: MemoryTypeSchema,
     extract_context: ExtractContext,
 ) -> PatchMergePatch:
     old_file = getattr(op, "old_memory_file_content", None)
-    after_file = render_operation_after_file(
+    after_file = await render_operation_after_file(
         op,
         schema=schema,
         extract_context=extract_context,
@@ -2369,7 +2715,7 @@ def operation_to_patch(
     )
 
 
-def classify_memory_merge_mode(
+async def classify_memory_merge_mode(
     operations: list[ResolvedOperation],
     *,
     schema: MemoryTypeSchema | None = None,
@@ -2407,7 +2753,7 @@ def classify_memory_merge_mode(
     old_plain_content = old_file.plain_content().strip()
     if schema is not None:
         try:
-            after_content = render_operation_after_file_content(
+            after_content = await render_operation_after_file_content(
                 op,
                 schema=schema,
                 extract_context=ExtractContext([]),
@@ -2713,6 +3059,58 @@ def merge_link_lists(*link_lists: list[StoredLink]) -> list[StoredLink]:
     return list(merged.values())
 
 
+def _is_case_experience_link(link: StoredLink) -> bool:
+    return "/memories/cases/" in str(link.from_uri or "") and "/memories/experiences/" in str(
+        link.to_uri or ""
+    )
+
+
+def _remap_allocated_links_once(
+    links: list[StoredLink], uri_remap: dict[str, str]
+) -> list[StoredLink]:
+    """Allocation renames are simultaneous, not transitive logical aliases.
+
+    If A -> A_2 and A_2 -> A_3, a link to the first proposal must end at A_2,
+    not follow the second proposal's rename to A_3.
+    """
+    return merge_link_lists(
+        [
+            link.model_copy(
+                update={
+                    "from_uri": uri_remap.get(link.from_uri, link.from_uri),
+                    "to_uri": uri_remap.get(link.to_uri, link.to_uri),
+                }
+            )
+            for link in links
+        ]
+    )
+
+
+def _extract_case_experience_links(operations: ResolvedOperations) -> list[StoredLink]:
+    """Collect deferred links and remove copies embedded in incoming fields."""
+    links = [link for link in operations.resolved_links if _is_case_experience_link(link)]
+    for operation in operations.upsert_operations:
+        for field_name in ("links", "backlinks"):
+            values = operation.memory_fields.get(field_name)
+            if not isinstance(values, list):
+                continue
+            retained = []
+            for value in values:
+                try:
+                    link = StoredLink.model_validate(value)
+                except (ValueError, TypeError):
+                    retained.append(value)
+                    continue
+                if _is_case_experience_link(link):
+                    links.append(link)
+                else:
+                    retained.append(value)
+            operation.memory_fields[field_name] = retained
+    # Include embedded links in the pre-apply lock coverage as well.
+    operations.resolved_links = merge_link_lists(operations.resolved_links, links)
+    return merge_link_lists(links)
+
+
 async def filter_valid_links(
     links: list[StoredLink],
     *,
@@ -2720,38 +3118,70 @@ async def filter_valid_links(
     delete_file_contents: list[MemoryFile],
     ctx: RequestContext,
     trace_console: bool = False,
+    defer_case_experience_links: bool = False,
 ) -> list[StoredLink]:
-    """Drop links whose endpoints are deleted or missing from storage."""
+    """Check endpoints, using pending upserts only for pre-apply validation.
+
+    Mutation callers preserve Case/EXP candidates for post-apply validation.
+    Post-apply callers must pass no upserts so existence and EXP visibility come
+    from storage, not a stale operation preview.
+    """
 
     if not links:
         return []
-    upsert_uris = {uri for op in upsert_operations for uri in (op.uris or []) if uri}
+    upsert_by_uri = {uri: op for op in upsert_operations for uri in (op.uris or []) if uri}
+    upsert_uris = set(upsert_by_uri)
     deleted_uris = {file.uri for file in delete_file_contents if getattr(file, "uri", None)}
     viking_fs = safe_get_viking_fs()
-    endpoint_exists_cache: dict[str, bool] = {}
+    endpoint_content_cache: dict[str, str | None] = {}
 
     async def _endpoint_exists(uri: str) -> bool:
         if not uri or uri in deleted_uris:
             return False
         if uri in upsert_uris:
             return True
-        if uri in endpoint_exists_cache:
-            return endpoint_exists_cache[uri]
+        if uri in endpoint_content_cache:
+            return endpoint_content_cache[uri] is not None
         if viking_fs is None:
-            endpoint_exists_cache[uri] = False
+            endpoint_content_cache[uri] = None
             return False
         try:
             content = await viking_fs.read_file(uri, ctx=ctx)
-            exists = bool(content)
+            endpoint_content_cache[uri] = content if content else None
         except Exception:
-            exists = False
-        endpoint_exists_cache[uri] = exists
-        return exists
+            endpoint_content_cache[uri] = None
+        return endpoint_content_cache[uri] is not None
+
+    async def _case_experience_link_is_hidden(link: StoredLink) -> bool:
+        if not _is_case_experience_link(link):
+            return False
+        operation = upsert_by_uri.get(link.to_uri)
+        if operation is not None:
+            if operation.lifecycle_action == "archive":
+                return True
+            fields = dict(getattr(operation.old_memory_file_content, "extra_fields", {}) or {})
+            fields.update(operation.memory_fields)
+            return not experience_is_case_linkable(fields.get("status"))
+        if not await _endpoint_exists(link.to_uri):
+            return False
+        raw = endpoint_content_cache.get(link.to_uri)
+        try:
+            memory_file = MemoryFileUtils.read(raw or "", uri=link.to_uri)
+        except Exception:
+            return True
+        return not experience_is_case_linkable(memory_file.extra_fields.get("status"))
 
     valid_links: list[StoredLink] = []
     dropped = 0
     for link in merge_link_lists(links):
-        if await _endpoint_exists(link.from_uri) and await _endpoint_exists(link.to_uri):
+        if defer_case_experience_links and _is_case_experience_link(link):
+            valid_links.append(link)
+            continue
+        if (
+            await _endpoint_exists(link.from_uri)
+            and await _endpoint_exists(link.to_uri)
+            and not await _case_experience_link_is_hidden(link)
+        ):
             valid_links.append(link)
         else:
             dropped += 1
@@ -2826,6 +3256,7 @@ def scope_memory_update_result_to_submitter(
     scoped_apply_result = _scope_apply_result_to_uris(
         result.apply_result,
         scoped_uris=scoped_uris,
+        scope=scope,
     )
     metadata = dict(result.metadata or {})
     metadata.update(
@@ -2944,6 +3375,7 @@ def _scope_apply_result_to_uris(
     apply_result: MemoryUpdateResult,
     *,
     scoped_uris: set[str],
+    scope: _MemorySubmitterScope,
 ) -> MemoryUpdateResult:
     scoped = MemoryUpdateResult()
     scoped.written_uris = [
@@ -2960,7 +3392,39 @@ def _scope_apply_result_to_uris(
         for error in list(getattr(apply_result, "errors", []) or [])
         if _apply_error_matches_scoped_uris(error, scoped_uris=scoped_uris)
     ]
+    scoped.skipped_operations = [
+        operation
+        for operation in list(getattr(apply_result, "skipped_operations", []) or [])
+        if _skipped_operation_matches_scope(
+            operation,
+            scope=scope,
+            scoped_uris=scoped_uris,
+        )
+    ]
     return scoped
+
+
+def _skipped_operation_matches_scope(
+    operation: SkippedMemoryOperation,
+    *,
+    scope: _MemorySubmitterScope,
+    scoped_uris: set[str],
+) -> bool:
+    source = getattr(operation, "source", None)
+    source_extraction_id = _optional_str(getattr(source, "extraction_id", None))
+    if scope.extraction_id and source_extraction_id:
+        return source_extraction_id == scope.extraction_id
+
+    source_archive_uri = _optional_str(getattr(source, "archive_uri", None))
+    if scope.archive_uri and source_archive_uri:
+        return source_archive_uri == scope.archive_uri
+
+    source_session_id = _optional_str(getattr(source, "session_id", None))
+    if scope.session_id and source_session_id:
+        return source_session_id == scope.session_id
+
+    uri = str(getattr(operation, "uri", None) or "")
+    return bool(uri and uri in scoped_uris)
 
 
 def _operation_matches_scope(op: ResolvedOperation, *, scope: _MemorySubmitterScope) -> bool:
@@ -3125,6 +3589,7 @@ def combine_streaming_memory_results(
         combined_apply_result.written_uris.extend(result.apply_result.written_uris)
         combined_apply_result.edited_uris.extend(result.apply_result.edited_uris)
         combined_apply_result.deleted_uris.extend(result.apply_result.deleted_uris)
+        combined_apply_result.skipped_operations.extend(result.apply_result.skipped_operations)
         combined_apply_result.errors.extend(result.apply_result.errors)
         for key in ("batch_id", "batch_trace_id"):
             if result.metadata.get(key):
@@ -3147,6 +3612,46 @@ def _combined_request_messages(items: list[MemoryUpdateRequest]) -> list[Message
     return messages
 
 
+def _combine_resolved_operations(
+    items: Iterable[ResolvedOperations],
+) -> ResolvedOperations:
+    combined = ResolvedOperations(
+        upsert_operations=[],
+        delete_file_contents=[],
+        errors=[],
+        resolved_links=[],
+        delete_replacements={},
+        link_replacements={},
+    )
+    for operations in items:
+        combined.upsert_operations.extend(list(operations.upsert_operations or []))
+        combined.delete_file_contents.extend(list(operations.delete_file_contents or []))
+        combined.errors.extend(list(operations.errors or []))
+        combined.resolved_links = merge_link_lists(
+            combined.resolved_links,
+            list(getattr(operations, "resolved_links", []) or []),
+        )
+        combined.delete_replacements.update(
+            dict(getattr(operations, "delete_replacements", {}) or {})
+        )
+        combined.link_replacements.update(dict(getattr(operations, "link_replacements", {}) or {}))
+    return combined
+
+
+def _requests_span_sessions(items: list[MemoryUpdateRequest]) -> bool:
+    """Return whether a kind batch cannot be proven to come from one session."""
+
+    if len(items) < 2:
+        return False
+    session_ids: set[str] = set()
+    for request in items:
+        session_id = str((request.metadata or {}).get("session_id") or "").strip()
+        if not session_id:
+            return True
+        session_ids.add(session_id)
+    return len(session_ids) > 1
+
+
 def _make_isolation_handler(
     request: MemoryUpdateRequest,
     extract_context: ExtractContext,
@@ -3158,11 +3663,176 @@ def _make_isolation_handler(
         allowed_memory_types=options.get("allowed_memory_types"),
         allow_self=options.get("allow_self", True),
         allowed_peer_ids=options.get("allowed_peer_ids"),
+        peer_memory_enabled=options.get("peer_memory_enabled"),
     )
 
 
 def _operation_count(operations: ResolvedOperations) -> int:
     return len(operations.upsert_operations or []) + len(operations.delete_file_contents or [])
+
+
+def _skipped_reason_codes(result: MemoryUpdateResult) -> list[str]:
+    return [
+        operation.reason_code.value
+        for operation in list(getattr(result, "skipped_operations", []) or [])
+    ]
+
+
+def _operation_lock_paths(
+    operations: ResolvedOperations,
+    viking_fs: Any | None,
+    ctx: RequestContext,
+) -> list[str]:
+    operation_uris = _operation_uri_set(operations)
+    uris = set(operation_uris)
+    for uri in operation_uris:
+        normalized_uri = str(uri).rstrip("/")
+        directory, separator, _ = normalized_uri.rpartition("/")
+        if separator and directory:
+            uris.add(f"{directory}/.overview.md")
+    uris.update(_link_endpoint_uri_set(list(operations.resolved_links or [])))
+    for deleted_uri, replacement_uri in dict(operations.delete_replacements or {}).items():
+        if deleted_uri:
+            uris.add(str(deleted_uri))
+        if replacement_uri:
+            uris.add(str(replacement_uri))
+    for operation in operations.upsert_operations:
+        if operation.lifecycle_action != "archive":
+            continue
+        for experience_uri in operation.uris:
+            old_file = operation.old_memory_file_content
+            if old_file is not None:
+                uris.update(
+                    experience_case_link_uris(
+                        old_file.backlinks,
+                        experience_uri=experience_uri,
+                    )
+                )
+                archived_case_uris = old_file.extra_fields.get("archived_case_uris", [])
+                if isinstance(archived_case_uris, (list, tuple, set)):
+                    uris.update(str(case_uri) for case_uri in archived_case_uris if case_uri)
+            if operation.archive_replacement_uri:
+                uris.add(operation.archive_replacement_uri)
+    for memory_file in operations.delete_file_contents or []:
+        for link in list(memory_file.links or []) + list(memory_file.backlinks or []):
+            if isinstance(link, dict):
+                from_uri = link.get("from_uri")
+                to_uri = link.get("to_uri")
+            else:
+                from_uri = getattr(link, "from_uri", None)
+                to_uri = getattr(link, "to_uri", None)
+            if from_uri:
+                uris.add(str(from_uri))
+            if to_uri:
+                uris.add(str(to_uri))
+    return _uri_lock_paths(uris, viking_fs, ctx)
+
+
+async def _persisted_operation_relation_uris(
+    operations: ResolvedOperations,
+    viking_fs: Any,
+    ctx: RequestContext,
+) -> set[str]:
+    uris: set[str] = set()
+    archive_operations_by_uri = {
+        uri: operation
+        for operation in operations.upsert_operations
+        if operation.lifecycle_action == "archive"
+        for uri in operation.uris
+    }
+    inspected_uris = set(operations.delete_replacements or {}) | set(archive_operations_by_uri)
+    for deleted_uri in inspected_uris:
+        try:
+            content = await viking_fs.read_file(deleted_uri, ctx=ctx)
+        except (FileNotFoundError, NotFoundError):
+            operation = archive_operations_by_uri.get(deleted_uri)
+            if operation is not None:
+                operation.precondition_files[deleted_uri] = None
+            continue
+        if not content:
+            operation = archive_operations_by_uri.get(deleted_uri)
+            if operation is not None:
+                operation.precondition_files[deleted_uri] = None
+            continue
+        memory_file = MemoryFileUtils.read(content, uri=deleted_uri)
+        operation = archive_operations_by_uri.get(deleted_uri)
+        if operation is not None:
+            operation.precondition_files[deleted_uri] = memory_file
+            uris.update(
+                experience_case_link_uris(
+                    memory_file.backlinks,
+                    experience_uri=deleted_uri,
+                )
+            )
+            archived_case_uris = memory_file.extra_fields.get("archived_case_uris", [])
+            if isinstance(archived_case_uris, (list, tuple, set)):
+                uris.update(str(case_uri) for case_uri in archived_case_uris if case_uri)
+            continue
+        for link in list(memory_file.links or []) + list(memory_file.backlinks or []):
+            if isinstance(link, dict):
+                from_uri = link.get("from_uri")
+                to_uri = link.get("to_uri")
+            else:
+                from_uri = link.from_uri
+                to_uri = link.to_uri
+            if from_uri:
+                uris.add(str(from_uri))
+            if to_uri:
+                uris.add(str(to_uri))
+    return uris
+
+
+async def _acquire_stable_operation_lease(
+    operations: ResolvedOperations,
+    viking_fs: Any | None,
+    ctx: RequestContext,
+) -> Any | None:
+    lock_paths = _operation_lock_paths(operations, viking_fs, ctx)
+    if not lock_paths:
+        return None
+
+    required_paths = set(lock_paths)
+    for acquisition in range(1, _MEMORY_APPLY_LOCK_MAX_ACQUISITIONS + 1):
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact_batch(
+            sorted(required_paths),
+            timeout_secs=_MEMORY_APPLY_LOCK_TIMEOUT_SECONDS,
+        )
+        try:
+            relation_uris = await _persisted_operation_relation_uris(
+                operations,
+                viking_fs,
+                ctx,
+            )
+            expanded_paths = required_paths | set(_uri_lock_paths(relation_uris, viking_fs, ctx))
+        except BaseException:
+            await viking_fs._async_agfs.pathlock_release(lease)
+            raise
+
+        if expanded_paths == required_paths:
+            return lease
+
+        await viking_fs._async_agfs.pathlock_release(lease)
+        required_paths = expanded_paths
+        if acquisition == _MEMORY_APPLY_LOCK_MAX_ACQUISITIONS:
+            raise RuntimeError(
+                "Unable to stabilize memory apply lock coverage after "
+                f"{_MEMORY_APPLY_LOCK_MAX_ACQUISITIONS} acquisitions"
+            )
+
+    raise AssertionError("unreachable")
+
+
+def _uri_lock_paths(
+    uris: set[str],
+    viking_fs: Any | None,
+    ctx: RequestContext,
+) -> list[str]:
+    if viking_fs is None or not hasattr(viking_fs, "_async_agfs"):
+        return []
+    uri_to_path = getattr(viking_fs, "_uri_to_path", None)
+    if not callable(uri_to_path):
+        return []
+    return sorted(uri_to_path(uri, ctx=ctx) for uri in uris if uri)
 
 
 def _first_uri(uris: list[str] | None) -> str | None:
@@ -3185,6 +3855,12 @@ async def get_streaming_memory_updater(
     with _streaming_memory_updater_registry_lock:
         existing = _streaming_memory_updater_registry.get(key)
         if existing is not None:
+            # Redo recovery can create the process-global updater before the
+            # service compressor is available, using ``vikingdb=None``.  Do
+            # not let that degraded first caller permanently disable
+            # vectorization for later normal commits with the same user key.
+            if vikingdb is not None and existing.vikingdb is not vikingdb:
+                existing.vikingdb = vikingdb
             return existing
         updater = StreamingMemoryUpdater(
             registry=registry,

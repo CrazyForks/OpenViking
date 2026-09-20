@@ -22,6 +22,11 @@ from openviking.session.memory.dataclass import (
     ResolvedOperations,
     StoredLink,
 )
+from openviking.session.memory.experience_lineage import (
+    collect_read_experience_uris,
+    experience_source_tags,
+    trajectory_outcome_tag,
+)
 from openviking.session.memory.extract_loop import PostValidationRetryDecision
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
 from openviking.session.memory.memory_updater import ExtractContext, MemoryUpdateResult
@@ -51,6 +56,12 @@ logger = get_logger(__name__)
 _TRAJECTORY_MEMORY_TYPE = "trajectories"
 _TRAJECTORY_POST_VALIDATION_MAX_RETRIES = 3
 _TRAJECTORY_OUTCOMES = {"success", "failure", "partial", "unfinished", "unknown"}
+_TRAJECTORY_RECOVERY_STATUSES = {
+    "none",
+    "observed_recovered",
+    "attempted_not_recovered",
+    "unknown",
+}
 _TRAJECTORY_ANCHOR_RE = re.compile(
     r"^Stage: [^;]+; Boundary: [^;]+; Capability: [^;]+; Target: [^;]+; Outcome: "
     r"(success|failure|partial|unfinished|unknown);?\.?$"
@@ -79,6 +90,7 @@ class TrajectoryAnalyzerContext:
     latest_archive_overview: str = ""
     evaluator_context: Any = None
     include_session_skills: bool = False
+    source_archive_uri: str = ""
 
 
 @dataclass(slots=True)
@@ -86,8 +98,8 @@ class TrajectoryRolloutAnalyzer:
     """Analyze rollouts by extracting persistent trajectory memory files.
 
     This implementation owns the trajectory extraction/apply flow directly.  It
-    intentionally does not depend on SessionCompressorV2/V3, and it only exposes
-    the trajectory memory schema to ExtractLoop.
+    intentionally does not depend on a compressor implementation, and it only
+    exposes the trajectory memory schema to ExtractLoop.
     """
 
     viking_fs: Any = None
@@ -120,6 +132,7 @@ class TrajectoryRolloutAnalyzer:
             case_name=getattr(rollout.case, "name", ""),
             evidence_sources=evidence_sources,
             advisory_signals=advisory_signals,
+            source_archive_uri=context.source_archive_uri,
         )
         contexts = list((result or {}).get("contexts", []))
         skill_gradients = list((result or {}).get("skill_gradients", []))
@@ -181,18 +194,22 @@ class TrajectoryRolloutAnalyzer:
         ctx: RequestContext | None,
         strict_extract_errors: bool = False,
         latest_archive_overview: str = "",
+        include_trajectories: bool = True,
         include_session_skills: bool = False,
         case_name: str = "",
         evidence_sources: dict[str, Any] | None = None,
         advisory_signals: dict[str, Any] | None = None,
+        source_archive_uri: str = "",
     ) -> dict[str, Any]:
-        """Extract and persist trajectory memories from rollout messages.
+        """Extract trajectory and/or reusable skill operations from rollout messages.
 
         When ``include_session_skills`` is True, session skill patches are
         co-extracted in the same ExtractLoop pass and returned as
         ``PatchSemanticGradient`` instances in the ``"skill_gradients"`` key.
         Skill patches are *not* applied to disk by this method — they are
-        returned as gradient signals for downstream policy training.
+        returned as gradient signals for downstream policy training. Setting
+        ``include_trajectories`` to False keeps the pass skill-only and prevents
+        trajectory operations from being persisted.
         """
         empty_result: dict[str, Any] = {
             "contexts": [],
@@ -205,19 +222,23 @@ class TrajectoryRolloutAnalyzer:
         provider = AgentTrajectoryContextProvider(
             messages=messages,
             latest_archive_overview=latest_archive_overview,
-            include_trajectories=True,
+            include_trajectories=include_trajectories,
             include_session_skills=include_session_skills,
             evidence_sources=evidence_sources,
             advisory_signals=advisory_signals,
         )
+        consumed_experience_uris = collect_read_experience_uris(messages, ctx=ctx)
         phase_result = await self._run_trajectory_extract_phase(
             provider=provider,
             messages=messages,
             ctx=ctx,
             strict_extract_errors=strict_extract_errors,
+            include_trajectories=include_trajectories,
             include_session_skills=include_session_skills,
             case_name=case_name,
             evidence_sources=evidence_sources,
+            source_archive_uri=source_archive_uri,
+            consumed_experience_uris=consumed_experience_uris,
         )
         if phase_result is None:
             return empty_result
@@ -236,9 +257,12 @@ class TrajectoryRolloutAnalyzer:
         messages: list[Message],
         ctx: RequestContext,
         strict_extract_errors: bool,
+        include_trajectories: bool = True,
         include_session_skills: bool = False,
         case_name: str = "",
         evidence_sources: dict[str, Any] | None = None,
+        source_archive_uri: str = "",
+        consumed_experience_uris: list[str] | None = None,
     ) -> (
         tuple[
             list[str],
@@ -256,7 +280,9 @@ class TrajectoryRolloutAnalyzer:
             raise RuntimeError("VikingFS is required to extract trajectory memories")
 
         extract_context = provider.get_extract_context()
-        allowed_types: set[str] = {_TRAJECTORY_MEMORY_TYPE}
+        allowed_types: set[str] = set()
+        if include_trajectories:
+            allowed_types.add(_TRAJECTORY_MEMORY_TYPE)
         if include_session_skills:
             allowed_types.add(SESSION_SKILL_MEMORY_TYPE)
         isolation_handler = MemoryIsolationHandler(
@@ -279,7 +305,10 @@ class TrajectoryRolloutAnalyzer:
             latest_draft: Any = None,
         ):
             _ensure_trajectory_case_name(operations, case_name=case_name)
-            issues = _trajectory_validation_issues(operations)
+            issues = _trajectory_validation_issues(
+                operations,
+                evidence_sources=evidence_sources,
+            )
             if not issues:
                 if retry_count:
                     validation_events.append(
@@ -352,7 +381,10 @@ class TrajectoryRolloutAnalyzer:
             traj_ops, skill_ops = _split_operations_by_type(
                 operations, target_type=_TRAJECTORY_MEMORY_TYPE
             )
-            traj_ops = _filter_invalid_trajectory_operations(traj_ops)
+            traj_ops = _filter_invalid_trajectory_operations(
+                traj_ops,
+                evidence_sources=evidence_sources,
+            )
             skill_gradients = _skill_operations_to_gradients(
                 skill_ops,
                 viking_fs=viking_fs,
@@ -360,14 +392,18 @@ class TrajectoryRolloutAnalyzer:
             )
 
             _ensure_trajectory_case_name(traj_ops, case_name=case_name)
+            _apply_trajectory_source_archive_uri(traj_ops, source_archive_uri)
 
-            memory_result = await self._apply_trajectory_operations(
-                operations=traj_ops,
-                provider=provider,
-                ctx=ctx,
-                extract_context=extract_context,
-                isolation_handler=isolation_handler,
-            )
+            memory_result = MemoryUpdateResult()
+            if include_trajectories:
+                memory_result = await self._apply_trajectory_operations(
+                    operations=traj_ops,
+                    provider=provider,
+                    ctx=ctx,
+                    extract_context=extract_context,
+                    isolation_handler=isolation_handler,
+                    consumed_experience_uris=consumed_experience_uris,
+                )
             tracer.info(
                 "[trajectory] Applied memory ops: "
                 f"written={len(memory_result.written_uris)}, "
@@ -410,6 +446,7 @@ class TrajectoryRolloutAnalyzer:
         ctx: RequestContext,
         extract_context: ExtractContext,
         isolation_handler: MemoryIsolationHandler,
+        consumed_experience_uris: list[str] | None = None,
     ) -> MemoryUpdateResult:
         updater = MemoryUpdater(
             registry=provider._get_registry(),
@@ -422,6 +459,10 @@ class TrajectoryRolloutAnalyzer:
             ctx,
             extract_context=extract_context,
             isolation_handler=isolation_handler,
+            search_tags_by_uri=_trajectory_search_tags_by_uri(
+                operations,
+                consumed_experience_uris,
+            ),
         )
 
     @tracer(
@@ -496,6 +537,8 @@ class TrajectoryRolloutAnalyzer:
 
 def _trajectory_validation_issues(
     operations: Any,
+    *,
+    evidence_sources: dict[str, Any] | None = None,
 ) -> list[_TrajectoryValidationIssue]:
     issues: list[_TrajectoryValidationIssue] = []
     trajectory_operations = [
@@ -517,7 +560,13 @@ def _trajectory_validation_issues(
             _normalize_trajectory_retrieval_anchor(raw_fields)
         fields = dict(raw_fields)
         name = str(fields.get("trajectory_name") or _fallback_trajectory_name(op))
-        issues.extend(_trajectory_operation_validation_issues(name, fields))
+        issues.extend(
+            _trajectory_operation_validation_issues(
+                name,
+                fields,
+                evidence_sources=evidence_sources,
+            )
+        )
     return issues
 
 
@@ -541,11 +590,14 @@ def _normalize_trajectory_retrieval_anchor(fields: dict[str, Any]) -> None:
 def _trajectory_operation_validation_issues(
     target_name: str,
     fields: dict[str, Any],
+    *,
+    evidence_sources: dict[str, Any] | None = None,
 ) -> list[_TrajectoryValidationIssue]:
     issues: list[_TrajectoryValidationIssue] = []
     required_fields = (
         "trajectory_name",
         "outcome",
+        "recovery_evidence",
         "retrieval_anchor",
         "experience_effects",
         "content",
@@ -569,6 +621,22 @@ def _trajectory_operation_validation_issues(
                 details=outcome,
             )
         )
+
+    direct_evaluation = _direct_rollout_evaluation(evidence_sources)
+    if direct_evaluation is not None:
+        evaluation_passed = bool(direct_evaluation.get("passed"))
+        if (evaluation_passed and outcome and outcome != "success") or (
+            not evaluation_passed and outcome == "success"
+        ):
+            issues.append(
+                _TrajectoryValidationIssue(
+                    target_name=target_name,
+                    reason="trajectory outcome disagrees with direct evaluation",
+                    details=(
+                        f"evaluation_passed={str(evaluation_passed).lower()}, outcome={outcome}"
+                    ),
+                )
+            )
     content = str(fields.get("content") or "")
     content_outcome_match = re.search(r"(?m)^-\s+Outcome\s*:\s*([^\n]+)", content)
     if outcome and content_outcome_match:
@@ -606,7 +674,121 @@ def _trajectory_operation_validation_issues(
     if effects:
         issues.extend(_experience_effects_validation_issues(target_name, effects))
 
+    recovery = str(fields.get("recovery_evidence") or "").strip()
+    if recovery:
+        issues.extend(
+            _recovery_evidence_validation_issues(
+                target_name,
+                recovery,
+                outcome=outcome,
+            )
+        )
+
+    issues.extend(_trajectory_content_validation_issues(target_name, content))
+
     return issues
+
+
+def _direct_rollout_evaluation(
+    evidence_sources: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    for item in (evidence_sources or {}).get("items", []) or []:
+        if (
+            isinstance(item, dict)
+            and item.get("direct") is True
+            and item.get("source") == "rollout_evaluation"
+        ):
+            return item
+    return None
+
+
+def _trajectory_content_validation_issues(
+    target_name: str,
+    content: str,
+) -> list[_TrajectoryValidationIssue]:
+    forbidden_patterns = (
+        ("Counterfactual Ideal Experience", r"(?mi)^\s*-?\s*Counterfactual Ideal Experience\s*:"),
+        ("Runtime experience content", r"(?mi)^\s*-?\s*Runtime experience content\s*:"),
+        ("Experience Repair Signal", r"(?mi)^\s*-?\s*Experience Repair Signal\s*:"),
+        ("Diagnostic Hints", r"(?mi)^\s*-?\s*Diagnostic Hints\s*:"),
+        ("Ambiguous references", r"(?mi)^\s*-\s*Ambiguous references\s*:"),
+        ("Recommended operation", r"(?mi)^\s*-\s*Recommended operation\s*:"),
+        ("Selected candidate", r"(?mi)^\s*-\s*Selected candidate\s*:"),
+        ("Candidate Cx", r"(?mi)^\s*-\s*Candidate\s+C\d+\s*:"),
+    )
+    found = [name for name, pattern in forbidden_patterns if re.search(pattern, content or "")]
+    if not found:
+        return []
+    return [
+        _TrajectoryValidationIssue(
+            target_name=target_name,
+            reason="trajectory contains experience-generation sections",
+            details=", ".join(found),
+        )
+    ]
+
+
+def _recovery_evidence_validation_issues(
+    target_name: str,
+    raw: str,
+    *,
+    outcome: str,
+) -> list[_TrajectoryValidationIssue]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [
+            _TrajectoryValidationIssue(
+                target_name=target_name,
+                reason="trajectory recovery_evidence is not valid JSON",
+                details=str(exc),
+            )
+        ]
+    expected = {"status", "failed_boundary", "alternative_action", "verification"}
+    if not isinstance(value, dict) or set(value) != expected:
+        return [
+            _TrajectoryValidationIssue(
+                target_name=target_name,
+                reason="trajectory recovery_evidence has invalid keys",
+                details=f"expected={sorted(expected)}",
+            )
+        ]
+    status = str(value.get("status") or "").strip().lower()
+    if status not in _TRAJECTORY_RECOVERY_STATUSES:
+        return [
+            _TrajectoryValidationIssue(
+                target_name=target_name,
+                reason="trajectory recovery_evidence has invalid status",
+                details=status,
+            )
+        ]
+    text_fields = ("failed_boundary", "alternative_action", "verification")
+    if any(not isinstance(value.get(name), str) for name in text_fields):
+        return [
+            _TrajectoryValidationIssue(
+                target_name=target_name,
+                reason="trajectory recovery_evidence has non-string evidence",
+            )
+        ]
+    if status == "observed_recovered":
+        if outcome != "success":
+            return [
+                _TrajectoryValidationIssue(
+                    target_name=target_name,
+                    reason="observed recovery requires successful trajectory outcome",
+                    details=f"outcome={outcome}",
+                )
+            ]
+        missing = [name for name in text_fields if not value[name].strip()]
+        if missing:
+            return [
+                _TrajectoryValidationIssue(
+                    target_name=target_name,
+                    reason="observed recovery is missing evidence",
+                    details=", ".join(missing),
+                )
+            ]
+    return []
 
 
 def _experience_effects_validation_issues(
@@ -666,9 +848,10 @@ def _trajectory_validation_retry_instruction(issues: list[_TrajectoryValidationI
             *detail_lines,
             "",
             "Required repair:",
-            "- Include non-empty trajectory_name, outcome, retrieval_anchor, experience_effects, and content fields.",
-            "- Use the exact outcome, retrieval_anchor, and experience_effects formats from the trajectory schema, and keep their outcomes consistent.",
+            "- Include non-empty trajectory_name, outcome, recovery_evidence, retrieval_anchor, experience_effects, and content fields.",
+            "- Use the exact outcome, recovery_evidence, retrieval_anchor, and experience_effects formats from the trajectory schema, and keep their outcomes consistent.",
             "- Keep the content factual and regenerate the complete trajectory record rather than returning a partial field patch.",
+            "- Do not include experience-generation sections, candidate experiences, repair recommendations, or diagnostic hints in trajectory content.",
             "Output ONLY the complete JSON object as an instance of OUTPUT_SCHEMA; "
             "do not output the OUTPUT_SCHEMA definition itself.",
         ]
@@ -677,6 +860,8 @@ def _trajectory_validation_retry_instruction(issues: list[_TrajectoryValidationI
 
 def _filter_invalid_trajectory_operations(
     operations: ResolvedOperations,
+    *,
+    evidence_sources: dict[str, Any] | None = None,
 ) -> ResolvedOperations:
     valid_upserts = []
     rejected_names: list[str] = []
@@ -686,7 +871,11 @@ def _filter_invalid_trajectory_operations(
             continue
         fields = dict(op.memory_fields or {})
         name = str(fields.get("trajectory_name") or _fallback_trajectory_name(op))
-        issues = _trajectory_operation_validation_issues(name, fields)
+        issues = _trajectory_operation_validation_issues(
+            name,
+            fields,
+            evidence_sources=evidence_sources,
+        )
         if issues:
             rejected_names.append(name)
             continue
@@ -701,7 +890,6 @@ def _filter_invalid_trajectory_operations(
 def _fallback_trajectory_name(op: Any) -> str:
     uri = (getattr(op, "uris", None) or [""])[0]
     return str(uri).rstrip("/").split("/")[-1].removesuffix(".md") or "unknown_trajectory"
-
 
 def _log_operations(operations: ResolvedOperations) -> None:
     op_items = [
@@ -786,6 +974,39 @@ def _evidence_sources_payload(
             "Other items may only identify what to inspect."
         ),
     }
+
+
+def _apply_trajectory_source_archive_uri(
+    operations: ResolvedOperations,
+    source_archive_uri: str,
+) -> None:
+    source_archive_uri = str(source_archive_uri or "").rstrip("/")
+    if not source_archive_uri:
+        return
+    for op in getattr(operations, "upsert_operations", []) or []:
+        if getattr(op, "memory_type", None) != _TRAJECTORY_MEMORY_TYPE:
+            continue
+        fields = getattr(op, "memory_fields", None)
+        if isinstance(fields, dict):
+            fields["source_archive_uri"] = source_archive_uri
+
+
+def _trajectory_search_tags_by_uri(
+    operations: ResolvedOperations,
+    consumed_experience_uris: list[str] | None,
+) -> dict[str, list[str]]:
+    source_tags = experience_source_tags(consumed_experience_uris)
+    result: dict[str, list[str]] = {}
+    for op in getattr(operations, "upsert_operations", []) or []:
+        if getattr(op, "memory_type", None) != _TRAJECTORY_MEMORY_TYPE:
+            continue
+        fields = getattr(op, "memory_fields", None)
+        outcome = fields.get("outcome") if isinstance(fields, dict) else None
+        tags = [*source_tags, trajectory_outcome_tag(outcome)]
+        for uri in getattr(op, "uris", []) or []:
+            if uri:
+                result[uri] = list(tags)
+    return result
 
 
 def _advisory_signals_payload(

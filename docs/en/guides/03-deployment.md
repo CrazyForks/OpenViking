@@ -146,7 +146,7 @@ import openviking as ov
 client = ov.SyncHTTPClient(url="http://localhost:1933", api_key="your-key")
 client.initialize()
 
-results = client.find("how to use openviking")
+results = client.find(query="how to use openviking")
 client.close()
 ```
 
@@ -170,7 +170,7 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 Then use the CLI:
 
 ```bash
-python -m openviking ls viking://resources/
+ov ls viking://resources/
 ```
 
 ### curl

@@ -293,6 +293,70 @@ async def test_experience_gradient_estimator_skips_success_trajectories():
 
 
 @pytest.mark.asyncio
+async def test_experience_gradient_estimator_allows_verified_observed_recovery():
+    analysis = _analysis(passed=True, outcome="success")
+    analysis.trajectories[0].metadata["recovery_evidence"] = (
+        '{"status":"observed_recovered","failed_boundary":"image endpoint returned 403",'
+        '"alternative_action":"procedural renderer produced compatible images",'
+        '"verification":"images and merged PDF were reopened and checked"}'
+    )
+    estimator = FakeExperienceGradientEstimator({})
+
+    gradients = await estimator.estimate(analysis, _experience_set(), _context())
+
+    assert gradients == []
+    assert len(estimator.calls) == 1
+    assert estimator.calls[0][0] is analysis.trajectories[0]
+
+
+@pytest.mark.asyncio
+async def test_experience_gradient_estimator_allows_non_full_observed_recovery_as_draft_evidence():
+    analysis = _analysis(passed=False, outcome="success")
+    analysis.trajectories[0].metadata["recovery_evidence"] = {
+        "status": "observed_recovered",
+        "failed_boundary": "primary path failed",
+        "alternative_action": "fallback ran",
+        "verification": "output was checked",
+    }
+    estimator = FakeExperienceGradientEstimator({})
+
+    gradients = await estimator.estimate(analysis, _experience_set(), _context())
+
+    assert gradients == []
+    assert len(estimator.calls) == 1
+    assert estimator.calls[0][0] is analysis.trajectories[0]
+
+
+@pytest.mark.asyncio
+async def test_experience_gradient_estimator_skips_internal_platform_failure_before_llm():
+    analysis = _analysis(passed=False, outcome="failure")
+    trajectory = analysis.trajectories[0]
+    trajectory.name = "sandbox_output_trace_timeout"
+    trajectory.retrieval_anchor = "Stage: rollout execution trace collection"
+    trajectory.content = (
+        "## Execution\n"
+        "SandboxTraceError: sandbox declared deliverables but output-file trace was not ready.\n"
+        "## Evaluation\n"
+        "External feedback: MAIN_AGENT_STD_FAILED.\n"
+        "## Result\n"
+        "No rollout trace was collected."
+    )
+    estimator = FakeExperienceGradientEstimator({})
+    context = _context()
+
+    gradients = await estimator.estimate(analysis, _experience_set(), context)
+
+    assert gradients == []
+    assert estimator.calls == []
+    expected = {
+        "trajectory_uri": trajectory.uri,
+        "reason": "source trajectory is an internal platform failure, not a user-task decision",
+    }
+    assert context.metadata["experience_source_rejections"] == [expected]
+    assert analysis.metadata["experience_source_rejections"] == [expected]
+
+
+@pytest.mark.asyncio
 async def test_experience_gradient_estimator_converts_experience_operations():
     analysis = _analysis(passed=False, outcome="failure")
     old_file = MemoryFile(

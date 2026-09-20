@@ -1,68 +1,53 @@
 {
-  "state_file": "adapter_state.local.json",
   "service": {
-    "host": "127.0.0.1",
-    "port": 1944,
-    "dataset": "ark4-0",
-    "domain": "ark",
-    "rollout_concurrency": 16,
-    "admin_token": "replace-with-a-local-admin-token",
-    "log_level": "info"
+    "port": 8765,
+    "dataset": "ark-viking-local-smoke-20260907"
   },
-  "platform": {
-    "gateway_base_url": "https://replace-with-inspect-gateway",
-    "api_key": "replace-with-platform-api-key",
-    "project_id": "replace-with-project-id",
-    "headers": {},
-    "request_timeout_seconds": 120
-  },
-  "training_task": {
-    "task_id": "",
-    "task_name": "openviking_ark4_external_training",
-    "workflow_id": "ov_external_training",
-    "agent_id": "ark",
-    "evaluator_id": "rollout_builtin@v1",
-    "ready_poll_interval_seconds": 2,
-    "ready_timeout_seconds": 900
-  },
-  "casehub": {
-    "dataset_ids": [
-      "replace-with-dataset-id"
-    ],
-    "case_ids": [],
-    "caseset_id": "",
-    "split_field": "",
-    "default_split": "train",
-    "page_size": 1000,
-    "detail_concurrency": 20
-  },
-  "rollout": {
-    "poll_interval_seconds": 2,
-    "timeout_seconds": 3600,
-    "connector_config": {
-      "options": {}
+  "viking": {
+    "base_url": "https://viking-exp.byted.org",
+    "api_token": "YOUR_VIKING_API_TOKEN",
+    "template_task_id": 3327,
+    "group_concurrency": {
+      "group_2": 20,
+      "group_3": 20,
+      "group_4": 20
     },
-    "runtime_params": {
-      "memory": {
-        "enabled": true,
-        "mode": "read_only",
-        "openviking_target": "ov-ark-test"
+    "train": {
+      "experiment_set_id": 300,
+      "version": "V11"
+    },
+    "eval": {
+      "experiment_set_id": 300,
+      "version": "V11"
+    },
+    "task_time_limit_seconds": 14400,
+    "sandbox_config": {
+      "env": "stg",
+      "collect_traces": true,
+      "extra_headers": {
+        "from-ark-console": "true",
+        "x-tt-env": "ai_search_homepage_stg",
+        "x-tt-sandbox": "{\"multi-agents-md-id\":\"stg-default-agentmd-20260901\",\"env\":{\"VAKA_REQUEST_SOURCE\":\"ark-lx\"}}",
+        "x-vaka-request-source": "ark-lx",
+        "x-tt-backend": "evolving"
+      },
+      "extra_payload": {
+        "extra_data": {
+          "extra": {
+            "memory": {
+              "enabled": false
+            }
+          }
+        }
       }
-    },
-    "extra_header": {
-      "x-vaka-request-source": "vaka-agentmemory"
-    },
-    "idempotency_namespace": "openviking-ark4-local",
-    "require_messages_for_training": true
+    }
   },
   "memory_proxy": {
-    "enabled": true,
-    "openviking_target": "ov-ark-test",
-    "openviking_url": "http://127.0.0.1:1933",
-    "openviking_api_key": "",
-    "openviking_config_file": "/absolute/path/to/openviking.conf",
-    "openviking_api_key_json_path": "bot.ov_server.api_key",
-    "timeout_seconds": 180,
-    "event_log_file": "memory_proxy_events.local.jsonl"
+    "enabled": false
+  },
+  "kubevpn": {
+    "kubeconfig": "/absolute/path/to/kubeconfig",
+    "namespace": "ai-search-rec",
+    "openviking_target": "evolving-dutao"
   }
 }

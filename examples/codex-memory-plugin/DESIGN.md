@@ -90,11 +90,25 @@ fired and bumped `lastUpdatedAt`; we commit it. The multi-recent case
 implies concurrent codex sessions are active; we can't tell which one (if
 any) ended, so we defer to idle TTL to clean up genuinely-dead ones.
 
+The count is over *activity*, including cursor-only states: a session
+`PreCompact` just committed has no live `ovSessionId` but may well still be
+running, and counting it keeps the `≥2` branch from sealing a sibling
+session mid-flight. Only a state that still has a live `ovSessionId` is
+actually committed; the single-recent case with nothing live is a no-op.
+
 ### 4. `SessionStart` source=`resume` — never commits, optional archive inject
 
 Short reconnects and `/resume` re-fire `SessionStart` for the same
 `session_id`. Committing here would seal a still-active session. So
 `resume` is a no-op for commit purposes.
+
+All `SessionStart` sources (`startup`, `clear`, and `resume`) independently
+load the shared OpenViking profile block unless
+`OPENVIKING_NO_AUTO_INJECT=1`. The implementation is the same
+`buildProfileBlock()` used by the other coding-agent integrations: full
+`profile.md` plus abstract-annotated URI indexes for `preferences/` and
+`entities/`, bounded by `OPENVIKING_PROFILE_TOKEN_BUDGET` with the shared
+CJK-aware estimator. Profile loading does not alter the commit decision tree.
 
 Resume may still need continuity after `PreCompact` or idle sweep already
 committed the live OV session. If local state has `ovSessionId = null`
@@ -103,7 +117,8 @@ calls `GET /api/v1/sessions/{id}/context?token_budget=...`, and injects
 `latest_archive_overview` via `hookSpecificOutput.additionalContext` when
 present. The injected block includes
 `viking://user/sessions/{id}/history/` so the model can use OpenViking MCP
-read/search tools for exact prior details.
+read/search tools for exact prior details. When both profile and archive are
+available, they are combined in one `SessionStart` response.
 
 If local state still has a live `ovSessionId`, resume injection is skipped:
 the session is appendable and Codex should already be resuming its own
@@ -111,11 +126,16 @@ transcript.
 
 ### 5. Idle TTL sweep — fallback
 
-State files whose `lastUpdatedAt` is older than `IDLE_TTL_MS` (default 30
-min) get committed and cleared. Mental model: a session not touched for
-30 min is "temporarily concluded"; if the user resumes later, subsequent
-turns append under the same deterministic OV session id, and the next
-commit creates another archive there.
+State files with a live `ovSessionId` whose `lastUpdatedAt` is older than
+`IDLE_TTL_MS` (default 30 min) get committed. Their transcript cursor is
+preserved while `ovSessionId` is cleared. Mental model: a session not touched
+for 30 min is "temporarily concluded"; if the user resumes later, subsequent
+turns append under the same deterministic OV session id, and the next commit
+creates another archive there.
+
+Releasing the session id instead of deleting the file writes state without
+touching `lastUpdatedAt`, so a committed session doesn't look freshly active
+to the next `SessionStart`.
 
 This covers:
 - SIGTERM / Ctrl+C / `/exit` (no hook fires; state file rots)
@@ -136,13 +156,36 @@ machine, no sweep ever runs and the OV session stays open server-side
 forever. Accepted. Future work could add an MCP tool
 `openviking_commit_pending` so the model can commit explicitly.
 
-## Stop hook — append only, no commit
+### 6. Cursor retention — same pass
+
+A committed state file keeps living as a cursor (`ovSessionId: null`) so a
+later resume appends instead of replaying. Kept forever that would leak one
+file per codex session and make `listStates()` — which reads every file on
+every `SessionStart` — slower over time, so the same pass retires them:
+
+| State | Retired after |
+|---|---|
+| cursor-only, `capturedTurnCount > 0` | `COMMITTED_TTL_MS` (default 30 days) |
+| cursor-only, nothing ever captured | `IDLE_TTL_MS` (default 30 min) |
+
+A cursor that outlives its codex rollout has nothing left to resume from, and
+a state file that never captured a turn is identical to no state file at all.
+
+## Stop hook — append + threshold commit
 
 Every `Stop` reads `transcript_path`, slices to `[capturedTurnCount, end)`,
 and appends each new user/assistant turn to the OV session for this codex
 `session_id` (the `/messages` endpoint auto-creates it on first append).
 State is updated:
-`{ovSessionId, capturedTurnCount, lastUpdatedAt: now}`. Never commits.
+`{ovSessionId, capturedTurnCount, lastUpdatedAt: now}`.
+
+After a successful append, Stop reads session meta and commits when
+`pending_tokens >= OPENVIKING_COMMIT_TOKEN_THRESHOLD` (default 20000).
+The threshold commit passes
+`keep_recent_count=OPENVIKING_COMMIT_KEEP_RECENT_COUNT` (default 10) so
+the newest turns stay live after archive/extract. This keeps long-running
+sessions from waiting until PreCompact/SessionStart while still avoiding
+commit-on-every-turn fragmentation.
 
 ## Injected context boundary
 
@@ -177,9 +220,19 @@ compatibility fallbacks.
 
 Codex's `/compact` may rewrite or truncate `transcript_path`. After
 compaction, if `allTurns.length < state.capturedTurnCount`, our slice
-math underflows and we silently drop new turns. Defensive fix: when this
-inequality is detected on `Stop`, reset `capturedTurnCount = 0` so the
-next slice captures everything in the new transcript.
+math underflows and we silently drop new turns. When this inequality is
+detected on `Stop`, move `capturedTurnCount` to the latest human turn
+so the current interaction is captured without replaying compacted history.
+
+"Human turn" is not just `role === "user"` — `normalizeCaptureRole()` maps
+tool results onto the user role as well, so `findLastHumanTurnIndex()`
+additionally requires a `text` part. If the rewrite left no human turn at
+all (index `-1`), we fall back to capturing the whole transcript and log
+`fallback: "full_transcript"`; replaying beats losing the interaction.
+
+**Trade-off**: turns older than that human turn are assumed captured. If
+earlier `Stop` hooks failed to reach OV and compaction happened before they
+were retried, those turns are dropped rather than duplicated.
 
 ### Commit failure
 
@@ -209,7 +262,7 @@ OV session id, while commits create additional archives under that session.
 ```json
 {
   "codexSessionId": "0193af...",   // codex thread id
-  "ovSessionId": "cx-0193af...-or-null", // null means "committed, awaiting next Stop"
+  "ovSessionId": "cx-0193af...-or-null", // null means "committed, awaiting next Stop or retirement"
   "capturedTurnCount": 7,            // turns from transcript already appended
   "createdAt": 1715000000000,
   "lastUpdatedAt": 1715000300000
@@ -232,17 +285,19 @@ Env var overrides for tuning without rebuilding:
 | `OPENVIKING_CODEX_STATE_DIR` | `~/.openviking/codex-plugin-state` | state file dir |
 | `OPENVIKING_CODEX_ACTIVE_WINDOW_MS` | `120000` (2 min) | rule-3 active window |
 | `OPENVIKING_CODEX_IDLE_TTL_MS` | `1800000` (30 min) | idle sweep TTL |
+| `OPENVIKING_CODEX_COMMITTED_TTL_MS` | `2592000000` (30 days) | how long a committed cursor is kept for resume |
 | `OPENVIKING_RECALL_TIMEOUT_MS` | `120000` (2 min) | whole UserPromptSubmit auto-recall deadline |
 | `OPENVIKING_RECALL_COMPRESS` | `1` | set `0` / `off` to skip `codex exec` compression |
 | `OPENVIKING_RECALL_COMPRESS_MODEL` | unset | custom first-choice compressor model; `off` disables compression |
 | `OPENVIKING_RECALL_COMPRESS_THINKING` | unset | custom `model_reasoning_effort`; `default` means omit override; alias `OPENVIKING_RECALL_COMPRESS_REASONING_EFFORT` |
+| `OPENVIKING_RECALL_COMPRESS_BASE_URL` | unset | custom API base URL for the nested `codex exec` compressor |
 | `OPENVIKING_RECALL_COMPRESS_DETECT_ON_STARTUP` | `1` | recreate/cache compressor profile during every `SessionStart` |
 | `OPENVIKING_RECALL_COMPRESS_DETECT_TIMEOUT_MS` | `15000` | per-candidate compressor probe timeout |
 | `OPENVIKING_RECALL_COMPRESS_DETECT_TTL_MS` | `604800000` (7 days) | cache TTL used by `UserPromptSubmit` reads |
 | `OPENVIKING_RESUME_ARCHIVE_INJECT` | `1` | inject latest archive summary on `source=resume` when no live OV session is open |
 | `OPENVIKING_RESUME_ARCHIVE_TOKEN_BUDGET` | `32000` | token budget for `/sessions/{id}/context` on resume |
 | `OPENVIKING_RESUME_ARCHIVE_MAX_CHARS` | `6000` | max chars injected from latest archive overview |
-| `OPENVIKING_CAPTURE_TOOL_MAX_CHARS` | `2000` | max chars retained per compressed tool call/result |
+| `OPENVIKING_CAPTURE_TOOL_MAX_CHARS` | `1000000` | guard cap on one tool part's `tool_output`; the server externalizes anything over `tool_output_externalization.threshold_chars` (default 20000) |
 | `OPENVIKING_DEBUG` | `0` | enable hook debug log |
 
 ## Resume context inject
@@ -268,6 +323,20 @@ both:
 codex -m <model> -c 'model_reasoning_effort="low"' exec ...
 ```
 
+The compressor runs with `--ignore-user-config`, so it does not inherit the
+main Codex process's provider table. When
+`OPENVIKING_RECALL_COMPRESS_BASE_URL` is set, the plugin adds an isolated
+provider for the nested request:
+
+```bash
+-c 'model_provider="openviking_compressor"' \
+-c 'model_providers.openviking_compressor.name="openviking_compressor"' \
+-c 'model_providers.openviking_compressor.base_url="<url>"'
+```
+
+The selected model and thinking effort remain profile data; the base URL is
+runtime configuration and is supplied when the command is built.
+
 `thinking=default` omits the `model_reasoning_effort` override. This is
 important for model families whose default effort is tuned by Codex.
 
@@ -284,7 +353,7 @@ Fallback order:
 1. configured model/thinking (`OPENVIKING_RECALL_COMPRESS_MODEL` +
    `OPENVIKING_RECALL_COMPRESS_THINKING`)
 2. `gpt-5.3-codex-spark`, thinking `default`
-3. `gpt-5.5`, thinking `low`
+3. `gpt-5.6-luna`, thinking `low`
 4. off (deterministic digest, no child `codex exec`)
 
 Configured `off` (`OPENVIKING_RECALL_COMPRESS=0`, model `off`, or thinking
@@ -370,6 +439,8 @@ Configured `off` (`OPENVIKING_RECALL_COMPRESS=0`, model `off`, or thinking
 ```
 
 Output schema for SessionStart / UserPromptSubmit supports
-`hookSpecificOutput.additionalContext`. Stop / PreCompact only support
+`hookSpecificOutput.additionalContext`. A SessionStart response may include
+that field together with `systemMessage`, allowing profile injection and orphan
+commit status to coexist. Stop / PreCompact only support
 `{ continue, stopReason, suppressOutput, systemMessage }` — `{}` is a
 valid no-op.

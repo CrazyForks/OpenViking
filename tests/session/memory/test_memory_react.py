@@ -8,10 +8,14 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import BaseModel, Field
 
 from openviking.session.memory.dataclass import (
     MemoryField,
+    MemoryFile,
     MemoryTypeSchema,
+    ResolvedOperation,
+    ResolvedOperations,
 )
 from openviking.session.memory.extract_loop import (
     ExtractLoop,
@@ -19,7 +23,10 @@ from openviking.session.memory.extract_loop import (
 )
 from openviking.session.memory.memory_type_registry import MemoryTypeRegistry
 from openviking.session.memory.memory_updater import ExtractContext
+from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
+from openviking.session.memory.merge_op import SearchReplaceBlock, StrPatch
 from openviking.session.memory.merge_op.base import FieldType, MergeOp
+from openviking.session.memory.schema_model_generator import SchemaModelGenerator
 
 
 class TestPreFetchFileFiltering:
@@ -158,38 +165,216 @@ class TestAllowedDirectoriesList:
         """Create a mock VikingFS."""
         return MagicMock()
 
-    def test_get_allowed_directories_list(self, mock_vlm, mock_viking_fs):
-        """Test that allowed directories list is properly formatted."""
-        registry = MemoryTypeRegistry(load_schemas=False)
-
-        schema1 = MemoryTypeSchema(
-            memory_type="preferences",
-            description="Preferences",
-            directory="viking://user/{{ user_space }}/memories/preferences",
-            filename_template="{{ topic }}.md",
-            fields=[],
-        )
-        schema2 = MemoryTypeSchema(
-            memory_type="tools",
-            description="Tools",
-            directory="viking://user/{{ user_space }}/memories/tools",
-            filename_template="{{ tool_name }}.md",
-            fields=[],
-        )
-
-        registry.register(schema1)
-        registry.register(schema2)
-
-        result = registry.list_search_uris(user_space="default")
-
-        assert "viking://user/default/memories/preferences" in result
-        assert "viking://user/default/memories/tools" in result
-
 
 class TestExtractLoopFinalJsonRetry:
+    @staticmethod
+    def _invalid_peer_resolution_loop(target_uri=None):
+        schema = MemoryTypeSchema(
+            memory_type="preferences",
+            description="Preferences",
+            directory="viking://user/{{ user_space }}/memories",
+            filename_template="preferences.md",
+            fields=[],
+        )
+        context_provider = MagicMock()
+        context_provider.get_memory_schemas.return_value = [schema]
+        context_provider.read_file_contents = {}
+
+        ctx = MagicMock()
+        ctx.user.user_id = "user_a"
+        extract_context = MagicMock()
+        extract_context.messages = []
+        extract_context.page_id_map.resolve.return_value = target_uri
+
+        extract_loop = object.__new__(ExtractLoop)
+        extract_loop.ctx = ctx
+        extract_loop.context_provider = context_provider
+        extract_loop._extract_context = extract_context
+        extract_loop._isolation_handler = MemoryIsolationHandler(ctx, extract_context)
+        return extract_loop
+
+    @pytest.mark.asyncio
+    async def test_existing_page_id_keeps_write_target_without_invalid_peer_metadata(self):
+        class PreferenceItem(BaseModel):
+            page_id: int
+            peer_id: str
+
+        class Operations(BaseModel):
+            preferences: list[PreferenceItem]
+            delete_ids: list = Field(default_factory=list)
+
+        target_uri = "viking://user/user_a/memories/preferences.md"
+        extract_loop = self._invalid_peer_resolution_loop(target_uri)
+
+        resolved, _ = await extract_loop.resolve_operations(
+            Operations(
+                preferences=[
+                    PreferenceItem(page_id=7, peer_id="web/visitor/alice"),
+                ]
+            )
+        )
+
+        operation = resolved.upsert_operations[0]
+        assert operation.uris == [target_uri]
+        assert operation.resolution_skip is None
+        assert operation.memory_fields == {
+            "memory_type": "preferences",
+            "user_id": "user_a",
+        }
+
+    @pytest.mark.asyncio
+    async def test_invalid_peer_hint_preserves_legacy_self_write_fallback(self):
+        class PreferenceItem(BaseModel):
+            page_id: int
+            peer_id: str
+
+        class Operations(BaseModel):
+            preferences: list[PreferenceItem]
+            delete_ids: list = Field(default_factory=list)
+
+        extract_loop = self._invalid_peer_resolution_loop()
+
+        resolved, _ = await extract_loop.resolve_operations(
+            Operations(
+                preferences=[
+                    PreferenceItem(page_id=101, peer_id="web/visitor/alice"),
+                ]
+            )
+        )
+
+        operation = resolved.upsert_operations[0]
+        assert operation.uris == ["viking://user/user_a/memories/preferences.md"]
+        assert operation.resolution_skip is None
+        assert operation.memory_fields == {
+            "memory_type": "preferences",
+            "user_id": "user_a",
+        }
+
+    @pytest.mark.asyncio
+    async def test_structured_parser_preserves_delete_ids(self):
+        class FakeContextProvider:
+            read_file_contents = {}
+
+            def get_memory_schemas(self, ctx):
+                return [
+                    MemoryTypeSchema(
+                        memory_type="preferences",
+                        description="Preferences",
+                        directory="viking://user/{user_space}/memories/preferences",
+                        filename_template="{topic}.md",
+                        fields=[],
+                    )
+                ]
+
+            def get_tools(self):
+                return []
+
+            def get_extract_context(self):
+                return MagicMock()
+
+            def get_output_language(self):
+                return "en"
+
+            def instruction(self):
+                return "Extract memory operations."
+
+            async def prefetch(self):
+                return []
+
+        vlm = MagicMock()
+        vlm.model = "test-model"
+        vlm.get_completion_async = AsyncMock(
+            return_value='{"delete_ids": [{"delete_page_id": 7, "replacement_page_id": 11}]}'
+        )
+        # decision_reasoning response retained for when the schema field is re-enabled:
+        # return_value=(
+        #     '{"delete_ids": [{"delete_page_id": 7, "replacement_page_id": 11}], '
+        #     '"decision_reasoning": [{"page_id": 7, "remove": [], '
+        #     '"has_unaffected_facts": false, "action": "DELETE"}]}'
+        # )
+        extract_loop = ExtractLoop(
+            vlm=vlm,
+            viking_fs=MagicMock(),
+            context_provider=FakeContextProvider(),
+            max_iterations=1,
+        )
+        resolved = ResolvedOperations(
+            upsert_operations=[],
+            delete_file_contents=[],
+            errors=[],
+        )
+        extract_loop.resolve_operations = AsyncMock(return_value=(resolved, []))
+        extract_loop._check_unread_existing_files = AsyncMock(return_value={})
+        extract_loop._validate_patch_operations = AsyncMock(return_value=[])
+        extract_loop.finalize_operations = AsyncMock()
+
+        await extract_loop.run()
+
+        parsed_operations = extract_loop.resolve_operations.await_args.args[0]
+        assert len(parsed_operations.delete_ids) == 1
+        assert parsed_operations.delete_ids[0].delete_page_id == 7
+        assert parsed_operations.delete_ids[0].replacement_page_id == 11
+        # assert parsed_operations.decision_reasoning[0].action == "DELETE"
+        # assert parsed_operations.decision_reasoning[0].remove == []
+
+    def test_add_only_contract_does_not_allow_delete_ids(self):
+        schema = MemoryTypeSchema(
+            memory_type="trajectories",
+            description="Trajectories",
+            directory="viking://agent/{agent_space}/memories/trajectories",
+            filename_template="{task}.md",
+            fields=[],
+            operation_mode="add_only",
+        )
+        generator = SchemaModelGenerator([schema], template_context={"language": "en"})
+
+        operations_model = generator.create_structured_operations_model()
+        fields = operations_model.model_fields
+        assert "decision_reasoning" not in fields
+        assert "delete_ids" not in fields
+
+        # decision_reasoning schema tests retained for when the field is re-enabled:
+        # assert next(iter(fields)) == "decision_reasoning"
+        # description = fields["decision_reasoning"].description
+        # assert "one decision for every related read page" in description
+        # decisions = operations_model.model_validate(
+        #     {
+        #         "decision_reasoning": [
+        #             {
+        #                 "page_id": 7,
+        #                 "remove": ["- affected fact"],
+        #                 "has_unaffected_facts": True,
+        #                 "action": "UPDATE",
+        #             }
+        #         ]
+        #     }
+        # ).decision_reasoning
+        # assert decisions[0].has_unaffected_facts is True
+        # assert operations_model.model_validate({}).decision_reasoning == []
+        # with pytest.raises(ValueError):
+        #     operations_model.model_validate(
+        #         {
+        #             "decision_reasoning": [
+        #                 {
+        #                     "page_id": 7,
+        #                     "remove": [],
+        #                     "has_unaffected_facts": True,
+        #                     "action": "REMOVE",
+        #                 }
+        #             ]
+        #         }
+        #     )
+        # merge_fields = (
+        #     SchemaModelGenerator([schema], include_decision_reasoning=False)
+        #     .create_structured_operations_model()
+        #     .model_fields
+        # )
+        # assert "decision_reasoning" not in merge_fields
+
     def test_final_instruction_includes_schema_aware_empty_json(self):
         extract_loop = object.__new__(ExtractLoop)
         extract_loop._expected_fields = ["preferences", "tools"]
+        # extract_loop._expected_fields = ["preferences", "tools", "decision_reasoning"]
 
         instruction = extract_loop._build_final_operations_instruction()
 
@@ -197,15 +382,56 @@ class TestExtractLoopFinalJsonRetry:
         assert '"delete_ids": []' in instruction
         assert '"preferences": []' in instruction
         assert '"tools": []' in instruction
+        assert '"decision_reasoning": []' not in instruction
+        # assert '"decision_reasoning": []' in instruction
 
-    def test_final_skeleton_always_includes_delete_ids(self):
+    @pytest.mark.asyncio
+    async def test_patch_validation_uses_plain_and_sequential_content(self):
+        target_uri = "viking://user/default/memories/profile.md"
+        old_file = MemoryFile(
+            uri=target_uri,
+            content="# A\n- [Shared](./shared.md)\n\n# B\n- Shared",
+        )
+        operation = ResolvedOperation(
+            old_memory_file_content=old_file,
+            memory_type="profile",
+            uris=[target_uri],
+            memory_fields={
+                "content": StrPatch(
+                    blocks=[
+                        SearchReplaceBlock(
+                            search="# A\n- Shared",
+                            replace="# A\n- A-only",
+                        ),
+                        SearchReplaceBlock(search="- Shared", replace="- B-only"),
+                        SearchReplaceBlock(search="- Missing", replace="- Added"),
+                    ]
+                )
+            },
+        )
         extract_loop = object.__new__(ExtractLoop)
-        extract_loop._expected_fields = ["preferences"]
+        extract_loop.context_provider = MagicMock(read_file_contents={target_uri: old_file})
 
-        assert extract_loop._build_final_operations_skeleton() == {
-            "delete_ids": [],
-            "preferences": [],
-        }
+        errors = await extract_loop._validate_patch_operations(
+            ResolvedOperations(
+                upsert_operations=[operation],
+                delete_file_contents=[],
+                errors=[],
+            )
+        )
+
+        assert errors == [
+            {
+                "uri": target_uri,
+                "page_id": None,
+                "field": "content",
+                "block_index": 3,
+                "search": "- Missing",
+                "reason": "not_found",
+                "match_count": 0,
+                "found_in_other_uris": [],
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_final_unparseable_response_raises_instead_of_empty_success(self):
@@ -270,6 +496,19 @@ class TestExtractLoopFinalJsonRetry:
         assert final_prompts
         assert '"delete_ids": []' in final_prompts[-1]
         assert '"preferences": []' in final_prompts[-1]
+
+        system_prompts = [
+            message["content"]
+            for messages in vlm.seen_messages
+            for message in messages
+            if message.get("role") == "system"
+        ]
+        assert system_prompts
+        initial_system_prompt = system_prompts[0]
+        assert "`delete_ids` deletes the whole item" in initial_system_prompt
+        assert "only if every substantive fact is in scope" in initial_system_prompt
+        assert "otherwise MUST use DELETE blocks" in initial_system_prompt
+        assert "not inferring scope from the file name/topic" in initial_system_prompt
 
 
 class TestExtractLoopPostValidationHook:

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import base64
 import inspect
+import mimetypes
+import os
 import tempfile
 import uuid
 import zipfile
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Type, Union
 from urllib.parse import quote
 
 import httpx
 
 from ._utils import run_async
+from .actor_peer import _request_actor_peer_headers
 from .config import resolve_client_config
 from .errors import (
     AbortedError,
@@ -33,6 +38,30 @@ from .errors import (
     UnavailableError,
     UnimplementedError,
     VLMFailedError,
+)
+from .message import MessagePart, normalize_part
+from .options import (
+    AddMessageOptions,
+    AddResourceOptions,
+    AddSkillOptions,
+    BatchAddMessagesOptions,
+    BatchWriteOptions,
+    CommitSessionOptions,
+    CreateSessionOptions,
+    ExperienceOutcomeOptions,
+    ExperienceTrajectoryOptions,
+    FindOptions,
+    Message,
+    PreflightAssetOptions,
+    ReindexOptions,
+    ResolveAssetsOptions,
+    SearchContextOptions,
+    SearchContextResult,
+    SearchOptions,
+    SetTagsOptions,
+    UpdateSessionConfigOptions,
+    UpdateSkillOptions,
+    WriteOptions,
 )
 
 ERROR_CODE_TO_EXCEPTION = {
@@ -58,6 +87,55 @@ ERROR_CODE_TO_EXCEPTION = {
     "UNKNOWN": OpenVikingError,
 }
 
+GATEWAY_MARKER_HEADER = "X-VikingBot-Gateway"
+GATEWAY_TOKEN_HEADER = "X-Gateway-Token"
+_SESSION_CONFIG_UNSET = object()
+
+
+def _image_mime_type(file_name: str = "") -> str:
+    mime_type, _ = mimetypes.guess_type(file_name or "")
+    if mime_type and mime_type.startswith("image/"):
+        return mime_type
+    return "image/png"
+
+
+def _image_to_data_uri(data: bytes | bytearray | memoryview, file_name: str = "") -> str:
+    encoded = base64.b64encode(bytes(data)).decode("ascii")
+    return f"data:{_image_mime_type(file_name)};base64,{encoded}"
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    temporary = tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=path.parent,
+        prefix=f".{path.name}-",
+        suffix=".tmp",
+        delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            temporary.write(data)
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary.close()
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _normalize_image_input(image: Any) -> Optional[str]:
+    if image is None:
+        return None
+    if isinstance(image, (bytes, bytearray, memoryview)):
+        return _image_to_data_uri(image)
+    value = os.fspath(image) if isinstance(image, os.PathLike) else str(image)
+    if value.startswith(("data:image/", "http://", "https://", "viking://")):
+        return value
+    path = Path(value).expanduser()
+    if path.is_file():
+        return _image_to_data_uri(path.read_bytes(), path.name)
+    return value
+
 
 class VikingURI:
     @staticmethod
@@ -82,26 +160,33 @@ class Session:
     async def add_message(
         self,
         role: str,
-        content: str | None = None,
-        parts: list[dict] | None = None,
-        created_at: str | None = None,
-        peer_id: str | None = None,
+        content: Optional[str] = None,
+        parts: Optional[List[Union[Dict[str, Any], MessagePart]]] = None,
+        options: Optional[AddMessageOptions] = None,
+        peer_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return await self._client.add_message(
-            self.session_id,
-            role=role,
-            content=content,
-            parts=parts,
-            created_at=created_at,
-            peer_id=peer_id,
-        )
+        kwargs: Dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "parts": parts,
+            "options": options,
+        }
+        if peer_id is not None:
+            kwargs["peer_id"] = peer_id
+        return await self._client.add_message(self.session_id, **kwargs)
 
     async def batch_add_messages(self, messages: list[dict]) -> Dict[str, Any]:
         return await self._client.batch_add_messages(self.session_id, messages)
 
-    async def commit(self, keep_recent_count: int = 0) -> Dict[str, Any]:
+    async def commit(
+        self,
+        keep_recent_count: int = 0,
+        options: Optional[CommitSessionOptions] = None,
+    ) -> Dict[str, Any]:
         return await self._client.commit_session(
-            self.session_id, keep_recent_count=keep_recent_count
+            self.session_id,
+            keep_recent_count=keep_recent_count,
+            options=options,
         )
 
     async def delete(self) -> None:
@@ -125,42 +210,41 @@ class SyncSession:
     def add_message(
         self,
         role: str,
-        content: str | None = None,
-        parts: list[dict] | None = None,
-        created_at: str | None = None,
-        peer_id: str | None = None,
+        content: Optional[str] = None,
+        parts: Optional[List[Union[Dict[str, Any], MessagePart]]] = None,
+        options: Optional[AddMessageOptions] = None,
+        peer_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self._client.add_message(
-            self.session_id,
-            role=role,
-            content=content,
-            parts=parts,
-            created_at=created_at,
-            peer_id=peer_id,
-        )
+        kwargs: Dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "parts": parts,
+            "options": options,
+        }
+        if peer_id is not None:
+            kwargs["peer_id"] = peer_id
+        return self._client.add_message(self.session_id, **kwargs)
 
     def batch_add_messages(self, messages: list[dict]) -> Dict[str, Any]:
         return self._client.batch_add_messages(self.session_id, messages)
 
     def commit(
         self,
-        telemetry: Any = False,
-        *,
         keep_recent_count: int = 0,
+        options: Optional[CommitSessionOptions] = None,
     ) -> Dict[str, Any]:
         return self._client.commit_session(
             self.session_id,
-            telemetry=telemetry,
             keep_recent_count=keep_recent_count,
+            options=options,
         )
 
     def commit_async(
         self,
-        telemetry: Any = False,
-        *,
         keep_recent_count: int = 0,
+        options: Optional[CommitSessionOptions] = None,
     ) -> Dict[str, Any]:
-        return self.commit(telemetry=telemetry, keep_recent_count=keep_recent_count)
+        return self.commit(keep_recent_count=keep_recent_count, options=options)
 
     def delete(self) -> None:
         self._client.delete_session(self.session_id)
@@ -203,6 +287,8 @@ class _HTTPObserver:
 
 
 class AsyncHTTPClient:
+    supports_request_actor_peer = True
+
     def __init__(
         self,
         url: Optional[str] = None,
@@ -212,10 +298,17 @@ class AsyncHTTPClient:
         user: Optional[str] = None,
         actor_peer_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
         profile_enabled: Optional[bool] = None,
         upload_mode: Optional[str] = None,
+        event_hooks: Optional[Dict[str, List[Callable[..., Any]]]] = None,
+        # LDAP parameters
+        auth_mode: Optional[str] = None,
+        ldap_username: Optional[str] = None,
+        ldap_password: Optional[str] = None,
+        # OIDC parameters
+        oidc_token: Optional[str] = None,
     ):
         if actor_peer_id and agent_id:
             raise ValueError("actor_peer_id cannot be used with agent_id")
@@ -231,16 +324,27 @@ class AsyncHTTPClient:
             extra_headers=extra_headers,
             profile_enabled=profile_enabled,
             upload_mode=upload_mode,
+            auth_mode=auth_mode,
+            ldap_username=ldap_username,
+            ldap_password=ldap_password,
+            oidc_token=oidc_token,
         )
         self._url = config.url
         self._api_key = config.api_key
         self._account = config.account
         self._user_id = config.user
         self._actor_peer_id = config.actor_peer_id
+        self._gateway_token = config.gateway_token
         self._timeout = config.timeout
         self._extra_headers = config.extra_headers
         self._profile_enabled = config.profile_enabled
         self._upload_mode = config.upload_mode
+        self._auth_mode = config.auth_mode
+        self._ldap_username = config.ldap_username
+        self._ldap_password = config.ldap_password
+        self._oidc_token = config.oidc_token
+        self._event_hooks = {event: list(hooks) for event, hooks in (event_hooks or {}).items()}
+        self._http_limits: Optional[httpx.Limits] = None
         self._http: Optional[httpx.AsyncClient] = None
         self._observer: Optional[_HTTPObserver] = None
         self._snapshot: Optional["AsyncHTTPSnapshotNamespace"] = None
@@ -255,14 +359,114 @@ class AsyncHTTPClient:
             headers["X-OpenViking-User"] = self._user_id
         if self._actor_peer_id:
             headers["X-OpenViking-Actor-Peer"] = self._actor_peer_id
+
+        # LDAP Basic Auth
+        if self._auth_mode == "ldap" and self._ldap_username and self._ldap_password:
+            from .config import get_basic_auth_header
+
+            headers["Authorization"] = get_basic_auth_header(
+                self._ldap_username, self._ldap_password
+            )
+
+        # OIDC Bearer token. An explicit oidc_token wins; otherwise fall back
+        # to api_key when it looks like a JWT (header.payload.signature).
+        if self._auth_mode == "oidc":
+            token = self._oidc_token
+            if not token and self._api_key and self._api_key.count(".") == 2:
+                token = self._api_key
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
         headers.update(self._extra_headers)
-        self._http = httpx.AsyncClient(
-            base_url=self._url,
-            headers=headers,
-            timeout=self._timeout,
-            params={"profile": "1"} if self._profile_enabled else None,
-        )
+        client_kwargs: Dict[str, Any] = {
+            "base_url": self._url,
+            "headers": headers,
+            "timeout": self._timeout,
+            "event_hooks": self._event_hooks,
+            "params": {"profile": "1"} if self._profile_enabled else None,
+        }
+        if self._http_limits is not None:
+            client_kwargs["limits"] = self._http_limits
+        self._http = httpx.AsyncClient(**client_kwargs)
         self._observer = _HTTPObserver(self)
+
+    @staticmethod
+    def _has_header(headers: Dict[str, str], name: str) -> bool:
+        return any(key.lower() == name.lower() for key in headers)
+
+    @staticmethod
+    def _is_gateway_token_challenge(response: httpx.Response) -> bool:
+        return (
+            getattr(response, "status_code", None) == httpx.codes.UNAUTHORIZED
+            and getattr(response, "headers", {}).get(GATEWAY_MARKER_HEADER, "").lower() == "true"
+        )
+
+    def _has_explicit_gateway_header(self, headers: Dict[str, str]) -> bool:
+        return self._has_header(self._extra_headers, GATEWAY_TOKEN_HEADER) or self._has_header(
+            headers, GATEWAY_TOKEN_HEADER
+        )
+
+    async def _gateway_token_required(self) -> bool:
+        if self._http is None:
+            raise RuntimeError("Client is not initialized")
+        response = await self._http.get("/health")
+        return self._is_gateway_token_challenge(response)
+
+    async def _send_http_request(
+        self,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        request_kwargs: Dict[str, Any],
+    ) -> httpx.Response:
+        if self._http is None:
+            raise RuntimeError("Client is not initialized")
+        call_kwargs = dict(request_kwargs)
+        if headers:
+            call_kwargs["headers"] = headers
+        request_method = getattr(self._http, "request", None)
+        if callable(request_method):
+            return await request_method(method, url, **call_kwargs)
+        verb_method = getattr(self._http, method.lower())
+        return await verb_method(url, **call_kwargs)
+
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if self._http is None:
+            raise RuntimeError("Client is not initialized")
+
+        request_kwargs = dict(kwargs)
+        headers = _request_actor_peer_headers()
+        headers.update(dict(request_kwargs.pop("headers", {}) or {}))
+        has_explicit_gateway_header = self._has_explicit_gateway_header(headers)
+
+        # Multipart streams cannot be replayed safely after the first request. Probe the
+        # endpoint before sending them so a Gateway token is attached only when challenged.
+        if (
+            request_kwargs.get("files") is not None
+            and self._gateway_token
+            and not has_explicit_gateway_header
+            and await self._gateway_token_required()
+        ):
+            headers[GATEWAY_TOKEN_HEADER] = self._gateway_token
+
+        response = await self._send_http_request(method, url, headers, request_kwargs)
+        if (
+            not self._is_gateway_token_challenge(response)
+            or not self._gateway_token
+            or has_explicit_gateway_header
+            or request_kwargs.get("files") is not None
+        ):
+            return response
+
+        retry_headers = dict(headers)
+        retry_headers[GATEWAY_TOKEN_HEADER] = self._gateway_token
+        return await self._send_http_request(method, url, retry_headers, request_kwargs)
+
+    def _wait_request_kwargs(self, *, wait: bool, timeout: Optional[float]) -> Dict[str, Any]:
+        if not wait or timeout is None:
+            return {}
+        read_timeout = max(self._timeout, timeout + 30.0)
+        return {"timeout": httpx.Timeout(self._timeout, read=read_timeout)}
 
     async def close(self) -> None:
         if self._http:
@@ -309,6 +513,95 @@ class AsyncHTTPClient:
                 continue
             compacted[key] = value
         return compacted
+
+    @classmethod
+    def _normalize_message_payload(cls, message: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = dict(message)
+        if payload.get("parts"):
+            payload["parts"] = [normalize_part(part) for part in payload["parts"]]
+            payload.pop("content", None)
+        else:
+            payload.pop("parts", None)
+            if payload.get("content") is None:
+                raise ValueError("Either content or non-empty parts must be provided")
+        return cls._compact_request_body(payload)
+
+    @classmethod
+    def _build_options_payload(
+        cls,
+        options: Optional[Mapping[str, Any]],
+        options_type: Type[Any],
+        fixed: Optional[Mapping[str, Any]] = None,
+        protected: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
+        option_values = dict(options or {})
+        allowed = set(options_type.__optional_keys__) | set(options_type.__required_keys__)
+        unknown = sorted(set(option_values) - allowed)
+        if unknown:
+            raise TypeError(
+                f"Unknown option '{unknown[0]}' for {options_type.__name__}; "
+                "use 'extra' for server fields not yet supported by the SDK"
+            )
+
+        extra = dict(option_values.pop("extra", {}) or {})
+        payload = dict(fixed or {})
+        protected_fields = set(payload) | set(protected or ())
+        official_fields = allowed - {"extra"}
+        conflicts = sorted(set(extra) & (official_fields | protected_fields))
+        if conflicts:
+            raise ValueError(f"extra cannot override '{conflicts[0]}'")
+
+        payload.update(option_values)
+        payload.update(extra)
+        return cls._compact_request_body(payload)
+
+    @classmethod
+    def _search_options_payload(
+        cls,
+        query: str,
+        options: Optional[Mapping[str, Any]],
+        options_type: Type[Any],
+        fixed: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        option_values = dict(options or {})
+        if "image" in option_values:
+            option_values["image_url"] = _normalize_image_input(option_values.pop("image"))
+        if "target_uri" in option_values:
+            option_values["target_uri"] = cls._normalize_target_uri(option_values["target_uri"])
+        if "context_type" in option_values:
+            option_values["context_type"] = cls._normalize_context_type(
+                option_values["context_type"]
+            )
+
+        allowed = set(options_type.__optional_keys__) | set(options_type.__required_keys__)
+        allowed.discard("image")
+        allowed.add("image_url")
+        proxy_type = type(
+            f"_{options_type.__name__}Payload",
+            (),
+            {
+                "__optional_keys__": frozenset(allowed),
+                "__required_keys__": frozenset(),
+                "__name__": options_type.__name__,
+            },
+        )
+        fixed_payload = {"query": query}
+        fixed_payload.update(fixed or {})
+        return cls._build_options_payload(
+            option_values,
+            proxy_type,
+            fixed=fixed_payload,
+        )
+
+    @staticmethod
+    def _normalize_context_type(context_type: Optional[Any]) -> Optional[Any]:
+        if context_type is None:
+            return None
+        if isinstance(context_type, list):
+            return [item.value if isinstance(item, Enum) else item for item in context_type]
+        if isinstance(context_type, Enum):
+            return context_type.value
+        return context_type
 
     def _handle_response_data(self, response: httpx.Response) -> Dict[str, Any]:
         try:
@@ -386,7 +679,8 @@ class AsyncHTTPClient:
         with open(file_path, "rb") as f:
             files = {"file": (Path(file_path).name, f, "application/octet-stream")}
             data = {"upload_mode": self._upload_mode} if self._upload_mode else None
-            response = await self._http.post(
+            response = await self._request(
+                "POST",
                 "/api/v1/resources/temp_upload",
                 files=files,
                 data=data,
@@ -409,44 +703,41 @@ class AsyncHTTPClient:
         path: str,
         to: Optional[str] = None,
         parent: Optional[str] = None,
-        reason: str = "",
-        instruction: str = "",
         wait: bool = False,
         timeout: Optional[float] = None,
-        strict: bool = False,
-        ignore_dirs: Optional[str] = None,
-        include: Optional[str] = None,
-        exclude: Optional[str] = None,
-        directly_upload_media: bool = True,
-        preserve_structure: Optional[bool] = None,
-        watch_interval: float = 0,
-        args: Optional[Dict[str, Any]] = None,
-        telemetry: Any = False,
+        options: Optional[AddResourceOptions] = None,
     ) -> Dict[str, Any]:
+        option_values = dict(options or {})
+        add_type = option_values.get("add_type")
+        if add_type is not None:
+            add_type = add_type.strip() or None
+        if add_type and parent:
+            raise ValueError("'add_type' cannot be combined with 'parent'.")
+        if add_type and not to:
+            raise ValueError("'add_type' requires an exact 'to' target.")
         if to and parent:
             raise ValueError("Cannot specify both 'to' and 'parent' at the same time.")
 
-        request_data = {
-            "to": to,
-            "parent": parent,
-            "reason": reason,
-            "instruction": instruction,
-            "wait": wait,
-            "timeout": timeout,
-            "strict": strict,
-            "ignore_dirs": ignore_dirs,
-            "include": include,
-            "exclude": exclude,
-            "directly_upload_media": directly_upload_media,
-            "watch_interval": watch_interval,
-            "args": args or {},
-            "telemetry": telemetry,
-        }
-        if preserve_structure is not None:
-            request_data["preserve_structure"] = preserve_structure
+        if to is not None:
+            to = VikingURI.normalize(to)
+        if parent is not None:
+            parent = VikingURI.normalize(parent)
+        if add_type is not None:
+            option_values["add_type"] = add_type
+        request_data = self._build_options_payload(
+            option_values,
+            AddResourceOptions,
+            fixed={
+                "to": to,
+                "parent": parent,
+                "wait": wait,
+                "timeout": timeout,
+            },
+            protected={"path", "temp_file_id", "source_name"},
+        )
 
         path_obj = Path(path)
-        if path_obj.exists():
+        if not add_type and path_obj.exists():
             if path_obj.is_dir():
                 request_data["source_name"] = path_obj.name
                 zip_path = self._zip_directory(path)
@@ -463,20 +754,24 @@ class AsyncHTTPClient:
             request_data["path"] = path
 
         request_data = self._compact_request_body(request_data)
-        response = await self._http.post("/api/v1/resources", json=request_data)
+        response = await self._request("POST", "/api/v1/resources", json=request_data)
         return self._handle_response_data(response).get("result", {})
 
     async def batch_add_messages(
         self,
         session_id: str,
-        messages: list[dict],
-        telemetry: Any = False,
+        messages: list[Message],
+        options: Optional[BatchAddMessagesOptions] = None,
     ) -> Dict[str, Any]:
         session_path = self._path_segment(session_id)
-        payload: Dict[str, Any] = {"messages": messages}
-        if telemetry is not False:
-            payload["telemetry"] = telemetry
-        response = await self._http.post(
+        normalized_messages = [self._normalize_message_payload(message) for message in messages]
+        payload = self._build_options_payload(
+            options,
+            BatchAddMessagesOptions,
+            fixed={"messages": normalized_messages},
+        )
+        response = await self._request(
+            "POST",
             f"/api/v1/sessions/{session_path}/messages/batch",
             json=payload,
         )
@@ -487,12 +782,17 @@ class AsyncHTTPClient:
         data: Any,
         wait: bool = False,
         timeout: Optional[float] = None,
-        telemetry: Any = False,
-        target_uri: Optional[str] = None,
+        options: Optional[AddSkillOptions] = None,
     ) -> Dict[str, Any]:
-        request_data = {"wait": wait, "timeout": timeout, "telemetry": telemetry}
-        if target_uri is not None:
-            request_data["target_uri"] = target_uri
+        option_values = dict(options or {})
+        if "target_uri" in option_values:
+            option_values["target_uri"] = VikingURI.normalize(option_values["target_uri"])
+        request_data = self._build_options_payload(
+            option_values,
+            AddSkillOptions,
+            fixed={"wait": wait, "timeout": timeout},
+            protected={"data", "temp_file_id"},
+        )
         if isinstance(data, str):
             path_obj = Path(data)
             if path_obj.exists():
@@ -510,7 +810,7 @@ class AsyncHTTPClient:
                 request_data["data"] = data
         else:
             request_data["data"] = data
-        response = await self._http.post("/api/v1/skills", json=request_data)
+        response = await self._request("POST", "/api/v1/skills", json=request_data)
         return self._handle_response_data(response).get("result", {})
 
     async def list_skills(
@@ -521,7 +821,7 @@ class AsyncHTTPClient:
         params: Dict[str, Any] = {"node_limit": node_limit}
         if target_uri is not None:
             params["target_uri"] = target_uri
-        response = await self._http.get("/api/v1/skills", params=params)
+        response = await self._request("GET", "/api/v1/skills", params=params)
         return self._handle_response(response)
 
     async def find_skills(
@@ -542,7 +842,7 @@ class AsyncHTTPClient:
         }
         if target_uri is not None:
             payload["target_uri"] = target_uri
-        response = await self._http.post("/api/v1/skills/find", json=payload)
+        response = await self._request("POST", "/api/v1/skills/find", json=payload)
         return self._handle_response_data(response).get("result", {})
 
     async def validate_skill(
@@ -560,7 +860,7 @@ class AsyncHTTPClient:
             payload["skill_dir_name"] = skill_dir_name
         if target_uri is not None:
             payload["target_uri"] = target_uri
-        response = await self._http.post("/api/v1/skills/validate", json=payload)
+        response = await self._request("POST", "/api/v1/skills/validate", json=payload)
         return self._handle_response(response)
 
     async def get_skill(
@@ -571,9 +871,11 @@ class AsyncHTTPClient:
         include_source: bool = False,
         level: Optional[int] = None,
         target_uri: Optional[str] = None,
+        include_integrity: bool = False,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "include_files": include_files,
+            "include_integrity": include_integrity,
             "include_source": include_source,
         }
         if include_content is not None:
@@ -582,7 +884,7 @@ class AsyncHTTPClient:
             params["level"] = level
         if target_uri is not None:
             params["target_uri"] = target_uri
-        response = await self._http.get(f"/api/v1/skills/{skill_name}", params=params)
+        response = await self._request("GET", f"/api/v1/skills/{skill_name}", params=params)
         return self._handle_response(response)
 
     async def update_skill(
@@ -591,18 +893,17 @@ class AsyncHTTPClient:
         data: Any,
         wait: bool = False,
         timeout: Optional[float] = None,
-        source_metadata: Optional[Dict[str, Any]] = None,
-        telemetry: Any = False,
-        target_uri: Optional[str] = None,
+        options: Optional[UpdateSkillOptions] = None,
     ) -> Dict[str, Any]:
-        request_data: Dict[str, Any] = {
-            "wait": wait,
-            "timeout": timeout,
-            "source_metadata": source_metadata,
-            "telemetry": telemetry,
-        }
-        if target_uri is not None:
-            request_data["target_uri"] = target_uri
+        option_values = dict(options or {})
+        if "target_uri" in option_values:
+            option_values["target_uri"] = VikingURI.normalize(option_values["target_uri"])
+        request_data = self._build_options_payload(
+            option_values,
+            UpdateSkillOptions,
+            fixed={"wait": wait, "timeout": timeout},
+            protected={"data", "temp_file_id"},
+        )
         if isinstance(data, str):
             path_obj = Path(data)
             if path_obj.exists():
@@ -620,7 +921,7 @@ class AsyncHTTPClient:
                 request_data["data"] = data
         else:
             request_data["data"] = data
-        response = await self._http.put(f"/api/v1/skills/{skill_name}", json=request_data)
+        response = await self._request("PUT", f"/api/v1/skills/{skill_name}", json=request_data)
         return self._handle_response_data(response).get("result", {})
 
     async def delete_skill(
@@ -631,7 +932,7 @@ class AsyncHTTPClient:
         params: Dict[str, Any] = {}
         if target_uri is not None:
             params["target_uri"] = target_uri
-        response = await self._http.delete(f"/api/v1/skills/{skill_name}", params=params)
+        response = await self._request("DELETE", f"/api/v1/skills/{skill_name}", params=params)
         return self._handle_response(response)
 
     async def list_watches(
@@ -642,7 +943,7 @@ class AsyncHTTPClient:
         params: Dict[str, Any] = {"active_only": active_only}
         if to_uri is not None:
             params["to_uri"] = VikingURI.normalize(to_uri)
-        response = await self._http.get("/api/v1/watches", params=params)
+        response = await self._request("GET", "/api/v1/watches", params=params)
         return self._handle_response(response)
 
     async def get_watch(
@@ -653,7 +954,7 @@ class AsyncHTTPClient:
         params = {}
         if to_uri is not None:
             params["to_uri"] = VikingURI.normalize(to_uri)
-        response = await self._http.get(f"/api/v1/watches/{task_id}", params=params)
+        response = await self._request("GET", f"/api/v1/watches/{task_id}", params=params)
         return self._handle_response(response)
 
     async def update_watch(
@@ -681,11 +982,12 @@ class AsyncHTTPClient:
             params = {}
             if to_uri is not None:
                 params["to_uri"] = VikingURI.normalize(to_uri)
-            response = await self._http.patch(
-                f"/api/v1/watches/{task_id}", params=params, json=payload
+            response = await self._request(
+                "PATCH", f"/api/v1/watches/{task_id}", params=params, json=payload
             )
         else:
-            response = await self._http.patch(
+            response = await self._request(
+                "PATCH",
                 "/api/v1/watches",
                 params={"to_uri": VikingURI.normalize(to_uri)},
                 json=payload,
@@ -701,10 +1003,10 @@ class AsyncHTTPClient:
             params = {}
             if to_uri is not None:
                 params["to_uri"] = VikingURI.normalize(to_uri)
-            response = await self._http.delete(f"/api/v1/watches/{task_id}", params=params)
+            response = await self._request("DELETE", f"/api/v1/watches/{task_id}", params=params)
         else:
-            response = await self._http.delete(
-                "/api/v1/watches", params={"to_uri": VikingURI.normalize(to_uri)}
+            response = await self._request(
+                "DELETE", "/api/v1/watches", params={"to_uri": VikingURI.normalize(to_uri)}
             )
         return self._handle_response(response)
 
@@ -717,16 +1019,19 @@ class AsyncHTTPClient:
             params = {}
             if to_uri is not None:
                 params["to_uri"] = VikingURI.normalize(to_uri)
-            response = await self._http.post(f"/api/v1/watches/{task_id}/trigger", params=params)
+            response = await self._request(
+                "POST", f"/api/v1/watches/{task_id}/trigger", params=params
+            )
         else:
-            response = await self._http.post(
-                "/api/v1/watches/trigger", params={"to_uri": VikingURI.normalize(to_uri)}
+            response = await self._request(
+                "POST", "/api/v1/watches/trigger", params={"to_uri": VikingURI.normalize(to_uri)}
             )
         return self._handle_response(response)
 
     async def wait_processed(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         http_timeout = timeout if timeout else 600.0
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             "/api/v1/system/wait",
             json={"timeout": timeout},
             timeout=http_timeout,
@@ -742,18 +1047,25 @@ class AsyncHTTPClient:
         abs_limit: int = 256,
         show_all_hidden: bool = False,
         node_limit: int = 1000,
+        sort_by: Optional[str] = None,
+        sort_order: str = "asc",
     ) -> List[Any]:
-        response = await self._http.get(
+        params: Dict[str, Any] = {
+            "uri": VikingURI.normalize(uri),
+            "simple": simple,
+            "recursive": recursive,
+            "output": output,
+            "abs_limit": abs_limit,
+            "show_all_hidden": show_all_hidden,
+            "node_limit": node_limit,
+        }
+        if sort_by is not None:
+            params["sort_by"] = sort_by
+            params["sort_order"] = sort_order
+        response = await self._request(
+            "GET",
             "/api/v1/fs/ls",
-            params={
-                "uri": VikingURI.normalize(uri),
-                "simple": simple,
-                "recursive": recursive,
-                "output": output,
-                "abs_limit": abs_limit,
-                "show_all_hidden": show_all_hidden,
-                "node_limit": node_limit,
-            },
+            params=params,
         )
         return self._handle_response(response)
 
@@ -764,8 +1076,10 @@ class AsyncHTTPClient:
         abs_limit: int = 128,
         show_all_hidden: bool = False,
         node_limit: int = 1000,
+        level_limit: int = 3,
     ) -> List[Dict[str, Any]]:
-        response = await self._http.get(
+        response = await self._request(
+            "GET",
             "/api/v1/fs/tree",
             params={
                 "uri": VikingURI.normalize(uri),
@@ -773,17 +1087,20 @@ class AsyncHTTPClient:
                 "abs_limit": abs_limit,
                 "show_all_hidden": show_all_hidden,
                 "node_limit": node_limit,
+                "level_limit": level_limit,
             },
         )
         return self._handle_response(response)
 
     async def stat(self, uri: str) -> Dict[str, Any]:
-        response = await self._http.get("/api/v1/fs/stat", params={"uri": VikingURI.normalize(uri)})
+        response = await self._request(
+            "GET", "/api/v1/fs/stat", params={"uri": VikingURI.normalize(uri)}
+        )
         return self._handle_response(response)
 
     async def attrs(self, uri: str) -> Dict[str, Any]:
-        response = await self._http.get(
-            "/api/v1/fs/attrs", params={"uri": VikingURI.normalize(uri)}
+        response = await self._request(
+            "GET", "/api/v1/fs/attrs", params={"uri": VikingURI.normalize(uri)}
         )
         return self._handle_response(response)
 
@@ -791,7 +1108,7 @@ class AsyncHTTPClient:
         payload = {"uri": VikingURI.normalize(uri)}
         if description is not None:
             payload["description"] = description
-        response = await self._http.post("/api/v1/fs/mkdir", json=payload)
+        response = await self._request("POST", "/api/v1/fs/mkdir", json=payload)
         self._handle_response(response)
 
     async def rm(
@@ -804,32 +1121,59 @@ class AsyncHTTPClient:
         params = {"uri": VikingURI.normalize(uri), "recursive": recursive, "wait": wait}
         if timeout is not None:
             params["timeout"] = timeout
-        response = await self._http.request("DELETE", "/api/v1/fs", params=params)
+        response = await self._request("DELETE", "/api/v1/fs", params=params)
         self._handle_response(response)
 
     async def mv(self, from_uri: str, to_uri: str) -> None:
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             "/api/v1/fs/mv",
             json={"from_uri": VikingURI.normalize(from_uri), "to_uri": VikingURI.normalize(to_uri)},
         )
         self._handle_response(response)
 
     async def read(self, uri: str, offset: int = 0, limit: int = -1) -> str:
-        response = await self._http.get(
+        response = await self._request(
+            "GET",
             "/api/v1/content/read",
             params={"uri": VikingURI.normalize(uri), "offset": offset, "limit": limit},
         )
         return self._handle_response(response)
 
+    async def read_raw(self, uri: str, offset: int = 0, limit: int = -1) -> str:
+        """Read the exact UTF-8 content stored for a file, including hidden metadata."""
+        response = await self._request(
+            "GET",
+            "/api/v1/content/read",
+            params={
+                "uri": VikingURI.normalize(uri),
+                "offset": offset,
+                "limit": limit,
+                "raw": True,
+            },
+        )
+        return self._handle_response(response)
+
+    async def download_bytes(self, uri: str) -> bytes:
+        """Download an OpenViking file without interpreting its contents."""
+        response = await self._request(
+            "GET",
+            "/api/v1/content/download",
+            params={"uri": VikingURI.normalize(uri)},
+        )
+        if not response.is_success:
+            self._handle_response_data(response)
+        return bytes(response.content)
+
     async def abstract(self, uri: str) -> str:
-        response = await self._http.get(
-            "/api/v1/content/abstract", params={"uri": VikingURI.normalize(uri)}
+        response = await self._request(
+            "GET", "/api/v1/content/abstract", params={"uri": VikingURI.normalize(uri)}
         )
         return self._handle_response(response)
 
     async def overview(self, uri: str) -> str:
-        response = await self._http.get(
-            "/api/v1/content/overview", params={"uri": VikingURI.normalize(uri)}
+        response = await self._request(
+            "GET", "/api/v1/content/overview", params={"uri": VikingURI.normalize(uri)}
         )
         return self._handle_response(response)
 
@@ -840,18 +1184,55 @@ class AsyncHTTPClient:
         mode: str = "replace",
         wait: bool = False,
         timeout: Optional[float] = None,
-        telemetry: Any = False,
+        options: Optional[WriteOptions] = None,
     ) -> Dict[str, Any]:
-        response = await self._http.post(
-            "/api/v1/content/write",
-            json={
+        payload = self._build_options_payload(
+            options,
+            WriteOptions,
+            fixed={
                 "uri": VikingURI.normalize(uri),
                 "content": content,
                 "mode": mode,
                 "wait": wait,
                 "timeout": timeout,
-                "telemetry": telemetry,
             },
+        )
+        response = await self._request(
+            "POST",
+            "/api/v1/content/write",
+            json=payload,
+        )
+        return self._handle_response_data(response).get("result", {})
+
+    async def batch_write(
+        self,
+        root_uri: str,
+        operations: List[Dict[str, Any]],
+        wait: bool = True,
+        timeout: Optional[float] = None,
+        options: Optional[BatchWriteOptions] = None,
+    ) -> Dict[str, Any]:
+        """Apply multiple content writes, then refresh semantics once."""
+        normalized_operations = []
+        for operation in operations:
+            item = dict(operation)
+            item["uri"] = VikingURI.normalize(str(item.get("uri") or ""))
+            normalized_operations.append(item)
+        payload = self._build_options_payload(
+            options,
+            BatchWriteOptions,
+            fixed={
+                "root_uri": VikingURI.normalize(root_uri),
+                "operations": normalized_operations,
+                "wait": wait,
+                "timeout": timeout,
+            },
+        )
+        response = await self._request(
+            "POST",
+            "/api/v1/content/batch-write",
+            json=payload,
+            **self._wait_request_kwargs(wait=wait, timeout=timeout),
         )
         return self._handle_response_data(response).get("result", {})
 
@@ -861,76 +1242,97 @@ class AsyncHTTPClient:
         tags: List[str],
         mode: str = "replace",
         recursive: bool = False,
-        telemetry: Any = False,
+        options: Optional[SetTagsOptions] = None,
     ) -> Dict[str, Any]:
-        response = await self._http.post(
-            "/api/v1/fs/attrs/set_tags",
-            json={
+        payload = self._build_options_payload(
+            options,
+            SetTagsOptions,
+            fixed={
                 "uri": VikingURI.normalize(uri),
                 "tags": tags,
                 "mode": mode,
                 "recursive": recursive,
-                "telemetry": telemetry,
             },
+        )
+        response = await self._request(
+            "POST",
+            "/api/v1/fs/attrs/set_tags",
+            json=payload,
         )
         return self._handle_response_data(response).get("result", {})
 
     async def find(
         self,
-        query: str,
+        query: str = "",
         target_uri: Union[str, List[str]] = "",
         limit: int = 10,
-        node_limit: Optional[int] = None,
-        score_threshold: Optional[float] = None,
-        filter: Optional[Dict[str, Any]] = None,
-        context_type: Optional[Any] = None,
-        tags: Optional[List[str]] = None,
-        telemetry: Any = False,
+        image: Any = None,
+        options: Optional[FindOptions] = None,
     ) -> Dict[str, Any]:
-        actual_limit = node_limit if node_limit is not None else limit
-        payload = {
-            "query": query,
-            "target_uri": self._normalize_target_uri(target_uri),
-            "limit": actual_limit,
-            "score_threshold": score_threshold,
-            "filter": filter,
-            "context_type": context_type,
-            "tags": tags,
-            "telemetry": telemetry,
-        }
-        payload = self._compact_request_body(payload)
-        response = await self._http.post("/api/v1/search/find", json=payload)
+        search_options = dict(options or {})
+        if image is not None:
+            search_options["image"] = image
+        payload = self._search_options_payload(
+            query,
+            search_options,
+            FindOptions,
+            fixed={
+                "target_uri": self._normalize_target_uri(target_uri),
+                "limit": limit,
+            },
+        )
+        response = await self._request("POST", "/api/v1/search/find", json=payload)
         return self._handle_response_data(response).get("result", {})
 
     async def search(
         self,
-        query: str,
-        target_uri: Union[str, List[str]] = "",
-        session: Optional[Any] = None,
+        query: str = "",
         session_id: Optional[str] = None,
+        target_uri: Union[str, List[str]] = "",
         limit: int = 10,
-        node_limit: Optional[int] = None,
-        score_threshold: Optional[float] = None,
-        filter: Optional[Dict[str, Any]] = None,
-        context_type: Optional[Any] = None,
-        tags: Optional[List[str]] = None,
-        telemetry: Any = False,
+        image: Any = None,
+        options: Optional[SearchOptions] = None,
     ) -> Dict[str, Any]:
-        actual_limit = node_limit if node_limit is not None else limit
-        sid = session_id or (session.session_id if session else None)
-        payload = {
-            "query": query,
-            "target_uri": self._normalize_target_uri(target_uri),
-            "session_id": sid,
-            "limit": actual_limit,
-            "score_threshold": score_threshold,
-            "filter": filter,
-            "context_type": context_type,
-            "tags": tags,
-            "telemetry": telemetry,
-        }
-        payload = self._compact_request_body(payload)
-        response = await self._http.post("/api/v1/search/search", json=payload)
+        search_options = dict(options or {})
+        if image is not None:
+            search_options["image"] = image
+        payload = self._search_options_payload(
+            query,
+            search_options,
+            SearchOptions,
+            fixed={
+                "session_id": session_id,
+                "target_uri": self._normalize_target_uri(target_uri),
+                "limit": limit,
+            },
+        )
+        response = await self._request("POST", "/api/v1/search/search", json=payload)
+        return self._handle_response_data(response).get("result", {})
+
+    async def search_context(
+        self,
+        query: str = "",
+        session_id: Optional[str] = None,
+        target_uri: Union[str, List[str]] = "",
+        limit: int = 10,
+        image: Any = None,
+        options: Optional[SearchContextOptions] = None,
+    ) -> SearchContextResult:
+        search_options = dict(options or {})
+        if image is not None:
+            search_options["image"] = image
+        payload = self._search_options_payload(
+            query,
+            search_options,
+            SearchContextOptions,
+            fixed={
+                "mode": "context",
+                "session_id": session_id,
+                "target_uri": self._normalize_target_uri(target_uri),
+                "limit": limit,
+            },
+        )
+        response = await self._request("POST", "/api/v1/search/search", json=payload)
         return self._handle_response_data(response).get("result", {})
 
     async def grep(
@@ -938,91 +1340,86 @@ class AsyncHTTPClient:
         uri: str,
         pattern: str,
         case_insensitive: bool = False,
-        node_limit: Optional[int] = None,
+        node_limit: int = 256,
         exclude_uri: Optional[str] = None,
     ) -> Dict[str, Any]:
         request_json = {
             "uri": VikingURI.normalize(uri),
             "pattern": pattern,
             "case_insensitive": case_insensitive,
+            "node_limit": node_limit,
         }
-        if node_limit is not None:
-            request_json["node_limit"] = node_limit
         if exclude_uri is not None:
             request_json["exclude_uri"] = VikingURI.normalize(exclude_uri)
-        response = await self._http.post("/api/v1/search/grep", json=request_json)
+        response = await self._request("POST", "/api/v1/search/grep", json=request_json)
         return self._handle_response(response)
 
-    async def glob(self, pattern: str, uri: str = "viking://") -> Dict[str, Any]:
-        response = await self._http.post(
+    async def glob(
+        self,
+        pattern: str,
+        uri: str = "viking://",
+        node_limit: int = 256,
+    ) -> Dict[str, Any]:
+        response = await self._request(
+            "POST",
             "/api/v1/search/glob",
-            json={"pattern": pattern, "uri": VikingURI.normalize(uri)},
-        )
-        return self._handle_response(response)
-
-    async def relations(self, uri: str) -> List[Any]:
-        response = await self._http.get(
-            "/api/v1/relations", params={"uri": VikingURI.normalize(uri)}
-        )
-        return self._handle_response(response)
-
-    async def link(self, from_uri: str, to_uris: Union[str, List[str]], reason: str = "") -> None:
-        if isinstance(to_uris, str):
-            to_uris = VikingURI.normalize(to_uris)
-        else:
-            to_uris = [VikingURI.normalize(u) for u in to_uris]
-        response = await self._http.post(
-            "/api/v1/relations/link",
             json={
-                "from_uri": VikingURI.normalize(from_uri),
-                "to_uris": to_uris,
-                "reason": reason,
+                "pattern": pattern,
+                "uri": VikingURI.normalize(uri),
+                "node_limit": node_limit,
             },
         )
-        self._handle_response(response)
-
-    async def unlink(self, from_uri: str, to_uri: str) -> None:
-        response = await self._http.request(
-            "DELETE",
-            "/api/v1/relations/link",
-            json={
-                "from_uri": VikingURI.normalize(from_uri),
-                "to_uri": VikingURI.normalize(to_uri),
-            },
-        )
-        self._handle_response(response)
+        return self._handle_response(response)
 
     async def create_session(
         self,
         session_id: Optional[str] = None,
-        telemetry: Any = False,
-        memory_policy: Optional[Dict[str, Any]] = None,
+        options: Optional[CreateSessionOptions] = None,
     ) -> Dict[str, Any]:
-        json_body: Dict[str, Any] = {}
-        if session_id is not None:
-            json_body["session_id"] = session_id
-        if memory_policy is not None:
-            json_body["memory_policy"] = memory_policy
-        if telemetry is not False:
-            json_body["telemetry"] = telemetry
-        response = await self._http.post("/api/v1/sessions", json=json_body)
+        option_values = dict(options or {})
+        json_body = self._build_options_payload(
+            option_values,
+            CreateSessionOptions,
+            fixed={"session_id": session_id},
+        )
+        if "auto_commit_policy" in option_values:
+            json_body["auto_commit_policy"] = option_values["auto_commit_policy"]
+        response = await self._request("POST", "/api/v1/sessions", json=json_body)
         return self._handle_response_data(response).get("result", {})
 
     async def list_sessions(self) -> List[Any]:
-        response = await self._http.get("/api/v1/sessions")
+        response = await self._request("GET", "/api/v1/sessions")
         return self._handle_response(response)
 
     async def get_session(self, session_id: str, *, auto_create: bool = False) -> Dict[str, Any]:
         params = {"auto_create": "true"} if auto_create else {}
         session_path = self._path_segment(session_id)
-        response = await self._http.get(f"/api/v1/sessions/{session_path}", params=params)
+        response = await self._request("GET", f"/api/v1/sessions/{session_path}", params=params)
         return self._handle_response(response)
+
+    async def update_session_config(
+        self,
+        session_id: str,
+        options: Optional[UpdateSessionConfigOptions] = None,
+    ) -> Dict[str, Any]:
+        option_values = dict(options or {})
+        payload = self._build_options_payload(option_values, UpdateSessionConfigOptions)
+        if "auto_commit_policy" in option_values:
+            payload["auto_commit_policy"] = option_values["auto_commit_policy"]
+        session_path = self._path_segment(session_id)
+        response = await self._request(
+            "PATCH",
+            f"/api/v1/sessions/{session_path}/config",
+            json=payload,
+        )
+        return self._handle_response_data(response).get("result", {})
 
     async def get_session_context(
         self, session_id: str, token_budget: int = 128_000
     ) -> Dict[str, Any]:
         session_path = self._path_segment(session_id)
-        response = await self._http.get(
+        response = await self._request(
+            "GET",
             f"/api/v1/sessions/{session_path}/context",
             params={"token_budget": token_budget},
         )
@@ -1031,18 +1428,24 @@ class AsyncHTTPClient:
     async def get_session_archive(self, session_id: str, archive_id: str) -> Dict[str, Any]:
         session_path = self._path_segment(session_id)
         archive_path = self._path_segment(archive_id)
-        response = await self._http.get(f"/api/v1/sessions/{session_path}/archives/{archive_path}")
+        response = await self._request(
+            "GET", f"/api/v1/sessions/{session_path}/archives/{archive_path}"
+        )
         return self._handle_response(response)
 
     async def delete_session(self, session_id: str) -> None:
         session_path = self._path_segment(session_id)
-        response = await self._http.delete(f"/api/v1/sessions/{session_path}")
+        response = await self._request("DELETE", f"/api/v1/sessions/{session_path}")
         self._handle_response(response)
 
     async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        response = await self._http.get(f"/api/v1/tasks/{task_id}")
+        response = await self._request("GET", f"/api/v1/tasks/{task_id}")
         if response.status_code == 404:
             return None
+        return self._handle_response(response)
+
+    async def cancel_task(self, task_id: str) -> Dict[str, Any]:
+        response = await self._request("POST", f"/api/v1/tasks/{task_id}/cancel")
         return self._handle_response(response)
 
     async def list_tasks(
@@ -1059,20 +1462,42 @@ class AsyncHTTPClient:
             params["status"] = status
         if resource_id is not None:
             params["resource_id"] = resource_id
-        response = await self._http.get("/api/v1/tasks", params=params)
+        response = await self._request("GET", "/api/v1/tasks", params=params)
         return self._handle_response(response)
 
     async def commit_session(
         self,
         session_id: str,
-        telemetry: Any = False,
-        *,
         keep_recent_count: int = 0,
+        options: Optional[CommitSessionOptions] = None,
     ) -> Dict[str, Any]:
+        option_values = dict(options or {})
+        event_tags = option_values.pop("event_tags", _SESSION_CONFIG_UNSET)
+        turn_fields = {
+            "keep_recent_turn_count",
+            "retained_message_token_budget",
+            "min_raw_tail_steps",
+        }
+        if (
+            turn_fields & set(option_values)
+            and option_values.get("retention_mode") != "turn_budget"
+        ):
+            raise ValueError(
+                "retention_mode='turn_budget' is required when Turn retention fields are set"
+            )
+        payload = self._build_options_payload(
+            option_values,
+            CommitSessionOptions,
+            fixed={"keep_recent_count": keep_recent_count},
+            protected={"extraction_metadata"},
+        )
+        if event_tags is not _SESSION_CONFIG_UNSET:
+            payload["extraction_metadata"] = {"event": {"tags": event_tags}}
         session_path = self._path_segment(session_id)
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             f"/api/v1/sessions/{session_path}/commit",
-            json={"keep_recent_count": keep_recent_count, "telemetry": telemetry},
+            json=payload,
         )
         return self._handle_response_data(response).get("result", {})
 
@@ -1080,27 +1505,31 @@ class AsyncHTTPClient:
         self,
         session_id: str,
         role: str,
-        content: str | None = None,
-        parts: list[dict] | None = None,
-        created_at: str | None = None,
-        peer_id: str | None = None,
-        telemetry: Any = False,
+        content: Optional[str] = None,
+        parts: Optional[List[Union[Dict[str, Any], MessagePart]]] = None,
+        options: Optional[AddMessageOptions] = None,
+        peer_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"role": role}
-        if parts is not None:
-            payload["parts"] = parts
-        elif content is not None:
-            payload["content"] = content
-        else:
-            raise ValueError("Either content or parts must be provided")
-        if created_at is not None:
-            payload["created_at"] = created_at
+        if peer_id is not None and options and "peer_id" in options:
+            raise ValueError("options cannot override 'peer_id'")
+        fixed = {
+            "role": role,
+            "content": content,
+            "parts": parts,
+        }
         if peer_id is not None:
-            payload["peer_id"] = peer_id
-        if telemetry is not False:
-            payload["telemetry"] = telemetry
+            fixed["peer_id"] = peer_id
+        payload = self._build_options_payload(
+            options,
+            AddMessageOptions,
+            fixed=fixed,
+            protected={"role", "content", "parts"},
+        )
+        payload = self._normalize_message_payload(payload)
         session_path = self._path_segment(session_id)
-        response = await self._http.post(f"/api/v1/sessions/{session_path}/messages", json=payload)
+        response = await self._request(
+            "POST", f"/api/v1/sessions/{session_path}/messages", json=payload
+        )
         return self._handle_response_data(response).get("result", {})
 
     async def export_ovpack(
@@ -1117,14 +1546,14 @@ class AsyncHTTPClient:
         elif not str(to_path).endswith(".ovpack"):
             to_path = Path(str(to_path) + ".ovpack")
         to_path.parent.mkdir(parents=True, exist_ok=True)
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             "/api/v1/pack/export",
             json={"uri": uri, "include_vectors": include_vectors},
         )
         if not response.is_success:
             self._handle_response(response)
-        with open(to_path, "wb") as f:
-            f.write(response.content)
+        _atomic_write_bytes(to_path, response.content)
         return str(to_path)
 
     async def backup_ovpack(self, to: str, include_vectors: bool = False) -> str:
@@ -1134,13 +1563,12 @@ class AsyncHTTPClient:
         elif not str(to_path).endswith(".ovpack"):
             to_path = Path(str(to_path) + ".ovpack")
         to_path.parent.mkdir(parents=True, exist_ok=True)
-        response = await self._http.post(
-            "/api/v1/pack/backup", json={"include_vectors": include_vectors}
+        response = await self._request(
+            "POST", "/api/v1/pack/backup", json={"include_vectors": include_vectors}
         )
         if not response.is_success:
             self._handle_response(response)
-        with open(to_path, "wb") as f:
-            f.write(response.content)
+        _atomic_write_bytes(to_path, response.content)
         return str(to_path)
 
     async def import_ovpack(
@@ -1161,7 +1589,7 @@ class AsyncHTTPClient:
         if not file_path_obj.is_file():
             raise ValueError(f"Path {file_path} is not a file")
         request_data["temp_file_id"] = await self._upload_temp_file(file_path)
-        response = await self._http.post("/api/v1/pack/import", json=request_data)
+        response = await self._request("POST", "/api/v1/pack/import", json=request_data)
         result = self._handle_response(response)
         return result.get("uri", "")
 
@@ -1182,12 +1610,13 @@ class AsyncHTTPClient:
         if not file_path_obj.is_file():
             raise ValueError(f"Path {file_path} is not a file")
         request_data["temp_file_id"] = await self._upload_temp_file(file_path)
-        response = await self._http.post("/api/v1/pack/restore", json=request_data)
+        response = await self._request("POST", "/api/v1/pack/restore", json=request_data)
         result = self._handle_response(response)
         return result.get("uri", "")
 
     async def check_consistency(self, uri: str) -> Dict[str, Any]:
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             "/api/v1/system/consistency",
             json={"uri": VikingURI.normalize(uri)},
         )
@@ -1195,7 +1624,7 @@ class AsyncHTTPClient:
 
     async def health(self) -> bool:
         try:
-            response = await self._http.get("/health")
+            response = await self._request("GET", "/health")
             data = response.json()
             return data.get("status") == "ok"
         except Exception:
@@ -1206,27 +1635,42 @@ class AsyncHTTPClient:
         uri: str,
         mode: str = "vectors_only",
         wait: bool = True,
+        dry_run: bool = False,
+        recursive: bool = True,
+        options: Optional[ReindexOptions] = None,
     ) -> Dict[str, Any]:
-        response = await self._http.post(
+        payload = self._build_options_payload(
+            options,
+            ReindexOptions,
+            fixed={
+                "uri": VikingURI.normalize(uri),
+                "mode": mode,
+                "wait": wait,
+                "dry_run": dry_run,
+                "recursive": recursive,
+            },
+        )
+        response = await self._request(
+            "POST",
             "/api/v1/content/reindex",
-            json={"uri": uri, "mode": mode, "wait": wait},
+            json=payload,
         )
         return self._handle_response(response)
 
     async def _get_queue_status(self) -> Dict[str, Any]:
-        response = await self._http.get("/api/v1/observer/queue")
+        response = await self._request("GET", "/api/v1/observer/queue")
         return self._handle_response(response)
 
     async def _get_vikingdb_status(self) -> Dict[str, Any]:
-        response = await self._http.get("/api/v1/observer/vikingdb")
+        response = await self._request("GET", "/api/v1/observer/vikingdb")
         return self._handle_response(response)
 
     async def _get_models_status(self) -> Dict[str, Any]:
-        response = await self._http.get("/api/v1/observer/models")
+        response = await self._request("GET", "/api/v1/observer/models")
         return self._handle_response(response)
 
     async def _get_system_status(self) -> Dict[str, Any]:
-        response = await self._http.get("/api/v1/observer/system")
+        response = await self._request("GET", "/api/v1/observer/system")
         return self._handle_response(response)
 
     async def admin_create_account(
@@ -1241,18 +1685,19 @@ class AsyncHTTPClient:
             payload["seed"] = seed
         if user_config is not None:
             payload["user_config"] = user_config
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             "/api/v1/admin/accounts",
             json=payload,
         )
         return self._handle_response(response)
 
     async def admin_list_accounts(self) -> List[Any]:
-        response = await self._http.get("/api/v1/admin/accounts")
+        response = await self._request("GET", "/api/v1/admin/accounts")
         return self._handle_response(response)
 
     async def admin_delete_account(self, account_id: str) -> Dict[str, Any]:
-        response = await self._http.delete(f"/api/v1/admin/accounts/{account_id}")
+        response = await self._request("DELETE", f"/api/v1/admin/accounts/{account_id}")
         return self._handle_response(response)
 
     async def admin_register_user(
@@ -1268,22 +1713,26 @@ class AsyncHTTPClient:
             payload["seed"] = seed
         if user_config is not None:
             payload["user_config"] = user_config
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             f"/api/v1/admin/accounts/{account_id}/users",
             json=payload,
         )
         return self._handle_response(response)
 
     async def admin_list_users(self, account_id: str) -> List[Any]:
-        response = await self._http.get(f"/api/v1/admin/accounts/{account_id}/users")
+        response = await self._request("GET", f"/api/v1/admin/accounts/{account_id}/users")
         return self._handle_response(response)
 
     async def admin_remove_user(self, account_id: str, user_id: str) -> Dict[str, Any]:
-        response = await self._http.delete(f"/api/v1/admin/accounts/{account_id}/users/{user_id}")
+        response = await self._request(
+            "DELETE", f"/api/v1/admin/accounts/{account_id}/users/{user_id}"
+        )
         return self._handle_response(response)
 
     async def admin_set_role(self, account_id: str, user_id: str, role: str) -> Dict[str, Any]:
-        response = await self._http.put(
+        response = await self._request(
+            "PUT",
             f"/api/v1/admin/accounts/{account_id}/users/{user_id}/role",
             json={"role": role},
         )
@@ -1295,14 +1744,111 @@ class AsyncHTTPClient:
         payload: Dict[str, Any] = {}
         if seed is not None:
             payload["seed"] = seed
-        response = await self._http.post(
+        response = await self._request(
+            "POST",
             f"/api/v1/admin/accounts/{account_id}/users/{user_id}/key",
             json=payload,
         )
         return self._handle_response(response)
 
     async def admin_migrate(self, cleanup: bool = False) -> Dict[str, Any]:
-        response = await self._http.post("/api/v1/admin/migrate", json={"cleanup": cleanup})
+        action = "cleanup" if cleanup else "migrate"
+        response = await self._request("POST", "/api/v1/admin/migrate", json={"action": action})
+        return self._handle_response(response)
+
+    async def admin_get_agent_evolution(self) -> Dict[str, Any]:
+        """Return the effective Agent Evolution switch for the caller's account."""
+        response = await self._request("GET", "/api/v1/admin/agent-evolution")
+        return self._handle_response(response)
+
+    async def admin_set_agent_evolution(self, enabled: bool) -> Dict[str, Any]:
+        """Persist and hot-reload Agent Evolution for the caller's account."""
+        response = await self._request(
+            "PUT", "/api/v1/admin/agent-evolution", json={"enabled": enabled}
+        )
+        return self._handle_response(response)
+
+    async def admin_get_account_settings(self, account_id: str) -> Dict[str, Any]:
+        """Return effective and explicitly overridden settings for one account."""
+        response = await self._request("GET", f"/api/v1/admin/accounts/{account_id}/settings")
+        return self._handle_response(response)
+
+    async def admin_set_account_agent_evolution(
+        self, account_id: str, enabled: bool
+    ) -> Dict[str, Any]:
+        """Update the allowlisted Agent Evolution setting for one account."""
+        response = await self._request(
+            "PATCH",
+            f"/api/v1/admin/accounts/{account_id}/settings",
+            json={"agent_evolution": {"enabled": enabled}},
+        )
+        return self._handle_response(response)
+
+    async def list_experience_trajectories(
+        self,
+        experience_uri: str,
+        options: Optional[ExperienceTrajectoryOptions] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"experience_uri": VikingURI.normalize(experience_uri)}
+        params.update(dict(options or {}))
+        response = await self._request(
+            "GET",
+            "/api/v1/agent-evolution/experiences/trajectories",
+            params=params,
+        )
+        return self._handle_response(response)
+
+    async def get_experience_outcomes(
+        self,
+        experience_uri: str,
+        options: Optional[ExperienceOutcomeOptions] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"experience_uri": VikingURI.normalize(experience_uri)}
+        params.update(dict(options or {}))
+        response = await self._request(
+            "GET",
+            "/api/v1/agent-evolution/experiences/outcomes",
+            params=params,
+        )
+        return self._handle_response(response)
+
+    async def resolve_openviking_assets(
+        self,
+        manifest_yaml: str,
+        options: Optional[ResolveAssetsOptions] = None,
+    ) -> Dict[str, Any]:
+        payload = self._build_options_payload(
+            options,
+            ResolveAssetsOptions,
+            fixed={"manifest_yaml": manifest_yaml},
+        )
+        response = await self._request(
+            "POST",
+            "/api/v1/openviking-assets/resolve",
+            json=payload,
+        )
+        return self._handle_response(response)
+
+    async def preflight_openviking_asset(
+        self,
+        name: str,
+        repo_url: str,
+        options: Optional[PreflightAssetOptions] = None,
+    ) -> Dict[str, Any]:
+        payload = self._build_options_payload(
+            options,
+            PreflightAssetOptions,
+            fixed={
+                "name": name,
+                "connector": "git",
+                "repo_url": repo_url,
+            },
+        )
+        response = await self._request(
+            "POST",
+            "/api/v1/openviking-assets/preflight",
+            json=payload,
+        )
         return self._handle_response(response)
 
     def get_status(self) -> Dict[str, Any]:
@@ -1336,7 +1882,7 @@ class AsyncHTTPClient:
             body["author_name"] = author_name
         if author_email is not None:
             body["author_email"] = author_email
-        response = await self._http.post("/api/v1/snapshot/commit", json=body)
+        response = await self._request("POST", "/api/v1/snapshot/commit", json=body)
         return self._handle_response(response)
 
     async def git_restore(
@@ -1364,7 +1910,7 @@ class AsyncHTTPClient:
             body["author_name"] = author_name
         if author_email is not None:
             body["author_email"] = author_email
-        response = await self._http.post("/api/v1/snapshot/restore", json=body)
+        response = await self._request("POST", "/api/v1/snapshot/restore", json=body)
         return self._handle_response(response)
 
     async def git_show(
@@ -1377,7 +1923,7 @@ class AsyncHTTPClient:
         params: Dict[str, Any] = {"target_ref": target_ref}
         if path is not None:
             params["path"] = path
-        response = await self._http.get("/api/v1/snapshot/show", params=params)
+        response = await self._request("GET", "/api/v1/snapshot/show", params=params)
 
         if path is None:
             return self._handle_response(response)
@@ -1398,23 +1944,47 @@ class AsyncHTTPClient:
         *,
         branch: str = "main",
         limit: int = 20,
+        paths: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Walk commit history newest-first."""
-        response = await self._http.get(
+        params: Dict[str, Any] = {"branch": branch, "limit": limit}
+        if paths:
+            params["paths"] = paths
+        response = await self._request(
+            "GET",
             "/api/v1/snapshot/log",
-            params={"branch": branch, "limit": limit},
+            params=params,
+        )
+        return self._handle_response(response)
+
+    async def git_diff(
+        self,
+        path: str,
+        *,
+        to_ref: str,
+        from_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compare one file between two snapshot refs."""
+        params: Dict[str, Any] = {"path": path, "to": to_ref}
+        if from_ref is not None:
+            params["from"] = from_ref
+        response = await self._request(
+            "GET",
+            "/api/v1/snapshot/diff",
+            params=params,
         )
         return self._handle_response(response)
 
     async def git_get_ignore(self) -> str:
         """Return the account ``.ovgitignore`` content (empty string if absent)."""
-        response = await self._http.get("/api/v1/snapshot/ignore")
+        response = await self._request("GET", "/api/v1/snapshot/ignore")
         result = self._handle_response(response)
         return result if isinstance(result, str) else ""
 
     async def git_set_ignore(self, *, content: str) -> None:
         """Write the account ``.ovgitignore`` control file."""
-        response = await self._http.put(
+        response = await self._request(
+            "PUT",
             "/api/v1/snapshot/ignore",
             json={"content": content},
         )
@@ -1422,7 +1992,7 @@ class AsyncHTTPClient:
 
     async def git_delete_ignore(self) -> None:
         """Delete the account ``.ovgitignore`` control file (missing is success)."""
-        response = await self._http.delete("/api/v1/snapshot/ignore")
+        response = await self._request("DELETE", "/api/v1/snapshot/ignore")
         self._handle_response(response)
 
     @property
@@ -1434,6 +2004,8 @@ class AsyncHTTPClient:
 
 
 class SyncHTTPClient:
+    supports_request_actor_peer = True
+
     def __init__(self, *args, **kwargs):
         self._async_client = AsyncHTTPClient(*args, **kwargs)
         self._initialized = False
@@ -1460,67 +2032,38 @@ class SyncHTTPClient:
         path: str,
         to: Optional[str] = None,
         parent: Optional[str] = None,
-        reason: str = "",
-        instruction: str = "",
         wait: bool = False,
         timeout: Optional[float] = None,
-        strict: bool = False,
-        ignore_dirs: Optional[str] = None,
-        include: Optional[str] = None,
-        exclude: Optional[str] = None,
-        directly_upload_media: bool = True,
-        preserve_structure: Optional[bool] = None,
-        watch_interval: float = 0,
-        args: Optional[Dict[str, Any]] = None,
-        telemetry: Any = False,
+        options: Optional[AddResourceOptions] = None,
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.add_resource(
-                path=path,
+                path,
                 to=to,
                 parent=parent,
-                reason=reason,
-                instruction=instruction,
                 wait=wait,
                 timeout=timeout,
-                strict=strict,
-                ignore_dirs=ignore_dirs,
-                include=include,
-                exclude=exclude,
-                directly_upload_media=directly_upload_media,
-                preserve_structure=preserve_structure,
-                watch_interval=watch_interval,
-                args=args,
-                telemetry=telemetry,
+                options=options,
             )
         )
 
     def batch_add_messages(
         self,
         session_id: str,
-        messages: list[dict],
-        telemetry: Any = False,
+        messages: list[Message],
+        options: Optional[BatchAddMessagesOptions] = None,
     ) -> Dict[str, Any]:
-        if telemetry is False:
-            return run_async(self._async_client.batch_add_messages(session_id, messages))
-        return run_async(self._async_client.batch_add_messages(session_id, messages, telemetry))
+        return run_async(self._async_client.batch_add_messages(session_id, messages, options))
 
     def add_skill(
         self,
         data: Any,
         wait: bool = False,
         timeout: Optional[float] = None,
-        telemetry: Any = False,
-        target_uri: Optional[str] = None,
+        options: Optional[AddSkillOptions] = None,
     ) -> Dict[str, Any]:
         return run_async(
-            self._async_client.add_skill(
-                data,
-                wait=wait,
-                timeout=timeout,
-                telemetry=telemetry,
-                target_uri=target_uri,
-            )
+            self._async_client.add_skill(data, wait=wait, timeout=timeout, options=options)
         )
 
     def list_skills(
@@ -1578,12 +2121,14 @@ class SyncHTTPClient:
         include_source: bool = False,
         level: Optional[int] = None,
         target_uri: Optional[str] = None,
+        include_integrity: bool = False,
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.get_skill(
                 skill_name,
                 include_content=include_content,
                 include_files=include_files,
+                include_integrity=include_integrity,
                 include_source=include_source,
                 level=level,
                 target_uri=target_uri,
@@ -1596,19 +2141,11 @@ class SyncHTTPClient:
         data: Any,
         wait: bool = False,
         timeout: Optional[float] = None,
-        source_metadata: Optional[Dict[str, Any]] = None,
-        telemetry: Any = False,
-        target_uri: Optional[str] = None,
+        options: Optional[UpdateSkillOptions] = None,
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.update_skill(
-                skill_name,
-                data,
-                wait=wait,
-                timeout=timeout,
-                source_metadata=source_metadata,
-                telemetry=telemetry,
-                target_uri=target_uri,
+                skill_name, data, wait=wait, timeout=timeout, options=options
             )
         )
 
@@ -1617,9 +2154,7 @@ class SyncHTTPClient:
         skill_name: str,
         target_uri: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return run_async(
-            self._async_client.delete_skill(skill_name, target_uri=target_uri)
-        )
+        return run_async(self._async_client.delete_skill(skill_name, target_uri=target_uri))
 
     def list_watches(
         self,
@@ -1684,6 +2219,8 @@ class SyncHTTPClient:
         abs_limit: int = 256,
         show_all_hidden: bool = False,
         node_limit: int = 1000,
+        sort_by: Optional[str] = None,
+        sort_order: str = "asc",
     ) -> List[Any]:
         return run_async(
             self._async_client.ls(
@@ -1694,6 +2231,8 @@ class SyncHTTPClient:
                 abs_limit=abs_limit,
                 show_all_hidden=show_all_hidden,
                 node_limit=node_limit,
+                sort_by=sort_by,
+                sort_order=sort_order,
             )
         )
 
@@ -1704,6 +2243,7 @@ class SyncHTTPClient:
         abs_limit: int = 128,
         show_all_hidden: bool = False,
         node_limit: int = 1000,
+        level_limit: int = 3,
     ) -> List[Dict[str, Any]]:
         return run_async(
             self._async_client.tree(
@@ -1712,6 +2252,7 @@ class SyncHTTPClient:
                 abs_limit=abs_limit,
                 show_all_hidden=show_all_hidden,
                 node_limit=node_limit,
+                level_limit=level_limit,
             )
         )
 
@@ -1739,6 +2280,12 @@ class SyncHTTPClient:
     def read(self, uri: str, offset: int = 0, limit: int = -1) -> str:
         return run_async(self._async_client.read(uri, offset=offset, limit=limit))
 
+    def read_raw(self, uri: str, offset: int = 0, limit: int = -1) -> str:
+        return run_async(self._async_client.read_raw(uri, offset=offset, limit=limit))
+
+    def download_bytes(self, uri: str) -> bytes:
+        return run_async(self._async_client.download_bytes(uri))
+
     def abstract(self, uri: str) -> str:
         return run_async(self._async_client.abstract(uri))
 
@@ -1752,16 +2299,25 @@ class SyncHTTPClient:
         mode: str = "replace",
         wait: bool = False,
         timeout: Optional[float] = None,
-        telemetry: Any = False,
+        options: Optional[WriteOptions] = None,
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.write(
-                uri=uri,
-                content=content,
-                mode=mode,
-                wait=wait,
-                timeout=timeout,
-                telemetry=telemetry,
+                uri, content, mode=mode, wait=wait, timeout=timeout, options=options
+            )
+        )
+
+    def batch_write(
+        self,
+        root_uri: str,
+        operations: List[Dict[str, Any]],
+        wait: bool = True,
+        timeout: Optional[float] = None,
+        options: Optional[BatchWriteOptions] = None,
+    ) -> Dict[str, Any]:
+        return run_async(
+            self._async_client.batch_write(
+                root_uri, operations, wait=wait, timeout=timeout, options=options
             )
         )
 
@@ -1771,73 +2327,69 @@ class SyncHTTPClient:
         tags: List[str],
         mode: str = "replace",
         recursive: bool = False,
-        telemetry: Any = False,
+        options: Optional[SetTagsOptions] = None,
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.set_tags(
-                uri=uri,
-                tags=tags,
-                mode=mode,
-                recursive=recursive,
-                telemetry=telemetry,
+                uri, tags, mode=mode, recursive=recursive, options=options
             )
         )
 
     def find(
         self,
-        query: str,
+        query: str = "",
         target_uri: Union[str, List[str]] = "",
         limit: int = 10,
-        node_limit: Optional[int] = None,
-        score_threshold: Optional[float] = None,
-        filter: Optional[Dict[str, Any]] = None,
-        context_type: Optional[Any] = None,
-        tags: Optional[List[str]] = None,
-        telemetry: Any = False,
+        image: Any = None,
+        options: Optional[FindOptions] = None,
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.find(
-                query=query,
+                query,
                 target_uri=target_uri,
                 limit=limit,
-                node_limit=node_limit,
-                score_threshold=score_threshold,
-                filter=filter,
-                context_type=context_type,
-                tags=tags,
-                telemetry=telemetry,
+                image=image,
+                options=options,
             )
         )
 
     def search(
         self,
-        query: str,
-        target_uri: Union[str, List[str]] = "",
-        session: Optional[Any] = None,
+        query: str = "",
         session_id: Optional[str] = None,
+        target_uri: Union[str, List[str]] = "",
         limit: int = 10,
-        node_limit: Optional[int] = None,
-        score_threshold: Optional[float] = None,
-        filter: Optional[Dict[str, Any]] = None,
-        context_type: Optional[Any] = None,
-        tags: Optional[List[str]] = None,
-        telemetry: Any = False,
+        image: Any = None,
+        options: Optional[SearchOptions] = None,
     ) -> Dict[str, Any]:
-        actual_session_id = session_id
-        if actual_session_id is None and session is not None:
-            actual_session_id = getattr(session, "session_id", None)
         return run_async(
             self._async_client.search(
-                query=query,
+                query,
+                session_id=session_id,
                 target_uri=target_uri,
-                session_id=actual_session_id,
                 limit=limit,
-                node_limit=node_limit,
-                score_threshold=score_threshold,
-                filter=filter,
-                context_type=context_type,
-                tags=tags,
-                telemetry=telemetry,
+                image=image,
+                options=options,
+            )
+        )
+
+    def search_context(
+        self,
+        query: str = "",
+        session_id: Optional[str] = None,
+        target_uri: Union[str, List[str]] = "",
+        limit: int = 10,
+        image: Any = None,
+        options: Optional[SearchContextOptions] = None,
+    ) -> SearchContextResult:
+        return run_async(
+            self._async_client.search_context(
+                query,
+                session_id=session_id,
+                target_uri=target_uri,
+                limit=limit,
+                image=image,
+                options=options,
             )
         )
 
@@ -1846,7 +2398,7 @@ class SyncHTTPClient:
         uri: str,
         pattern: str,
         case_insensitive: bool = False,
-        node_limit: Optional[int] = None,
+        node_limit: int = 256,
         exclude_uri: Optional[str] = None,
     ) -> Dict[str, Any]:
         return run_async(
@@ -1859,37 +2411,33 @@ class SyncHTTPClient:
             )
         )
 
-    def glob(self, pattern: str, uri: str = "viking://") -> Dict[str, Any]:
-        return run_async(self._async_client.glob(pattern, uri=uri))
-
-    def relations(self, uri: str) -> List[Any]:
-        return run_async(self._async_client.relations(uri))
-
-    def link(self, from_uri: str, to_uris: Union[str, List[str]], reason: str = "") -> None:
-        run_async(self._async_client.link(from_uri, to_uris, reason=reason))
-
-    def unlink(self, from_uri: str, to_uri: str) -> None:
-        run_async(self._async_client.unlink(from_uri, to_uri))
+    def glob(
+        self,
+        pattern: str,
+        uri: str = "viking://",
+        node_limit: int = 256,
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.glob(pattern, uri=uri, node_limit=node_limit))
 
     def create_session(
         self,
         session_id: Optional[str] = None,
-        telemetry: Any = False,
-        memory_policy: Optional[Dict[str, Any]] = None,
+        options: Optional[CreateSessionOptions] = None,
     ) -> Dict[str, Any]:
-        return run_async(
-            self._async_client.create_session(
-                session_id=session_id,
-                telemetry=telemetry,
-                memory_policy=memory_policy,
-            )
-        )
+        return run_async(self._async_client.create_session(session_id, options=options))
 
     def list_sessions(self) -> List[Any]:
         return run_async(self._async_client.list_sessions())
 
     def get_session(self, session_id: str, *, auto_create: bool = False) -> Dict[str, Any]:
         return run_async(self._async_client.get_session(session_id, auto_create=auto_create))
+
+    def update_session_config(
+        self,
+        session_id: str,
+        options: Optional[UpdateSessionConfigOptions] = None,
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.update_session_config(session_id, options))
 
     def get_session_context(self, session_id: str, token_budget: int = 128_000) -> Dict[str, Any]:
         return run_async(self._async_client.get_session_context(session_id, token_budget))
@@ -1902,6 +2450,9 @@ class SyncHTTPClient:
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return run_async(self._async_client.get_task(task_id))
+
+    def cancel_task(self, task_id: str) -> Dict[str, Any]:
+        return run_async(self._async_client.cancel_task(task_id))
 
     def list_tasks(
         self,
@@ -1922,22 +2473,12 @@ class SyncHTTPClient:
     def commit_session(
         self,
         session_id: str,
-        telemetry: Any = False,
-        *,
         keep_recent_count: int = 0,
+        options: Optional[CommitSessionOptions] = None,
     ) -> Dict[str, Any]:
-        if telemetry is False:
-            return run_async(
-                self._async_client.commit_session(
-                    session_id,
-                    keep_recent_count=keep_recent_count,
-                )
-            )
         return run_async(
             self._async_client.commit_session(
-                session_id,
-                telemetry=telemetry,
-                keep_recent_count=keep_recent_count,
+                session_id, keep_recent_count=keep_recent_count, options=options
             )
         )
 
@@ -1945,27 +2486,20 @@ class SyncHTTPClient:
         self,
         session_id: str,
         role: str,
-        content: str | None = None,
-        parts: list[dict] | None = None,
-        created_at: str | None = None,
-        peer_id: str | None = None,
-        telemetry: Any = False,
+        content: Optional[str] = None,
+        parts: Optional[List[Union[Dict[str, Any], MessagePart]]] = None,
+        options: Optional[AddMessageOptions] = None,
+        peer_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        kwargs = {
+        kwargs: Dict[str, Any] = {
             "role": role,
             "content": content,
             "parts": parts,
-            "created_at": created_at,
-            "peer_id": peer_id,
+            "options": options,
         }
-        if telemetry is not False:
-            kwargs["telemetry"] = telemetry
-        return run_async(
-            self._async_client.add_message(
-                session_id,
-                **kwargs,
-            )
-        )
+        if peer_id is not None:
+            kwargs["peer_id"] = peer_id
+        return run_async(self._async_client.add_message(session_id, **kwargs))
 
     def export_ovpack(
         self,
@@ -2019,8 +2553,20 @@ class SyncHTTPClient:
         uri: str,
         mode: str = "vectors_only",
         wait: bool = True,
+        dry_run: bool = False,
+        recursive: bool = True,
+        options: Optional[ReindexOptions] = None,
     ) -> Dict[str, Any]:
-        return run_async(self._async_client.reindex(uri=uri, mode=mode, wait=wait))
+        return run_async(
+            self._async_client.reindex(
+                uri,
+                mode=mode,
+                wait=wait,
+                dry_run=dry_run,
+                recursive=recursive,
+                options=options,
+            )
+        )
 
     def admin_create_account(
         self,
@@ -2078,6 +2624,49 @@ class SyncHTTPClient:
 
     def admin_migrate(self, cleanup: bool = False) -> Dict[str, Any]:
         return run_async(self._async_client.admin_migrate(cleanup=cleanup))
+
+    def admin_get_agent_evolution(self) -> Dict[str, Any]:
+        return run_async(self._async_client.admin_get_agent_evolution())
+
+    def admin_set_agent_evolution(self, enabled: bool) -> Dict[str, Any]:
+        return run_async(self._async_client.admin_set_agent_evolution(enabled))
+
+    def admin_get_account_settings(self, account_id: str) -> Dict[str, Any]:
+        return run_async(self._async_client.admin_get_account_settings(account_id))
+
+    def admin_set_account_agent_evolution(self, account_id: str, enabled: bool) -> Dict[str, Any]:
+        return run_async(self._async_client.admin_set_account_agent_evolution(account_id, enabled))
+
+    def list_experience_trajectories(
+        self,
+        experience_uri: str,
+        options: Optional[ExperienceTrajectoryOptions] = None,
+    ) -> Dict[str, Any]:
+        return run_async(
+            self._async_client.list_experience_trajectories(experience_uri, options)
+        )
+
+    def get_experience_outcomes(
+        self,
+        experience_uri: str,
+        options: Optional[ExperienceOutcomeOptions] = None,
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.get_experience_outcomes(experience_uri, options))
+
+    def resolve_openviking_assets(
+        self,
+        manifest_yaml: str,
+        options: Optional[ResolveAssetsOptions] = None,
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.resolve_openviking_assets(manifest_yaml, options))
+
+    def preflight_openviking_asset(
+        self,
+        name: str,
+        repo_url: str,
+        options: Optional[PreflightAssetOptions] = None,
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.preflight_openviking_asset(name, repo_url, options))
 
     def get_status(self) -> Dict[str, Any]:
         return self._async_client.get_status()
@@ -2164,8 +2753,23 @@ class AsyncHTTPSnapshotNamespace:
         *,
         branch: str = "main",
         limit: int = 20,
+        paths: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        return await self._client.git_log(branch=branch, limit=limit)
+        return await self._client.git_log(branch=branch, limit=limit, paths=paths)
+
+    async def diff(
+        self,
+        path: str,
+        *,
+        to_ref: str,
+        from_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compare one file between two snapshot refs."""
+        return await self._client.git_diff(
+            path,
+            from_ref=from_ref,
+            to_ref=to_ref,
+        )
 
     async def get_gitignore(self) -> str:
         return await self._client.git_get_ignore()
@@ -2241,8 +2845,19 @@ class SyncHTTPSnapshotNamespace:
         *,
         branch: str = "main",
         limit: int = 20,
+        paths: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        return run_async(self._ns().log(branch=branch, limit=limit))
+        return run_async(self._ns().log(branch=branch, limit=limit, paths=paths))
+
+    def diff(
+        self,
+        path: str,
+        *,
+        to_ref: str,
+        from_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compare one file between two snapshot refs."""
+        return run_async(self._ns().diff(path, from_ref=from_ref, to_ref=to_ref))
 
     def get_gitignore(self) -> str:
         return run_async(self._ns().get_gitignore())
