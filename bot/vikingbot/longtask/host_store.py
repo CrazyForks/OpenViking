@@ -128,6 +128,16 @@ class HostStore:
 
     def begin_operation(self, task_id: str, turn_id: str, kind: str, intent: Any) -> str:
         self.assert_authorized(task_id)
+        return self._record_operation(task_id, turn_id, kind, intent)
+
+    def begin_control_operation(self, task_id: str, owner: str, origin: str, intent: Any) -> str:
+        """Owner-authorized control writes may run while execution is paused."""
+        row = self.get(task_id)
+        if (row["owner"], row["origin"]) != (owner, origin):
+            raise ValueError("Unknown long task in this conversation")
+        return self._record_operation(task_id, uuid.uuid4().hex, "control", intent)
+
+    def _record_operation(self, task_id: str, turn_id: str, kind: str, intent: Any) -> str:
         operation_id = uuid.uuid4().hex
         with self.db:
             self.db.execute(
@@ -142,6 +152,17 @@ class HostStore:
                 ),
             )
         return operation_id
+
+    def latest_waiting_todo(self, task_id: str) -> str | None:
+        row = self.db.execute(
+            "SELECT result FROM host_events WHERE task_id=? AND kind='settlement' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        result = json.loads(row[0])
+        return result.get("todo_id") if result.get("blocked") else None
 
     def end_operation(self, operation_id: str, result: Any) -> None:
         with self.db:

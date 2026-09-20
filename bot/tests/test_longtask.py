@@ -174,6 +174,30 @@ def _context(user="owner"):
     )
 
 
+def test_task_config_preserves_root_vlm_runtime_and_isolates_overrides(tmp_path):
+    from vikingbot.config.schema import SandboxMode
+
+    from openviking_cli.utils.config.vlm_config import VLMConfig
+
+    service = _service(tmp_path)
+    runtime = VLMConfig()
+    service.config.set_root_vlm_config(runtime)
+    service.config.set_inherits_root_vlm(True)
+    service.config.sandbox.mode = SandboxMode.SHARED
+    service.config.agents.subagent_enabled = True
+    task_config = service._task_config()
+    assert task_config.get_root_vlm_config() is runtime
+    assert task_config.inherits_root_vlm()
+    assert task_config.sandbox is not service.config.sandbox
+    assert task_config.agents is not service.config.agents
+    assert task_config.sandbox.mode == SandboxMode.PER_SESSION
+    assert task_config.agents.subagent_enabled is False
+    assert service.config.sandbox.mode == SandboxMode.SHARED
+    assert service.config.agents.subagent_enabled is True
+    # Client construction previously failed before any LoopX command was issued.
+    assert service._client("lt_config_test").project.is_relative_to(service.root)
+
+
 @pytest.mark.asyncio
 async def test_only_one_host_can_prepare_workflows(tmp_path, monkeypatch):
     validate = AsyncMock(return_value={})
@@ -209,6 +233,37 @@ async def test_owner_check_and_pause_revokes_before_cli_failure(tmp_path, monkey
         await service.control(_context(), task_id, "pause")
     assert not service.store.get(task_id)["authorized"]
     await service.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_resume_failure_is_not_replayed(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    service.store = HostStore(service.root / "host.db")
+    task_id = (await service.create(_context(), "goal", "req"))["task_id"]
+    operation = service.store.begin_operation(task_id, "wait-turn", "settlement", {})
+    service.store.end_operation(operation, {"blocked": "Need owner input", "todo_id": "todo_wait"})
+    service.store.update(task_id, initialized=1, authorized=0)
+    commands = []
+
+    async def call(*args):
+        commands.append(args[:2])
+        if args[:2] == ("todo", "list"):
+            return {"todo": {"todo_id": "todo_wait", "status": "blocked"}}
+        raise LoopXError("Write response lost")
+
+    monkeypatch.setattr(service, "_client", lambda _: SimpleNamespace(call=call))
+    try:
+        with pytest.raises(LoopXError, match="response lost"):
+            await service.control(_context(), task_id, "resume", "Confirmed")
+        assert not service.store.get(task_id)["authorized"]
+        assert len(service.store.unresolved(task_id)) == 1
+        with pytest.raises(ValueError, match="reconciliation"):
+            await service.control(_context(), task_id, "resume", "Confirmed")
+        assert commands == [("todo", "list"), ("todo", "supersede")]
+        with pytest.raises(ValueError, match="Unknown long task"):
+            service.store.begin_control_operation(task_id, "someone_else", "chat", {})
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
@@ -372,6 +427,92 @@ async def test_real_loopx_two_round_delivery_and_completion(tmp_path):
         assert calls == 2
         assert row["rounds"] == 2
         assert not service.store.unresolved(task_id)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("VIKINGBOT_LOOPX_TEST") != "1", reason="Requires LoopX 1.0.5 and qualified Node"
+)
+@pytest.mark.parametrize("work_before_wait", [True, False])
+async def test_real_loopx_wait_restart_resume_and_complete(tmp_path, work_before_wait):
+    service = _service(tmp_path)
+    await service.initialize()
+    task_id = (
+        await service.create(
+            _context(), "Create two files; wait for owner confirmation; verify", "req"
+        )
+    )["task_id"]
+    calls = 0
+
+    async def execute(turn, row, decision):
+        nonlocal calls
+        calls += 1
+        workspace = service._client(task_id).project
+        if calls == 1:
+            (workspace / "a.txt").write_text("LOOPX_A")
+        elif calls == 2:
+            if work_before_wait:
+                (workspace / "b.txt").write_text("LOOPX_B")
+            turn.proposal = {
+                "summary": "Waiting for owner confirmation",
+                "evidence": "No confirmation received; goal acceptance remains incomplete",
+                "goal_complete": False,
+                "blocked_reason": "Owner must provide acceptance confirmation",
+            }
+            return {"text": "waiting", "usage": {}, "iterations": 1}
+        else:
+            assert calls == 3
+            assert row["latest_input"] == "VIKING_OK_2026"
+            assert (workspace / "a.txt").read_text() == "LOOPX_A"
+            if not work_before_wait:
+                (workspace / "b.txt").write_text("LOOPX_B")
+            assert (workspace / "b.txt").read_text() == "LOOPX_B"
+            (workspace / "result.md").write_text("LOOPX_A LOOPX_B " + row["latest_input"])
+        operation = service.store.begin_operation(task_id, turn.turn_id, "tool", {"readback": True})
+        service.store.end_operation(operation, {"verified": True})
+        turn.proposal = {
+            "summary": "Verified first file" if calls == 1 else "All acceptance criteria verified",
+            "evidence": "Read back files and verified exact contents",
+            "validation_operation_id": operation,
+            "goal_complete": calls == 3,
+        }
+        if calls == 1:
+            turn.proposal["next_todo"] = "Prepare second file then wait for owner confirmation"
+        return {"text": "", "usage": {}, "iterations": 1}
+
+    service._execute = execute
+    try:
+        await service._tick(task_id)
+        await service._tick(task_id)
+        row = service.store.get(task_id)
+        assert row["rounds"] == 2 and not row["authorized"] and not row["terminal"]
+        assert not service.store.unresolved(task_id)
+        blocked_id = service.store.latest_waiting_todo(task_id)
+        assert blocked_id
+        readback = await service._client(task_id).call(
+            "todo", "list", "--goal-id", task_id, "--todo-id", blocked_id
+        )
+        assert readback["todo"]["status"] == "blocked"
+        writes = service.store.db.execute(
+            "SELECT intent FROM host_events WHERE task_id=? AND kind='loopx_write'", (task_id,)
+        ).fetchall()
+        assert sum(json.loads(row[0])[:2] == ["quota", "spend-slot"] for row in writes) == 1
+        await service.close()
+        service = _service(tmp_path)
+        await service.initialize()
+        service._execute = execute
+        assert not service.store.get(task_id)["authorized"]
+        await service.control(_context(), task_id, "resume", "VIKING_OK_2026")
+        await service.control(_context(), task_id, "resume")
+        await service._tick(task_id)
+        await service._tick(task_id)
+        row = service.store.get(task_id)
+        assert row["terminal"], row["last_decision"]
+        assert row["rounds"] == 3 and calls == 3
+        assert not service.store.unresolved(task_id)
+        assert "VIKING_OK_2026" in (service._client(task_id).project / "result.md").read_text()
     finally:
         await service.close()
 
@@ -557,6 +698,8 @@ async def test_worker_executes_real_file_tools_with_task_scoped_session(tmp_path
     from vikingbot.longtask.runner import Turn
     from vikingbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
+    from openviking_cli.utils.config.vlm_config import VLMConfig
+
     class MainOnlyTool(Tool):
         name = "mcp_main_only"
         description = "A main-agent tool that must not be inherited by workers"
@@ -609,6 +752,7 @@ async def test_worker_executes_real_file_tools_with_task_scoped_session(tmp_path
     connect_mcp = AsyncMock(side_effect=AssertionError("Worker must not connect to MCP"))
     monkeypatch.setattr(AgentLoop, "_connect_mcp", connect_mcp)
     config = Config(storage_workspace=str(tmp_path))
+    config.set_root_vlm_config(VLMConfig())
     config.agents.session_context_enabled = False
     config.agents.subagent_enabled = True
     config.tools.cron.enabled = True

@@ -67,6 +67,8 @@ docker build --build-arg INSTALL_LONGTASK=true --build-arg UV_LOCK_STRATEGY=lock
 
 中间 Todo 的顺序是“完成并建立下一步 → 写回 → 结算”；最后一个 Todo 按 LoopX 协议先写回、结算，再关闭。整个过程使用同一个 turn ID。
 
+**等待用户也是一次正式收尾**：Bot 先通过 LoopX 将当前 Todo 标为 `blocked`，确认成功后才暂停并通知用户，不补扣交付额度。用户恢复时，通过官方 `supersede` 接口把未完成工作交给后继 Todo，再继续执行；旧 Todo 保留替换关系，不能直接改回 `open`。长任务 ID、会话和已有产物不变。恢复写入结果不明时停止，不自动重复创建后继 Todo。
+
 ## 默认限制与恢复
 
 | 配置 | 默认 |

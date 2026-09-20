@@ -76,10 +76,19 @@ class LongTaskService:
         return context.sender_id, context.session_key.model_dump_json()
 
     def _task_config(self):
-        config = self.config.model_copy(deep=True)
-        config.sandbox.mode = SandboxMode.PER_SESSION
-        config.agents.subagent_enabled = False
-        return config
+        # Root VLM configuration carries shared runtime clients and thread locks.
+        # Copy only the configuration branches overridden by the task; runtime
+        # resources keep their identity and the main agent's settings stay intact.
+        return self.config.model_copy(
+            update={
+                "sandbox": self.config.sandbox.model_copy(
+                    deep=True, update={"mode": SandboxMode.PER_SESSION}
+                ),
+                "agents": self.config.agents.model_copy(
+                    deep=True, update={"subagent_enabled": False}
+                ),
+            }
+        )
 
     def _sandbox(self, task_id: str):
         from vikingbot.sandbox.manager import SandboxManager
@@ -177,6 +186,8 @@ class LongTaskService:
                     )
                     self._wake.set()
                 return {"task_id": task_id, "action": action, "confirmed": True}
+            if action == "resume":
+                await self._resume_waiting_todo(task_id, owner, origin)
             result = await self._client(task_id).call(
                 "goal-lifecycle",
                 "--goal-id",
@@ -200,6 +211,45 @@ class LongTaskService:
                 )
                 self._wake.set()
         return {"task_id": task_id, "action": action, "confirmed": True}
+
+    async def _resume_waiting_todo(self, task_id: str, owner: str, origin: str) -> None:
+        todo_id = self.store.latest_waiting_todo(task_id)
+        if todo_id is None:
+            return
+        client = self._client(task_id)
+        readback = await client.call("todo", "list", "--goal-id", task_id, "--todo-id", todo_id)
+        todo = readback.get("todo", {})
+        if todo.get("todo_id") != todo_id:
+            raise LoopXError("Waiting Todo readback identity mismatch")
+        # An earlier successful owner request may already have replaced it.
+        if todo.get("status") == "done" and todo.get("superseded_by"):
+            return
+        if todo.get("status") != "blocked":
+            raise LoopXError("Waiting Todo is not blocked; inspect its lifecycle before resuming")
+        args = (
+            "todo",
+            "supersede",
+            "--goal-id",
+            task_id,
+            "--agent-id",
+            task_id,
+            "--todo-id",
+            todo_id,
+            "--reason",
+            "Owner requested continuation after a blocked round",
+            "--next-agent-todo",
+            "Resume unfinished work within the original objective using the latest owner input. "
+            "Inspect existing artifacts before further changes; verify all acceptance criteria.",
+            "--next-action-kind",
+            "deliver_artifact",
+            "--next-claimed-by",
+            task_id,
+        )
+        operation = self.store.begin_control_operation(task_id, owner, origin, list(args))
+        result = await client.call(*args)
+        if result.get("todo_id") != todo_id or not result.get("superseded_by"):
+            raise LoopXError("Waiting Todo successor was not confirmed")
+        self.store.end_operation(operation, result)
 
     async def run(self) -> None:
         while True:
@@ -416,10 +466,32 @@ class LongTaskService:
         selected = decision.get("selected_todo")
         terminal_completion_args = None
         if proposal.get("blocked_reason"):
-            # The host's authorization stop is independent of LoopX lifecycle state.
-            # No spend and no fake completion for a blocked round.
+            if not selected:
+                raise LoopXError("A blocked replan without a bound Todo requires operator handling")
+            # A typed lifecycle transition closes the admitted turn without
+            # pretending work is complete or spending a delivery quota slot.
+            blocked = await checked_call(
+                "todo",
+                "update",
+                "--goal-id",
+                turn.task_id,
+                "--agent-id",
+                turn.task_id,
+                "--todo-id",
+                selected["todo_id"],
+                "--status",
+                "blocked",
+                "--reason",
+                proposal["blocked_reason"],
+                "--evidence",
+                proposal["evidence"],
+            )
+            if blocked.get("todo_id") != selected["todo_id"] or blocked.get("status") != "blocked":
+                raise LoopXError("LoopX blocked Todo transition was not confirmed")
             self.store.update(turn.task_id, authorized=0, reason=proposal["blocked_reason"])
-            self.store.end_operation(operation, {"blocked": proposal["blocked_reason"]})
+            self.store.end_operation(
+                operation, {"blocked": proposal["blocked_reason"], "todo_id": selected["todo_id"]}
+            )
             self.store.notify(
                 turn.task_id, f"长任务 {turn.task_id} 需要你处理：{proposal['blocked_reason']}"
             )
