@@ -1,0 +1,267 @@
+"""Focused pipeline children using the existing AgentLoop and isolated file tools."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from copy import copy
+
+import json_repair
+
+from vikingbot.agent.tools.base import Tool
+from vikingbot.agent.tools.compile import CompileChildTool
+from vikingbot.agent.tools.registry import ToolRegistry
+from vikingbot.compile.models import COMPILE_DRAFT_ROOT
+from vikingbot.compile.plan import (
+    FileResponse,
+    InputReferenceError,
+    RecordResponse,
+    content_hash,
+    result_schema,
+)
+from vikingbot.compile.renderer import validate_relative_file_path
+from vikingbot.compile.skill_resources import EvidenceReader, SkillScript
+from vikingbot.providers.base import LLMProvider
+
+
+class ChildProvider(LLMProvider):
+    """Route each child request through the task's bounded, metered provider calls."""
+
+    def __init__(self, model, schema, stage="agent", *, submit=None):
+        super().__init__()
+        self.model = model
+        self.stage = stage
+        self.submit = submit
+
+    def get_default_model(self):
+        return self.model.model
+
+    async def chat(self, messages, tools=None, **kwargs):
+        """Meter requests and stop exhausted input-reference repairs before calling the model."""
+        if self.submit is not None and self.submit.repair_calls_remaining is not None:
+            if self.submit.repair_calls_remaining == 0:
+                raise ValueError("Input reference repair exhausted two model requests")
+            self.submit.repair_calls_remaining -= 1
+        response = await self.model.call(
+            self.stage, messages, tools, max_tokens=self.model.max_tokens
+        )
+        if response.finish_reason in {"length", "max_tokens"}:
+            raise ValueError("Agent output was truncated; partial tool calls cannot be executed")
+        return response
+
+
+async def complete_tool_result(result, session_key):
+    """Keep scoped tool evidence complete for subsequent model requests.
+
+    Child file tools cannot read shared preview spill files, so head/tail previews
+    are not a lossless delivery mechanism for these isolated assignments.
+    """
+    return result
+
+
+class EmitResult(Tool):
+    """Validate one child's typed result; two failed submissions exhaust its repair budget."""
+
+    name = "emit"
+    description = "Submit the complete typed transformation result."
+
+    def __init__(
+        self,
+        schema,
+        validate,
+        sandbox=None,
+        root="",
+        data=None,
+        metrics=None,
+    ):
+        self.schema, self.validate = schema, validate
+        self.sandbox, self.root = sandbox, root
+        self.result = None
+        self.failures = 0
+        self.last_error = ""
+        # None leaves normal generation unchanged; reference repairs allow edit then emit.
+        self.repair_calls_remaining: int | None = None
+        self.data = data or {}
+        self.metrics = metrics
+
+    @property
+    def parameters(self):
+        parameters = result_schema(self.schema, self.data)
+        parameters["properties"]["result_ref"] = {
+            "type": "string",
+            "description": "Alternative to inline fields: relative path to a complete JSON result "
+            "in your scratch directory, matching this result schema. Use for large record collections.",
+        }
+        parameters["required"] = []
+        return parameters
+
+    async def execute(self, tool_context, **kwargs):
+        """Return bounded validation feedback; only valid output terminates the child."""
+        try:
+            if (
+                set(kwargs) == {"raw"}
+                and isinstance(kwargs["raw"], str)
+                and "raw" not in self.schema.model_fields
+            ):
+                kwargs = json_repair.loads(kwargs["raw"], stream_stable=True)
+            if isinstance(kwargs, dict) and "result_ref" in kwargs:
+                if len(kwargs) != 1 or self.sandbox is None:
+                    raise ValueError("result_ref is an alternative to all inline result fields")
+                relative = validate_relative_file_path(kwargs["result_ref"])
+                raw = await self.sandbox.read_file_bytes(
+                    f"{self.root}/{relative}", max_bytes=8 * 1024 * 1024
+                )
+                kwargs = json_repair.loads(raw.decode("utf-8"), stream_stable=True)
+            result = self.schema.model_validate(kwargs)
+            if isinstance(result, RecordResponse):
+                total_bytes = 0
+                for draft in result.records:
+                    if draft.ready_content_ref is not None:
+                        if self.sandbox is None or draft.ready_content is not None:
+                            raise ValueError(
+                                "Ready file reference requires scratch access without inline text"
+                            )
+                        relative = validate_relative_file_path(draft.ready_content_ref)
+                        raw = await self.sandbox.read_file_bytes(
+                            f"{self.root}/{relative}", max_bytes=8 * 1024 * 1024
+                        )
+                        total_bytes += len(raw)
+                        if total_bytes > 16 * 1024 * 1024:
+                            raise ValueError("Ready artifacts exceed 16 MiB per submission")
+                        draft.ready_content = raw.decode("utf-8")
+                        draft.ready_content_ref = None
+            if isinstance(result, FileResponse):
+                total_bytes = 0
+                for draft in result.files:
+                    if draft.content_ref is not None:
+                        if self.sandbox is None or draft.content is not None or draft.patches:
+                            raise ValueError(
+                                "File reference requires scratch access without content/patches"
+                            )
+                        relative = validate_relative_file_path(draft.content_ref)
+                        raw = await self.sandbox.read_file_bytes(
+                            f"{self.root}/{relative}", max_bytes=8 * 1024 * 1024
+                        )
+                        total_bytes += len(raw)
+                        if total_bytes > 16 * 1024 * 1024:
+                            raise ValueError("Child artifacts exceed 16 MiB")
+                        actual = content_hash(raw)
+                        if draft.content_sha256 and draft.content_sha256 != actual:
+                            raise ValueError("Scratch artifact hash mismatch")
+                        draft.content, draft.content_sha256 = raw.decode("utf-8"), actual
+                        draft.content_ref = None
+            if self.validate:
+                self.validate(result)
+            self.result = result
+            return "Result accepted."
+        except (ValueError, OSError) as exc:
+            self.failures += 1
+            if self.metrics is not None:
+                self.metrics["validation_failures"] += 1
+                if self.failures == 1:
+                    self.metrics["repairs"] += 1
+            self.last_error = str(exc)[:1600]
+            feedback = "Error: " + self.last_error
+            if isinstance(exc, InputReferenceError) and self.schema is FileResponse:
+                if self.repair_calls_remaining is None:
+                    self.repair_calls_remaining = 2
+                feedback += (
+                    f"\nAt most {self.repair_calls_remaining} model requests remain. "
+                    "Correct only input references/dispositions, preserve the body, then emit. "
+                    "Do not guess source attribution or reread unchanged files."
+                )
+            if (
+                self.failures == 1
+                and self.sandbox is not None
+                and isinstance(kwargs, dict)
+                and "result_ref" not in kwargs
+            ):
+                # Keep complete rejected data private; edits still pass every emit validator.
+                candidate = f"rejected-{uuid.uuid4().hex}.json"
+                try:
+                    content = (
+                        kwargs["raw"]
+                        if set(kwargs) == {"raw"} and isinstance(kwargs["raw"], str)
+                        else json.dumps(kwargs, ensure_ascii=False)
+                    )
+                    await self.sandbox.write_file(f"{self.root}/{candidate}", content)
+                    feedback += (
+                        f"\nRepair {candidate} with edit_file, then emit only "
+                        f'{{"result_ref":"{candidate}"}}.'
+                    )
+                except (OSError, ValueError):
+                    pass
+            return feedback
+
+
+def agent_runner(loop, session_key, connection, limits):
+    """Bind an isolated child adapter; queueing/cancellation remain owned by Pipeline.
+
+    Each call has fresh history, a private scratch root and the existing subagent
+    iteration limit. Large files are submitted by reference, then hashed and checked.
+    Skill reads use the authenticated task client; source/history catalogs stay hidden.
+    """
+
+    async def run(system, data, schema, validate, model, *, stage="agent"):
+        child_id = uuid.uuid4().hex
+        root = f"{COMPILE_DRAFT_ROOT}/{child_id}"
+        evidence = EvidenceReader(model.files, data)
+        submit = EmitResult(schema, validate, model.files.sandbox, root, data, model.metrics)
+        registry = ToolRegistry(config=loop.config)
+        registry.register(submit)
+        if model.resources:
+            registry.register(model.resources)
+            registry.register(SkillScript(model.resources))
+        if evidence.allowed - evidence.delivered:
+            registry.register(evidence)
+        for name in ("read_file", "write_file", "edit_file"):
+            tool = loop.tools.get(name)
+            if tool is not None:
+                registry.register(CompileChildTool(tool, root, merge_only=True))
+        child = copy(loop)
+        child.provider = ChildProvider(model, schema, stage, submit=submit)
+        child._preview_tool_result = complete_tool_result
+        await child._run_agent_loop(
+            messages=[
+                {
+                    "role": "system",
+                    "content": system
+                    + "\nUse emit to submit. Supplied Skill attachments are complete; "
+                    "they fulfill the Skill's reading requirements without a tool call. Do not reread them. "
+                    "read_skill_resource is available for additional references. "
+                    "Only assigned evidence and your isolated scratch files are available. "
+                    "Prefer one inline emit for small finished results; scratch writing and rereading "
+                    "are optional, not mandatory verification steps. "
+                    "Write large/multiple files using write_file, then emit content_ref paths "
+                    "relative to your scratch root, without repeating their content. Runtime hashes "
+                    "the files and validates paths, revisions and source coverage before acceptance. "
+                    "For a large record collection, build a JSON result file incrementally with file "
+                    "tools, then emit only result_ref pointing to that file. Finished independent Map "
+                    "files may use ready_path plus ready_content_ref and concise routing payloads. "
+                    "Use run_skill_script for Python scripts supplied by the selected Skill. "
+                    "Scratch files are data; writing a script does not execute it. "
+                    "Use edit_file to repair existing JSON.",
+                },
+                {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+            ],
+            session_key=session_key,
+            publish_events=False,
+            tool_registry=registry,
+            stop_tool_names=["emit"],
+            openviking_tool_names=set(),
+            openviking_connection=connection,
+            allow_final_fallback=False,
+            inject_write_experience=False,
+            agent_id=child_id,
+            context_compact_budget=None,
+            max_iterations=limits.subagent_iterations,
+            should_stop=lambda: submit.failures >= 2,
+        )
+        if submit.result is None:
+            raise ValueError(
+                "Required agent transform ended without validated output: "
+                + (submit.last_error or "No emit result was submitted")
+            )
+        return submit.result
+
+    return run

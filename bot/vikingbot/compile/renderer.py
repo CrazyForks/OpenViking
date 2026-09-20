@@ -217,15 +217,25 @@ def _wiki_page_basename(uri: str) -> str:
     return name[:-3] if name.casefold().endswith(".md") else name
 
 
-def _wiki_mention_targets(uris: set[str]) -> dict[str, str]:
-    """Return unambiguous basename -> URI targets, excluding the root index."""
+def _wiki_mention_targets(uris: set[str]) -> dict[str, tuple[str, re.Pattern[str], str]]:
+    """Return unique basename targets and patterns shared by a render batch, excluding indexes."""
     grouped: dict[str, list[tuple[str, str]]] = {}
     for uri in sorted(uris):
         name = _wiki_page_basename(uri).strip()
         if not name or name.casefold() == "index":
             continue
         grouped.setdefault(name.casefold(), []).append((name, uri))
-    return {items[0][0]: items[0][1] for items in grouped.values() if len(items) == 1}
+    return {
+        name: (
+            uri,
+            re.compile(re.escape(name), re.IGNORECASE),
+            # Han characters have no case variants; absence rules out a regex match.
+            max(re.findall(r"[\u3400-\u9fff]+", name), key=len, default=""),
+        )
+        for items in grouped.values()
+        if len(items) == 1
+        for name, uri in items
+    }
 
 
 def _has_link_to(body: str, source_uri: str, target_uri: str) -> bool:
@@ -249,7 +259,7 @@ def _link_wiki_mentions(
     content: str,
     *,
     source_uri: str,
-    targets: Mapping[str, str],
+    targets: Mapping[str, tuple[str, re.Pattern[str], str]],
 ) -> tuple[str, int]:
     """Link the first body mention of each unambiguous Wiki filename."""
     frontmatter = _FRONTMATTER_RE.match(content)
@@ -267,8 +277,11 @@ def _link_wiki_mentions(
             "to_uri": target_uri,
             "weight": len(name),
         }
-        for name, target_uri in targets.items()
-        if target_uri != source_uri and not _has_link_to(body, source_uri, target_uri)
+        for name, (target_uri, pattern, literal) in targets.items()
+        if target_uri != source_uri
+        and literal in body
+        and pattern.search(body)
+        and not _has_link_to(body, source_uri, target_uri)
     ]
     rendered, count = LinkRenderer.render_links_with_count(body, source_uri, links)
     return prefix + rendered, count
@@ -326,10 +339,60 @@ def _link_uri(target: str, source_uri: str) -> str:
     return "viking://" + posixpath.normpath(posixpath.join(directory, target))
 
 
+def relocate_wiki_links(content, *, origin, path, target_uri, relocations, known_paths):
+    """Rebase draft links using accepted assignments, without guessing historical moves.
+
+    Only exact draft destinations and known final files can be rebased. Ambiguous
+    draft paths, external links and unknown targets remain unchanged for diagnostics.
+    Frontmatter, labels, tooltips, fragments and protected Markdown remain intact.
+    """
+    _, body = _split_frontmatter(content)
+    prefix = content[: len(content) - len(body)]
+    source_uri = safe_join_viking_uri(target_uri, origin)
+    for link in reversed(_body_markdown_links(body)):
+        target = link.target.strip().removeprefix("<").removesuffix(">")
+        if target.startswith(("/", "#", "?")) or re.match(r"^[A-Za-z][\w+.-]*:", target):
+            continue
+        raw_path = re.split(r"[#?]", target, maxsplit=1)[0]
+        resolved = relative_uri_path(target_uri, _link_uri(raw_path, source_uri))
+        destination = relocations.get(resolved, resolved)
+        if destination not in known_paths:
+            continue
+        relative = posixpath.relpath(destination, posixpath.dirname(path) or ".")
+        relative = re.sub(r"[\x00-\x7f\s]+", lambda m: quote(m[0], safe="/,-._~"), relative)
+        relative += target[len(raw_path) :]
+        start = body.index("](", link.start, link.end) + 2
+        body = (
+            body[:start]
+            + body[start : link.end].replace(link.target, relative, 1)
+            + body[link.end :]
+        )
+    return prefix + body
+
+
 def _append_link_list(
-    body: str, kind: str, source_uri: str, entries: Mapping[str, str]
+    body: str,
+    kind: str,
+    source_uri: str,
+    entries: Mapping[str, str],
+    *,
+    preserve_existing: bool = False,
 ) -> tuple[str, int]:
     """Render plain Markdown links and return their count; navigation replaces its heading section."""
+    if kind == "navigation" and preserve_existing:
+        linked = {_link_uri(link.target, source_uri) for link in _body_markdown_links(body)}
+        lines = [
+            "- " + text for uri, text in entries.items() if _link_uri(uri, source_uri) not in linked
+        ]
+        if not lines:
+            return body, 0
+        section = re.search(r"(?ms)^## (?:分类导航|Navigation)[ \t]*\n.*?(?=^## |\Z)", body)
+        if section:
+            point = section.end()
+            return body[:point].rstrip() + "\n" + "\n".join(lines) + "\n\n" + body[point:], len(
+                lines
+            )
+        return body.rstrip() + "\n\n## Navigation\n\n" + "\n".join(lines) + "\n", len(lines)
     pattern = rf"\n*<!-- ov-compile:{kind}:start -->.*?<!-- ov-compile:{kind}:end -->\n*"
     clean = re.sub(pattern, "\n\n", body, flags=re.DOTALL).rstrip()
     if kind == "navigation":
@@ -366,6 +429,7 @@ def _repair_relative_links(
     pages: Mapping[str, Mapping[str, Any]],
     known_paths: set[str],
     paths_by_name: Mapping[str, list[str]],
+    verified_missing: set[str] | None = None,
 ) -> tuple[str, int, list[dict[str, Any]]]:
     """Correct only unique filenames confirmed by the link label; retain and report other broken paths."""
     source_uri = safe_join_viking_uri(target_uri, source_path)
@@ -379,7 +443,11 @@ def _repair_relative_links(
         if not resolved or resolved in known_paths:
             continue
         name = posixpath.basename(resolved)
-        candidates = paths_by_name.get(name, [])
+        candidates = (
+            paths_by_name.get(name, [])
+            if verified_missing is None or resolved in verified_missing
+            else []
+        )
         candidate = candidates[0] if len(candidates) == 1 else None
         metadata = pages.get(candidate, {})
         aliases = metadata.get("aliases")
@@ -443,6 +511,9 @@ def finalize_resource_output(
     source_roots: Mapping[str, str],
     existing_files: Mapping[str, bytes] | None = None,
     known_paths: set[str] | None = None,
+    partial_catalog: bool = False,
+    source_uris_by_path: Mapping[str, list[str]] | None = None,
+    verified_missing_paths: set[str] | None = None,
 ) -> FinalizedOutput:
     """Finalize Wiki links without model calls or modifying unrelated retained files.
 
@@ -516,7 +587,9 @@ def finalize_resource_output(
             target_uri=target_uri,
             pages=pages,
             known_paths=catalog_paths,
+            # An unrecalled destination can exist; matching basenames do not prove a move.
             paths_by_name=paths_by_name,
+            verified_missing=(verified_missing_paths or set()) if partial_catalog else None,
         )
         report["repaired_count"] += repaired
         report["unresolved"].extend(unresolved)
@@ -527,9 +600,10 @@ def finalize_resource_output(
             targets=mention_targets,
         )
         body = content[len(prefix) :]
-        body, source_count = _append_link_list(
-            body, "sources", uri, _source_link_entries(pages[path], target_uri)
-        )
+        source_entries = _source_link_entries(pages[path], target_uri)
+        for source in (source_uris_by_path or {}).get(path, []):
+            source_entries.setdefault(source, _markdown_link(_wiki_page_basename(source), source))
+        body, source_count = _append_link_list(body, "sources", uri, source_entries)
         report["source_links"] += source_count
         navigation_count = 0
         if pages[path]["type"] == "index":
@@ -555,7 +629,9 @@ def finalize_resource_output(
                 for page, metadata in sorted(pages.items())
                 if page != path and posixpath.dirname(page.removesuffix("/index.md")) == directory
             }
-            body, navigation_count = _append_link_list(body, "navigation", uri, entries)
+            body, navigation_count = _append_link_list(
+                body, "navigation", uri, entries, preserve_existing=partial_catalog
+            )
             report["navigation_links"] += navigation_count
         payload = (prefix + body).encode("utf-8")
         if path in files or existing_files.get(path) != payload:

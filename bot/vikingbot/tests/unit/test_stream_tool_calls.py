@@ -19,9 +19,9 @@ def _tool_call(*, index=None, call_id=None, name=None, arguments=None):
 
 
 def test_tool_arguments_repair_malformed_json_object():
-    raw = '{"pages": [], "files": [], "links": [],}'
+    raw = '{"pages": [], "files": [{"content": "line\\n"}], "links": [],}'
 
-    assert parse_tool_arguments(raw) == {"pages": [], "files": [], "links": []}
+    assert parse_tool_arguments(raw) == {"pages": [], "files": [{"content": "line\n"}], "links": []}
 
 
 def test_tool_arguments_preserve_unrepairable_non_object():
@@ -31,7 +31,7 @@ def test_tool_arguments_preserve_unrepairable_non_object():
 
 
 def test_tool_arguments_do_not_repair_truncated_json_object(monkeypatch):
-    def fail_if_called(_raw):
+    def fail_if_called(_raw, **kwargs):
         raise AssertionError("truncated JSON must not be repaired")
 
     monkeypatch.setattr(provider_base.json_repair, "loads", fail_if_called)
@@ -41,7 +41,7 @@ def test_tool_arguments_do_not_repair_truncated_json_object(monkeypatch):
 
 
 def test_tool_arguments_fall_back_when_repair_rejects_input(monkeypatch):
-    def reject_input(_raw):
+    def reject_input(_raw, **kwargs):
         raise ValueError("invalid input")
 
     monkeypatch.setattr(provider_base.json_repair, "loads", reject_input)
@@ -50,7 +50,7 @@ def test_tool_arguments_fall_back_when_repair_rejects_input(monkeypatch):
 
 
 def test_tool_arguments_do_not_hide_unexpected_repair_errors(monkeypatch):
-    def fail_unexpectedly(_raw):
+    def fail_unexpectedly(_raw, **kwargs):
         raise RuntimeError("repair implementation failed")
 
     monkeypatch.setattr(provider_base.json_repair, "loads", fail_unexpectedly)

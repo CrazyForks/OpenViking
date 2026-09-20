@@ -1,0 +1,469 @@
+"""Typed, collection-level Compile plans. Python syntax is parsed, never executed."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+
+PROCESSING_VERSION = "compile-pipeline-26"
+# Explicit output-token fallback when the configured VLM provides no value.
+DEFAULT_MAX_TOKENS = 32_000
+
+# Common tasks share one collection flow; explicit plans still pass the AST whitelist.
+DEFAULT_PLAN = (
+    "records = p.map(sources, task=contract.extract)\n"
+    "groups = p.shuffle(records, by=contract.routing, against=target)\n"
+    "changes = p.reduce(groups, task=contract.reduce)\n"
+    "p.merge(changes, into=target)"
+)
+_PLANNER_CORE_FIELDS = {"extract", "reduce", "routing", "distinguish"}
+
+
+def digest(value: Any) -> str:
+    """Hash JSON-compatible task inputs deterministically, including their versions."""
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def content_hash(value: str | bytes) -> str:
+    """Return the byte hash used by conditional content writes."""
+    return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Transform(StrictModel):
+    """A bounded transformation; fields declare the permitted intermediate structure.
+
+    Hierarchical aggregation is allowed only through an explicitly supplied combine
+    transform. Its fields must carry the Skill's required conditions and exceptions.
+    """
+
+    instructions: str = Field(min_length=1, max_length=6000)
+    output: Literal["records", "files"] = "records"
+    execution: Literal["direct", "agent"] = "direct"
+    fields: dict[str, str] = Field(
+        default_factory=lambda: {"text": "Facts extracted from the source."},
+        description="Payload field names mapped to optional simple descriptions; empty descriptions "
+        "are allowed. Prefer one sentence per description, "
+        "without a count limit. Runtime keys inputs, scope, "
+        "routing_text, ready_path, ready_content, ready_content_ref and target_uri are already "
+        "provided beside payload and must not be repeated. Leave the default for files output.",
+    )
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def field_descriptions(cls, value):
+        """Preserve field order, treating name-only lists and null descriptions as undescribed."""
+        if isinstance(value, list) and all(isinstance(name, str) for name in value):
+            return dict.fromkeys(value, "")
+        if isinstance(value, dict):
+            return {
+                name: "" if description is None else description
+                for name, description in value.items()
+            }
+        return value
+
+    @field_validator("fields")
+    @classmethod
+    def check_fields(cls, value):
+        """Preserve business field descriptions and order while omitting reserved names.
+
+        An empty mapping is valid when no business fields remain after normalization.
+        """
+        reserved = RecordDraft.model_fields.keys() - {"payload"}
+        return {name: description for name, description in value.items() if name not in reserved}
+
+
+class Contract(StrictModel):
+    """Task-local interpretation of the original Skill, which remains authoritative.
+
+    distinguish maps scope field names to their extraction meanings.
+    Scope values describe evidence; they are not equality keys for candidate grouping.
+    unsupported requirements stop planning instead of silently weakening the Skill.
+    No identifiers in this contract enumerate individual input documents.
+    """
+
+    version: Literal[1] = 1
+    extract: Transform
+    reduce: Transform
+    synthesize: Transform | None = None
+    combine: Transform | None = None
+    routing: str = Field(min_length=1, max_length=4000)
+    final_routing: str = Field(default="", max_length=4000)
+    distinguish: dict[str, str] = Field(
+        default_factory=dict,
+        description="Scope field names mapped to their meanings. Prefer short names such as "
+        "subject, page_role and version; explain what to extract in each value.",
+    )
+    preserve: list[str] = Field(default_factory=list, max_length=16)
+    overflow: Literal["fail", "structured"] = "fail"
+    output_format: Literal["wiki", "files"] = Field(
+        default="files",
+        description="wiki requires OKF Markdown pages; files permits arbitrary/mixed text files. "
+        "Resource OKF pages receive runtime ancestor indexes and Skill navigation formatting.",
+    )
+    required_paths: list[str] = Field(default_factory=list, max_length=16)
+    validation: str = Field(default="", max_length=4000)
+    unsupported: list[str] = Field(
+        default_factory=list,
+        max_length=16,
+        description="Only missing runtime capabilities that prevent this task. Deferred validation, "
+        "runtime navigation and checks delegated to operators are supported, not unsupported requirements.",
+    )
+
+    @field_validator("distinguish", mode="before")
+    @classmethod
+    def scope_descriptions(cls, value):
+        """Read saved name lists as fields without descriptions; mappings retain their meanings."""
+        return dict.fromkeys(value, "") if isinstance(value, list) else value
+
+    @model_validator(mode="before")
+    @classmethod
+    def expand_options(cls, value):
+        """Expand planner options, rejecting unknown or duplicate settings; flat contracts stay valid.
+
+        Omitted reduce output means files; an intermediate reducer explicitly requests records.
+        """
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        options = value.pop("options", {})
+        if (
+            not isinstance(options, dict)
+            or set(options) - (cls.model_fields.keys() - _PLANNER_CORE_FIELDS - {"version"})
+            or set(options) & value.keys()
+        ):
+            raise ValueError("Contract options must contain only distinct optional settings")
+        value.update(options)
+        if isinstance(value.get("reduce"), dict):
+            value["reduce"] = {"output": "files", **value["reduce"]}
+        return value
+
+    @model_validator(mode="after")
+    def check_contract(self) -> Contract:
+        """Reject unusable contracts before any source transformation begins."""
+        if self.unsupported:
+            raise ValueError(f"Unrepresentable Skill requirements: {self.unsupported}")
+        if self.extract.output != "records":
+            raise ValueError("extract must produce records")
+        if self.overflow == "structured" and (
+            self.combine is None or self.combine.output != "records"
+        ):
+            raise ValueError("structured overflow requires a records combine transform")
+        return self
+
+
+class PlanProposal(StrictModel):
+    """A task contract with an optional custom flow; omission uses the four standard operators."""
+
+    contract: Contract
+    plan: str = Field(default=DEFAULT_PLAN, min_length=1, max_length=8000)
+
+
+@dataclass(frozen=True)
+class Node:
+    """A validated operation over an already-bound dataset; order is topological."""
+
+    name: str
+    op: str
+    source: str
+    task: str = ""
+    against_target: bool = False
+
+
+def parse_plan(program: str, contract: Contract) -> list[Node]:
+    """Compile a small AST whitelist into typed nodes; no Python objects are evaluated.
+
+    Plans have at most 12 nodes, a single final merge, no unused datasets, rebinding,
+    implicit fan-out or literals. Each Shuffle record belongs to one work set.
+    """
+    if len(program) > 8000:
+        raise ValueError("Plan exceeds 8000 characters")
+    try:
+        tree = ast.parse(program)
+    except (SyntaxError, RecursionError) as exc:
+        raise ValueError("Invalid plan syntax") from exc
+    if not 1 <= len(tree.body) <= 12 or sum(1 for _ in ast.walk(tree)) > 300:
+        raise ValueError("Plan exceeds node limit")
+    handles = {"sources": "sources"}
+    used: set[str] = set()
+    nodes = []
+
+    def reference(value: ast.AST, owner: str, allowed: set[str]) -> str:
+        if not (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == owner
+            and value.attr in allowed
+        ):
+            raise ValueError(f"Expected {owner} reference from {sorted(allowed)}")
+        return value.attr
+
+    for index, statement in enumerate(tree.body):
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            lhs = statement.targets[0]
+            if not isinstance(lhs, ast.Name) or lhs.id.startswith("_"):
+                raise ValueError("Dataset names must be plain identifiers")
+            name = lhs.id
+            call = statement.value
+        elif isinstance(statement, ast.Expr):
+            name, call = "result", statement.value
+        else:
+            raise ValueError("Only dataset assignments and a final p.merge are allowed")
+        if name in handles or name in {"p", "contract", "target", "sources"}:
+            raise ValueError(f"Rebinding forbidden: {name}")
+        if not isinstance(call, ast.Call):
+            raise ValueError("Expected pipeline call")
+        op = reference(call.func, "p", {"map", "shuffle", "reduce", "merge"})
+        if len(call.args) != 1 or not isinstance(call.args[0], ast.Name):
+            raise ValueError("An operator takes one dataset handle")
+        source = call.args[0].id
+        if source not in handles or source in used:
+            raise ValueError(f"Unbound or multiply consumed dataset: {source}")
+        kwargs = {k.arg: k.value for k in call.keywords}
+        if len(kwargs) != len(call.keywords) or None in kwargs:
+            raise ValueError("Duplicate or expanded keywords forbidden")
+        task, against = "", False
+        if op in {"map", "reduce"}:
+            required = {"task"} if op == "map" else {"task", "overflow"}
+            if op == "reduce" and "overflow" not in kwargs:
+                # There is exactly one runtime overflow policy, owned by the contract.
+                kwargs["overflow"] = ast.Attribute(value=ast.Name(id="contract"), attr="overflow")
+            if set(kwargs) != required:
+                raise ValueError(
+                    f"Node {index + 1} ({name} = p.{op}): keywords={sorted(kwargs)}; "
+                    f"missing={sorted(required - set(kwargs))}; unexpected={sorted(set(kwargs) - required)}. "
+                    f"Use p.{op}({source}, task=contract.{op if op == 'reduce' else 'extract'}"
+                    + (", overflow=contract.overflow)" if op == "reduce" else ")")
+                )
+            task = reference(kwargs["task"], "contract", {"extract", "reduce", "synthesize"})
+            transform = getattr(contract, task)
+            if transform is None:
+                raise ValueError(f"Missing transform: {task}")
+            if op == "reduce":
+                reference(kwargs["overflow"], "contract", {"overflow"})
+                valid = handles[source] == "groups"
+            else:
+                valid = handles[source] in {"sources", "records"} and transform.output == "records"
+            output_type = transform.output
+        elif op == "shuffle":
+            if set(kwargs) not in ({"by"}, {"by", "against"}):
+                raise ValueError("shuffle requires by and optional against=target")
+            task = reference(kwargs["by"], "contract", {"routing", "final_routing"})
+            if not getattr(contract, task):
+                raise ValueError(f"Missing routing requirements: {task}")
+            if "against" in kwargs:
+                value = kwargs["against"]
+                if not isinstance(value, ast.Name) or value.id != "target":
+                    raise ValueError("Only the bound target can be searched")
+                against = True
+            valid, output_type = handles[source] == "records", "groups"
+        else:
+            into = kwargs.get("into")
+            if set(kwargs) != {"into"} or not isinstance(into, ast.Name) or into.id != "target":
+                raise ValueError("merge requires into=target")
+            valid, output_type = handles[source] == "files", "result"
+            if index != len(tree.body) - 1:
+                raise ValueError("merge must be the final operation")
+        if not valid or (isinstance(statement, ast.Expr) and op != "merge"):
+            raise ValueError(f"Invalid dataset type for {op}: {handles[source]}")
+        used.add(source)
+        handles[name] = output_type
+        nodes.append(Node(name, op, source, task, against))
+    if nodes[-1].op != "merge" or set(handles) - used != {nodes[-1].name}:
+        raise ValueError("Every dataset must reach the final merge")
+    return nodes
+
+
+class RecordDraft(StrictModel):
+    """Model payload with local input references; runtime assigns identity and evidence."""
+
+    inputs: list[str] = Field(min_length=1)
+    # JSON preserves nested facts and relations without prescribing their business shape.
+    payload: dict[str, JsonValue]
+    routing_text: str = Field(min_length=1, max_length=600)
+    scope: dict[str, str] = Field(default_factory=dict)
+    # A path without content is only a hint, never a finished or publishable file.
+    ready_content: str | None = None
+    ready_path: str | None = None
+    ready_content_ref: str | None = Field(
+        default=None, description="Agent scratch file alternative to inline ready_content."
+    )
+    # An explicit URI present in supplied evidence, used as a candidate before search.
+    target_uri: str | None = None
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def strip_reserved_fields(cls, value):
+        """Drop top-level payload keys owned by the record without changing outer values.
+
+        Nested business data is preserved; invalid payload types still fail validation.
+        """
+        if isinstance(value, dict):
+            reserved = cls.model_fields.keys() - {"payload"}
+            return {key: item for key, item in value.items() if key not in reserved}
+        return value
+
+
+class Exclusion(StrictModel):
+    """An explicit semantic exclusion; duplicate_of must refer to a supplied input."""
+
+    input: str
+    reason: str = Field(min_length=1, max_length=1000)
+    duplicate_of: str | None = None
+
+
+class InputReferenceError(ValueError):
+    """Invalid input accounting; file agents receive a bounded metadata repair window."""
+
+
+class RecordResponse(StrictModel):
+    records: list[RecordDraft] = Field(default_factory=list, max_length=64)
+    excluded: list[Exclusion] = Field(default_factory=list)
+
+
+def result_schema(schema, data):
+    """Expose assignment fields and routing identities in direct and child tool schemas."""
+    result = schema.model_json_schema()
+    if schema is PlanProposal:
+        # Keep common decisions prominent while retaining typed, opt-in advanced settings.
+        contract = result["$defs"]["Contract"]
+        properties = contract["properties"]
+        properties.pop("version")
+        options = {
+            key: properties.pop(key) for key in sorted(properties.keys() - _PLANNER_CORE_FIELDS)
+        }
+        properties["options"] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": options,
+            "description": "Only settings required beyond the common flow and original Skill.",
+        }
+        output = result["$defs"]["Transform"]["properties"]["output"]
+        output.pop("default")
+        output["description"] = "Defaults to records; contract.reduce defaults to files."
+    if schema is RouteResponse:
+        ids = [item["record"] for item in data["records"]]
+        result["properties"]["decisions"].update(minItems=len(ids), maxItems=len(ids))
+        result["$defs"]["RouteDecision"]["properties"]["record"]["enum"] = ids
+    if schema is FileResponse and data.get("inputs"):
+        # Limit file lineage to supplied inputs without requiring exhaustive coverage.
+        ids = [item["id"] for item in data["inputs"]]
+        inputs = result["$defs"]["FileDraft"]["properties"]["inputs"]
+        inputs["items"]["enum"] = ids
+        inputs["uniqueItems"] = True
+    if schema is FileResponse and "indexes" in data:
+        paths = [item["group"]["path"] for item in data["indexes"]]
+        result["properties"]["files"].update(minItems=len(paths), maxItems=len(paths))
+        result["$defs"]["FileDraft"]["properties"]["path"]["enum"] = paths
+    if schema is RecordResponse and "record_fields" in data:
+        record = result["$defs"]["RecordDraft"]
+        properties = record["properties"]
+        record["required"] = ["inputs", "payload", "routing_text", "scope"]
+        for name, fields in (("payload", data["record_fields"]), ("scope", data["scope_fields"])):
+            value = properties[name]["additionalProperties"]
+            if name == "scope":
+                value = {"type": "string"}
+            properties[name] = {
+                "type": "object",
+                "properties": {
+                    field: {**value, "description": fields[field]}
+                    if isinstance(fields, dict)
+                    else dict(value)
+                    for field in fields
+                },
+                "additionalProperties": value,
+            }
+    return result
+
+
+class RouteDecision(StrictModel):
+    """Candidate links for joint processing, without asserting identity or output paths.
+
+    related can name any record or candidate shown in the request for joint consideration.
+    history can name any recalled URI shown in the request, not mandatory updates.
+    Empty lists retain the record as an independent work set.
+    """
+
+    record: str
+    related: list[str] = Field(default_factory=list)
+    history: list[str] = Field(default_factory=list)
+
+
+class RouteResponse(StrictModel):
+    decisions: list[RouteDecision] = Field(
+        description="Exactly one decision per supplied record ID, with no duplicates. "
+        "Links request joint processing; Reduce decides the number and paths of output files.",
+    )
+
+
+class Patch(StrictModel):
+    """Exact, unique old-text anchor and its replacement, bound to an old-file hash."""
+
+    old: str = Field(min_length=1)
+    new: str
+
+
+class FileDraft(StrictModel):
+    """An inline edit or a child-local file reference resolved before semantic validation.
+
+    content_ref is relative to the submitting child's scratch directory. Runtime
+    records and verifies content_sha256; callers may supply it to assert a version.
+    """
+
+    path: str
+    content: str | None = None
+    content_ref: str | None = None
+    content_sha256: str | None = None
+    patches: list[Patch] = Field(default_factory=list, max_length=32)
+    base_hash: str | None = None
+    inputs: list[str] = Field(
+        min_length=1,
+        description="Supplied input IDs actually used by this file; multiple inputs may support "
+        "one file, and one input may support multiple files.",
+    )
+
+
+class FileResponse(StrictModel):
+    """Final files with explicit lineage; unreferenced inputs have unconfirmed coverage."""
+
+    files: list[FileDraft] = Field(default_factory=list)
+
+
+@dataclass
+class Record:
+    """A dataset item carrying small routing metadata and references to exact evidence.
+
+    source_refs are runtime-assigned source-range IDs, deduplicated across levels.
+    payload_ref addresses one task shard; neither payloads nor vectors enter plans.
+    parents records immediate lineage for final-state accounting.
+    """
+
+    record_id: str
+    payload_ref: str
+    source_refs: list[str]
+    routing_text: str
+    scope: dict[str, str]
+    parents: list[str]
+    ready_ref: str | None = None
+    schema: str = "source-range"
+    target_uri: str | None = None
+
+
+@dataclass
+class Group:
+    """Evidence to process together; one work set may produce several independent files."""
+
+    group_id: str
+    records: list[Record]
+    # Authorized recalled files available for comparison and version-checked updates.
+    target_uris: list[str] = field(default_factory=list)

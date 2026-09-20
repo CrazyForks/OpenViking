@@ -1142,7 +1142,7 @@ enum Commands {
             value_name = "uri"
         )]
         from_uris: Vec<String>,
-        /// Target Wiki directory or skills namespace
+        /// Target resource directory or skills namespace
         #[arg(long, value_name = "uri")]
         to: String,
         /// Skill directory or SKILL.md Viking URI

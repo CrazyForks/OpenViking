@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import posixpath
-import shlex
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import asdict
@@ -14,39 +12,28 @@ from typing import Any, Mapping
 import yaml
 from pydantic import ValidationError
 
-from openviking.core.namespace import context_type_for_uri, relative_uri_path
-from openviking.core.skill_loader import SkillLoader, validate_skill_format
+from openviking.core.namespace import relative_uri_path
 from openviking.session.memory.utils.link_renderer import LinkRenderer
 from openviking.utils.path_safety import (
     safe_join_viking_uri,
     sanitize_relative_viking_path,
     validate_safe_viking_uri_path,
 )
-from openviking.utils.skill_processor import validate_skill_name
-from openviking_cli.exceptions import OpenVikingError
 from vikingbot.agent.tools.base import TOOL_RESULT_DIRECTORY, Tool, ToolContext
-from vikingbot.agent.tools.compile_merge import validate_merge_coverage
 from vikingbot.compile.models import (
     COMPILE_DRAFT_ROOT,
-    COMPILE_OUTPUT_ROOT,
     COMPILE_STAGING_ROOT,
-    CompileLimits,
     WikiBundleDraft,
 )
 from vikingbot.compile.renderer import (
-    RenderedBundle,
-    finalize_resource_output,
     is_reserved_wiki_page_uri,
-    validate_declared_okf_markdown,
     validate_relative_file_path,
     validate_relative_page_path,
-    validate_resource_file,
     wiki_page_path_from_title,
 )
 from vikingbot.compile.sources import CompileSourceRange
 
 _LINK_FIELDS = frozenset({"f", "t", "link_type", "weight", "match_text", "description"})
-_NAVIGATION_FILENAMES = frozenset({"index.md", "_index", "_index.md"})
 
 
 def _normalize_workspace_path(path: str) -> str:
@@ -63,26 +50,21 @@ def _path_is_within(path: str, root: str) -> bool:
 class CompileSpawnTool(Tool):
     """Dispatch prepared source ranges with original URIs and exact offsets.
 
-    Resource merges use the exhaustive merge tool. Other target types can delegate
-    free-form assignments through the existing spawn tool.
+    Memory tasks can also delegate assignments through the existing spawn tool.
     """
 
     name = "spawn"
     description = (
-        "Compile a prepared source_batch. Resource merges use merge_compile_drafts; "
-        "failed source retries reuse their saved draft directory. task supplies additional "
-        "instructions or retry corrections; other target types can delegate an assignment in task."
+        "Compile a prepared source_batch or delegate an assignment in task. "
+        "task supplies the instructions for the child's bound draft directory."
     )
 
     def __init__(
         self,
         spawn: Tool,
         source_batches: list[list[CompileSourceRange]] | None = None,
-        *,
-        source_only: bool = False,
     ):
         self.spawn = spawn
-        self.source_only = source_only
         self.source_batches = source_batches
         self.dispatched_batches: set[int] = set()
 
@@ -98,8 +80,6 @@ class CompileSpawnTool(Tool):
                 "maximum": len(self.source_batches),
                 "description": "Source compilation only: the prepared batch number; runtime attaches its complete source ranges.",
             }
-        if self.source_only:
-            parameters["required"] = [*parameters["required"], "source_batch"]
         return parameters
 
     async def execute(
@@ -111,8 +91,6 @@ class CompileSpawnTool(Tool):
         **kwargs: Any,
     ) -> str:
         """Attach source ranges and caller instructions; roll back admission on dispatch failure."""
-        if self.source_only and source_batch is None:
-            return "Error: use merge_compile_drafts with draft IDs for Resource merges."
         if source_batch is not None:
             if (
                 not self.source_batches
@@ -140,10 +118,6 @@ class CompileSpawnTool(Tool):
             )
             self.dispatched_batches.add(source_batch)
             try:
-                if self.source_only:
-                    task = json.dumps(
-                        {"source_batch": source_batch, "task": task}, ensure_ascii=False
-                    )
                 result = await self.spawn.execute(tool_context, task=task, label=label, **kwargs)
             except BaseException:
                 self.dispatched_batches.discard(source_batch)
@@ -161,8 +135,7 @@ class SubmitCompileDraftTool(Tool):
 
     Only nonempty directories below the compile draft root are accepted. Claimed roots
     cannot overlap other children's submissions; result includes verified paths and
-    file_sizes in bytes for metadata-only merge planning. Resource children discard
-    index.md, _index and _index.md at any depth; their final navigation belongs to the parent.
+    file_sizes in bytes for the parent's bounded reads and final submission.
     """
 
     name = "submit_compile_draft"
@@ -181,47 +154,20 @@ class SubmitCompileDraftTool(Tool):
 
     def __init__(
         self,
-        limits: CompileLimits,
         claimed_roots: set[str],
         draft_root: str,
-        *,
-        exclude_navigation: bool = False,
-        merge_inputs: dict[str, str] | None = None,
     ):
-        self.limits = limits
         self.claimed_roots = claimed_roots
         self.draft_root = draft_root
-        self.exclude_navigation = exclude_navigation
-        self.merge_inputs = merge_inputs
-        self.parameters = deepcopy(type(self).parameters)
-        if merge_inputs is not None:
-            self.parameters["properties"]["input_outputs"] = {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 1,
-                },
-                "description": (
-                    "Map every assigned draft ID to its resulting child-relative output paths. "
-                    "Every input needs at least one submitted page retaining its original source references."
-                ),
-            }
-            self.parameters["required"].append("input_outputs")
         self.result: dict[str, Any] | None = None
 
     async def execute(
         self,
         tool_context: ToolContext,
         summary: str,
-        input_outputs: dict[str, list[str]] | None = None,
         **kwargs: Any,
     ) -> str:
-        """Collect bound files, optionally removing navigation; reject empty or overlapping drafts.
-
-        Navigation removal only affects the child's directory. A navigation-only
-        submission remains unclaimed so the child can submit knowledge pages later.
-        """
+        """Collect bound files; reject unsafe paths, empty drafts and overlapping submissions."""
         self.result = None
         try:
             if kwargs:
@@ -245,39 +191,12 @@ class SubmitCompileDraftTool(Tool):
                 for claimed in self.claimed_roots
             ):
                 raise ValueError("Draft directory overlaps another child's submission")
-            if self.exclude_navigation:
-                knowledge_files = [
-                    entry
-                    for entry in files
-                    if posixpath.basename(entry.path).casefold() not in _NAVIGATION_FILENAMES
-                ]
-                if len(knowledge_files) != len(files):
-                    output = await sandbox.execute(
-                        f"find {shlex.quote(root)} -type f "
-                        r"\( -iname index.md -o -iname _index -o -iname _index.md \) -delete"
-                    )
-                    sandbox._ensure_command_succeeded(output, "draft navigation removal")
-                files = knowledge_files
-                files = [entry for entry in files if entry.path.casefold().endswith(".md")]
-                if not files:
-                    raise ValueError(
-                        "No knowledge draft files found after removing navigation; "
-                        "write knowledge pages and leave index.md/_index/_index.md to the parent"
-                    )
-            if self.merge_inputs is not None:
-                await validate_merge_coverage(
-                    sandbox,
-                    self.merge_inputs,
-                    input_outputs,
-                    {posixpath.relpath(entry.path, root): entry.path for entry in files},
-                )
             self.claimed_roots.add(root)
             self.result = {
                 "draft_root": root,
                 "files": [entry.path for entry in files],
                 "file_sizes": {entry.path: entry.size for entry in files},
                 "summary": summary,
-                **({"input_outputs": input_outputs} if self.merge_inputs is not None else {}),
             }
             return "Draft accepted."
         except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -290,9 +209,6 @@ class CompileChildTool(Tool):
     Tool paths and write/edit acknowledgements use the child's relative paths.
     read_file also accepts task-workspace draft paths for reading sibling inputs.
     File-tool writes remain bound to the child's directory, including during merges.
-    With exclude_navigation, write_file and edit_file reject navigation filenames;
-    Resource children leave final navigation to the parent. Submission also filters
-    navigation produced through exec, whose shell capabilities remain unchanged.
     Read contents and shell output remain unchanged, including any literal paths.
     Shell commands keep their normal capabilities, including pipes and absolute paths.
     This prevents default-path mixups; it is not an OS-level sandbox.
@@ -307,14 +223,12 @@ class CompileChildTool(Tool):
         tool: Tool,
         draft_root: str,
         *,
-        exclude_navigation: bool = False,
         merge_only: bool = False,
     ):
         if merge_only and tool.name not in {"read_file", "write_file", "edit_file"}:
             raise ValueError("Merge children accept only bound file tools")
         self.tool = tool
         self.draft_root = draft_root
-        self.exclude_navigation = exclude_navigation
         self.merge_only = merge_only
 
     @property
@@ -350,28 +264,14 @@ class CompileChildTool(Tool):
                 f" To read another child's input, pass its returned {COMPILE_DRAFT_ROOT}/ path verbatim; "
                 f"{TOOL_RESULT_DIRECTORY}/ paths also address the task root. These paths are read-only."
             )
-        if self.exclude_navigation and self.name in {"write_file", "edit_file"}:
-            parameters["properties"][field]["description"] += (
-                " Content pages only: index.md, _index and _index.md belong to the parent."
-            )
         return parameters
 
     async def execute(self, tool_context: ToolContext, **kwargs: Any) -> str:
-        """Bind paths to the child and reject reserved navigation writes before any file changes."""
+        """Bind file access to the child and enforce private reads for isolated transforms."""
         field = "working_dir" if self.name == "exec" else "path"
         if self.merge_only and str(kwargs.get(field, "")).startswith("viking://"):
             raise ValueError("Merge children can only access their own output files")
         relative = _normalize_workspace_path(kwargs.get(field) or ".")
-        if (
-            self.exclude_navigation
-            and self.name in {"write_file", "edit_file"}
-            and posixpath.basename(relative).casefold() in _NAVIGATION_FILENAMES
-        ):
-            return (
-                "Error: Navigation files belong to the parent and are not part of your draft. "
-                "Leave them absent; do not create them through exec or under another filename. "
-                "Finish assigned content pages and call submit_compile_draft."
-            )
         if self.name == "read_file" and relative.startswith(
             (COMPILE_DRAFT_ROOT + "/", TOOL_RESULT_DIRECTORY + "/")
         ):
@@ -394,244 +294,23 @@ class CompileChildTool(Tool):
         return result
 
 
-class SubmitCompileOutputTool(Tool):
-    """Prepare Resource upserts, completing valid Wiki links and preserving invalid fallback files."""
-
-    def __init__(
-        self,
-        *,
-        target_uri: str,
-        source_roots: Mapping[str, str],
-        limits: CompileLimits,
-        load_existing: Callable[[], Awaitable[tuple[dict[str, bytes], set[str]]]] | None = None,
-    ):
-        self.target_uri = target_uri.rstrip("/")
-        self.source_roots = dict(source_roots)
-        self.limits = limits
-        # Load the retained catalog once at submission, outside the model context.
-        self._load_existing = load_existing
-        self._existing_catalog: tuple[dict[str, bytes], set[str]] | None = None
-        self.bundle: RenderedBundle | None = None
-        self.page_count = 0
-        self.file_count = 0
-        # Only final output validation starts the bounded repair phase; queue guards do not.
-        self.validation_attempts = 0
-        # The parent receives this exact failure during every remaining repair round.
-        self.validation_error: str | None = None
-        self.warnings: list[str] = []
-        # Task-owned children must be collected before output can be finalized.
-        self.submission_guard: Callable[[bool], str | None] | None = None
-        # Only normal submission requires complete merge coverage.
-        self.output_guard: Callable[[Any, dict[str, bytes]], Awaitable[None]] | None = None
-
-    @property
-    def name(self) -> str:
-        return "submit_wiki_bundle"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Submit the complete Resource output from the designated final output directory. "
-            "Pass no pages, files, paths, or content; "
-            "Compile preserves omitted existing target files and commits "
-            "validated changes. If bounded repair cannot resolve validation errors, "
-            "the runtime completes links in valid Wiki pages and commits every generated "
-            "final-output file, preserving invalid files as written."
-        )
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        }
-
-    async def _read_output_files(self, sandbox: Any) -> dict[str, bytes]:
-        """Read every final-output file, rejecting paths outside the directory or collisions.
-
-        Content is returned unchanged, including binary files and invalid Wiki metadata.
-        Filesystem errors propagate so an incomplete read cannot become a successful commit.
-        """
-        entries = await sandbox.list_files(COMPILE_OUTPUT_ROOT, max_entries=None)
-        output_files: dict[str, bytes] = {}
-        paths_by_case: dict[str, str] = {}
-        output_prefix = f"{COMPILE_OUTPUT_ROOT}/"
-        for entry in entries:
-            workspace_path = _normalize_workspace_path(entry.path)
-            if not workspace_path.startswith(output_prefix):
-                raise ValueError(f"output inventory returned an out-of-tree path: {workspace_path}")
-            relative = validate_relative_file_path(workspace_path.removeprefix(output_prefix))
-            prior = paths_by_case.setdefault(relative.casefold(), relative)
-            if prior != relative:
-                raise ValueError(f"case-colliding output paths: {prior}, {relative}")
-            if entry.size < 0:
-                raise ValueError(f"output file has an invalid size: {relative}")
-            output_files[relative] = await sandbox.read_file_bytes(workspace_path)
-        return output_files
-
-    async def execute(self, tool_context: ToolContext, **kwargs: Any) -> str:
-        self.bundle = None
-        self.page_count = 0
-        self.file_count = 0
-        if kwargs:
-            return "Error: submit_wiki_bundle takes no arguments for a Resource output."
-        if tool_context.sandbox_manager is None:
-            return "Error: Invalid output directory: task sandbox is unavailable"
-        if self.submission_guard is not None:
-            # Final validation and its bounded repair do not launch more children.
-            error = self.submission_guard(True)
-            if error:
-                return error
-        self.validation_attempts += 1
-        try:
-            sandbox = await tool_context.sandbox_manager.get_sandbox(tool_context.session_key)
-            output_files = await self._read_output_files(sandbox)
-            has_wiki = False
-            errors: list[str] = []
-            for relative, payload in output_files.items():
-                try:
-                    has_wiki = validate_resource_file(relative, payload) or has_wiki
-                except ValueError as exc:
-                    errors.append(str(exc))
-
-            if errors:
-                raise ValueError("\n".join(errors)[:6000])
-
-            if self.output_guard is not None:
-                await self.output_guard(sandbox, output_files)
-
-            if self._load_existing is not None and self._existing_catalog is None and has_wiki:
-                self._existing_catalog = await self._load_existing()
-            existing_files, known_paths = self._existing_catalog or ({}, set())
-            finalized = finalize_resource_output(
-                output_files,
-                target_uri=self.target_uri,
-                source_roots=self.source_roots,
-                existing_files=existing_files,
-                known_paths=known_paths,
-            )
-            rendered = RenderedBundle(
-                link_count=finalized.link_count, link_report=finalized.link_report
-            )
-            self.page_count = len(finalized.wiki_paths)
-            self.file_count = len(finalized.files)
-            for path, payload in sorted(finalized.files.items()):
-                uri = safe_join_viking_uri(self.target_uri, path).rstrip("/")
-                is_wiki = path in finalized.wiki_paths
-                rendered.operations.append(
-                    {
-                        "uri": uri,
-                        "content_base64": base64.b64encode(payload).decode("ascii"),
-                        "mode": "upsert",
-                    }
-                )
-                if is_wiki:
-                    rendered.wiki_uris.append(uri)
-            self.bundle = rendered
-            self.validation_error = None
-        except (OSError, ValueError) as exc:
-            self.validation_error = f"Invalid output directory: {exc}"
-            return f"Error: {self.validation_error}"
-
-        changed = len(rendered.operations)
-        return (
-            f"Resource output accepted with {changed} changed file(s) and "
-            f"{self.page_count} Wiki page(s) in the submitted output."
-        )
-
-    async def accept_generated_output(self, tool_context: ToolContext) -> None:
-        """Prepare every final-output file for upsert when repair or execution rounds run out.
-
-        Valid Wiki pages receive normal link completion using the retained target catalog.
-        Invalid pages and other artifacts retain their bytes and target-relative paths;
-        merge coverage is not required. Retained navigation may be refreshed, while other
-        omitted targets remain unchanged. Missing output and read failures raise.
-        """
-        self.bundle = None
-        self.page_count = self.file_count = 0
-        self.warnings = []
-        sandbox = await tool_context.sandbox_manager.get_sandbox(tool_context.session_key)
-        files = await self._read_output_files(sandbox)
-        if not files:
-            raise ValueError("No generated final-output files to submit")
-        rendered = RenderedBundle()
-        valid_files: dict[str, bytes] = {}
-        for path, payload in files.items():
-            try:
-                if validate_resource_file(path, payload):
-                    valid_files[path] = payload
-            except (ValueError, UnicodeError):
-                continue
-        if valid_files:
-            if self._load_existing is not None and self._existing_catalog is None:
-                self._existing_catalog = await self._load_existing()
-            existing_files, known_paths = self._existing_catalog or ({}, set())
-            finalized = finalize_resource_output(
-                valid_files,
-                target_uri=self.target_uri,
-                source_roots=self.source_roots,
-                # Invalid output still occupies its path, including unfinished indexes.
-                existing_files={**existing_files, **files},
-                known_paths=known_paths,
-            )
-            files.update(finalized.files)
-            rendered.link_count = finalized.link_count
-            rendered.link_report = finalized.link_report
-        for path, payload in sorted(files.items()):
-            uri = safe_join_viking_uri(self.target_uri, path).rstrip("/")
-            rendered.operations.append(
-                {
-                    "uri": uri,
-                    "content_base64": base64.b64encode(payload).decode("ascii"),
-                    "mode": "upsert",
-                }
-            )
-            if path.casefold().endswith(".md"):
-                rendered.wiki_uris.append(uri)
-        self.page_count = len(rendered.wiki_uris)
-        self.file_count = len(files)
-        self.bundle = rendered
-
-
 class SubmitWikiBundleTool(Tool):
+    """Validate Memory page submissions, source provenance and renderable page links."""
+
     def __init__(
         self,
         *,
         source_ids: set[str],
         catalog_uris: set[str],
-        file_catalog_uris: set[str] | None = None,
         target_uri: str,
-        limits: CompileLimits,
-        require_workspace_files: bool = False,
-        require_workspace_pages: bool = False,
-        workspace_baseline: set[str] | None = None,
         wiki_uri_resolver: Callable[[str], Awaitable[bool]] | None = None,
-        exec_enabled: bool = True,
     ):
         self.source_ids = source_ids
         self.catalog_uris = catalog_uris
-        self.file_catalog_uris = set(catalog_uris)
-        self.file_catalog_uris.update(file_catalog_uris or ())
         self.target_uri = target_uri.rstrip("/")
-        self.limits = limits
-        self.require_workspace_files = require_workspace_files
-        self.require_workspace_pages = require_workspace_pages
-        self.workspace_baseline = (
-            None
-            if workspace_baseline is None
-            else {_normalize_workspace_path(path) for path in workspace_baseline}
-        )
         self.wiki_uri_resolver = wiki_uri_resolver
-        self.exec_enabled = exec_enabled
         self.bundle: WikiBundleDraft | None = None
-        self.file_payloads: list[bytes | None] = []
-        self.skill_name: str | None = None
         self.submission_guard: Callable[[bool], str | None] | None = None
-
-    @property
-    def _is_skill_target(self) -> bool:
-        return context_type_for_uri(self.target_uri) == "skill"
 
     @property
     def name(self) -> str:
@@ -639,77 +318,19 @@ class SubmitWikiBundleTool(Tool):
 
     @property
     def description(self) -> str:
-        artifact_writers = "write_file or exec" if self.exec_enabled else "write_file"
-        workspace_notice = (
-            f" Generate artifact files with {artifact_writers}, then reference them with "
-            "workspace_path; do not inline file content."
-            if self.require_workspace_files
-            else ""
-        )
-        if self._is_skill_target:
-            return (
-                "Submit one complete OpenViking Skill package. Include every file under "
-                "<skill-name>/ and include <skill-name>/SKILL.md."
-                f"{workspace_notice}"
-            )
-        return (
-            "Submit the final output only after every path and format explicitly required "
-            "by the Skill is represented. Treat only actual Wiki content as Wiki pages and "
-            f"preserve exact-path Skill outputs as artifact files.{workspace_notice}"
-        )
+        return "Submit Memory pages with source provenance and links after applying the selected Skill."
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         if "raw" in params:
             message = "use the tool schema directly; do not wrap the payload in a JSON string"
-            if self.require_workspace_files:
-                artifact_writers = "write_file or exec" if self.exec_enabled else "write_file"
-                message += (
-                    f"; generate artifact files with {artifact_writers} and submit them using "
-                    "workspace_path instead of inline content"
-                )
             return [message]
         return super().validate_params(params)
 
     @property
     def parameters(self) -> dict[str, Any]:
         schema = WikiBundleDraft.model_json_schema()
-        required = schema.setdefault("required", [])
-        if "files" not in required:
-            required.append("files")
-        definitions = schema.get("$defs", {})
-        if self.require_workspace_files:
-            file_schema = definitions.get("CompileFileDraft", {})
-            file_properties = file_schema.get("properties", {})
-            if isinstance(file_properties, dict):
-                file_properties.pop("content", None)
-            file_required = file_schema.setdefault("required", [])
-            if "content" in file_required:
-                file_required.remove("content")
-            if "workspace_path" not in file_required:
-                file_required.append("workspace_path")
-        if self._is_skill_target:
-            schema["properties"].pop("pages", None)
-            schema["properties"].pop("links", None)
-            required[:] = [field for field in required if field not in {"pages", "links"}]
-            definitions.pop("WikiPageDraft", None)
-            definitions.pop("WikiLink", None)
-            file_schema = definitions.get("CompileFileDraft", {})
-            file_schema.get("properties", {}).pop("update_uri", None)
-            file_required = file_schema.setdefault("required", [])
-            if "path" not in file_required:
-                file_required.append("path")
-            schema.pop("title", None)
-            return schema
-        if self.require_workspace_pages:
-            page_def = schema.get("$defs", {}).get("WikiPageDraft", {})
-            page_properties = page_def.get("properties", {})
-            if isinstance(page_properties, dict):
-                page_properties.pop("body_markdown", None)
-            page_required = page_def.setdefault("required", [])
-            if "body_markdown" in page_required:
-                page_required.remove("body_markdown")
-            if "body_workspace_path" not in page_required:
-                page_required.append("body_workspace_path")
+        schema["properties"].pop("files", None)
+        schema.get("$defs", {}).pop("CompileFileDraft", None)
         link_def = schema.get("$defs", {}).get("WikiLink", {})
         match_schema = link_def.get("properties", {}).get("match_text")
         if isinstance(match_schema, dict):
@@ -724,7 +345,6 @@ class SubmitWikiBundleTool(Tool):
     @property
     def resource_inputs(self) -> dict[str, str]:
         return {
-            "/files/*/workspace_path": "local_file",
             "/pages/*/body_workspace_path": "local_file",
         }
 
@@ -738,8 +358,8 @@ class SubmitWikiBundleTool(Tool):
     ) -> str:
         del kwargs
         self.bundle = None
-        self.file_payloads = []
-        self.skill_name = None
+        if files:
+            return "Error: Memory targets accept pages, not artifact files."
         if self.submission_guard is not None:
             error = self.submission_guard(False)
             if error:
@@ -752,121 +372,19 @@ class SubmitWikiBundleTool(Tool):
             bundle = WikiBundleDraft.model_validate(
                 {"pages": pages or [], "files": files or [], "links": raw_links}
             )
-            warnings = await self._validate_workspace_manifest(
-                bundle,
-                tool_context=tool_context,
-            )
             bundle = await self._materialize_page_bodies(bundle, tool_context=tool_context)
-            payloads, bundle_warnings = await self._validate_bundle(
-                bundle, tool_context=tool_context
-            )
-            warnings.extend(bundle_warnings)
+            warnings = await self._validate_bundle(bundle)
         except (ValidationError, ValueError) as exc:
-            kind = "Skill" if self._is_skill_target else "Wiki"
-            return f"Error: Invalid {kind} bundle: {exc}"
+            return f"Error: Invalid Wiki bundle: {exc}"
         if self.submission_guard is not None:
             error = self.submission_guard(True)
             if error:
                 return error
         self.bundle = bundle
-        self.file_payloads = payloads
-        if self._is_skill_target:
-            summary = (
-                f"Skill bundle accepted for '{self.skill_name}' with {len(bundle.files)} file(s)."
-            )
-        else:
-            summary = (
-                f"Wiki bundle accepted with {len(bundle.pages)} page(s) and "
-                f"{len(bundle.files)} file(s)."
-            )
+        summary = f"Wiki bundle accepted with {len(bundle.pages)} page(s)."
         if warnings:
             summary += " Warnings: " + "; ".join(warnings)
         return summary
-
-    async def _list_workspace_files(
-        self,
-        *,
-        tool_context: ToolContext,
-    ) -> set[str]:
-        if tool_context.sandbox_manager is None:
-            raise ValueError("task sandbox is unavailable")
-        sandbox = await tool_context.sandbox_manager.get_sandbox(tool_context.session_key)
-        files: set[str] = set()
-        pending = [""]
-        while pending:
-            directory = pending.pop()
-            try:
-                entries = await sandbox.list_dir(directory or ".")
-            except Exception as exc:
-                raise ValueError("task workspace could not be inspected") from exc
-            for name, is_dir in entries:
-                relative = _normalize_workspace_path(f"{directory}/{name}" if directory else name)
-                if _path_is_within(relative, COMPILE_STAGING_ROOT):
-                    continue
-                if name in {".git", "__pycache__", TOOL_RESULT_DIRECTORY}:
-                    continue
-                if is_dir:
-                    pending.append(relative)
-                elif not relative.endswith((".pyc", ".pyo")):
-                    files.add(relative)
-        return files
-
-    async def _validate_workspace_manifest(
-        self,
-        bundle: WikiBundleDraft,
-        *,
-        tool_context: ToolContext,
-    ) -> list[str]:
-        if context_type_for_uri(self.target_uri) != "resource":
-            return []
-        page_paths = {
-            _normalize_workspace_path(page.body_workspace_path)
-            for page in bundle.pages
-            if page.body_workspace_path is not None
-        }
-        artifact_paths = {
-            _normalize_workspace_path(file.workspace_path)
-            for file in bundle.files
-            if file.workspace_path is not None
-        }
-        errors: list[str] = []
-        warnings: list[str] = []
-        page_workspace_root = f"{COMPILE_STAGING_ROOT}/wiki_pages"
-        invalid_pages = sorted(
-            path for path in page_paths if not _path_is_within(path, page_workspace_root)
-        )
-        if self.require_workspace_pages and invalid_pages:
-            errors.append(
-                "Wiki page body workspace paths must be editable files under "
-                f"{page_workspace_root}/: " + ", ".join(invalid_pages)
-            )
-        invalid_artifacts = sorted(
-            path for path in artifact_paths if _path_is_within(path, page_workspace_root)
-        )
-        if invalid_artifacts:
-            errors.append(
-                "Skill artifact workspace paths must not use the Wiki page body area "
-                f"under {page_workspace_root}/: " + ", ".join(invalid_artifacts)
-            )
-
-        if self.workspace_baseline is not None:
-            current_files = await self._list_workspace_files(tool_context=tool_context)
-            generated_artifacts = current_files - self.workspace_baseline
-            missing_artifacts = sorted(generated_artifacts - artifact_paths)
-            if missing_artifacts:
-                if self.require_workspace_files:
-                    errors.append(
-                        "generated Skill artifacts are missing from files; preserve their "
-                        "required paths and submit them unchanged: " + ", ".join(missing_artifacts)
-                    )
-                else:
-                    warnings.append(
-                        "workspace files were not submitted and will be ignored: "
-                        + ", ".join(missing_artifacts)
-                    )
-        if errors:
-            raise ValueError("; ".join(errors))
-        return warnings
 
     async def _read_workspace_bytes(
         self,
@@ -878,9 +396,7 @@ class SubmitWikiBundleTool(Tool):
         try:
             relative = _normalize_workspace_path(workspace_path)
             if TOOL_RESULT_DIRECTORY in relative.split("/"):
-                raise ValueError(
-                    "Tool-result files cannot be submitted as artifacts or page bodies"
-                )
+                raise ValueError("Tool-result files cannot be submitted as page bodies")
             if tool_context.sandbox_manager is None:
                 raise ValueError("task sandbox is unavailable")
             sandbox = await tool_context.sandbox_manager.get_sandbox(tool_context.session_key)
@@ -896,27 +412,12 @@ class SubmitWikiBundleTool(Tool):
         *,
         tool_context: ToolContext,
     ) -> WikiBundleDraft:
-        artifact_workspace_paths = {
-            _normalize_workspace_path(file.workspace_path)
-            for file in bundle.files
-            if file.workspace_path is not None
-        }
         pages = []
         for page in bundle.pages:
-            if self.require_workspace_pages and page.body_markdown is not None:
-                raise ValueError(
-                    f"page {page.page_id} body must be generated with write_file and "
-                    "submitted using body_workspace_path instead of inline Markdown"
-                )
             if page.body_workspace_path is None:
                 pages.append(page)
                 continue
             workspace_path = _normalize_workspace_path(page.body_workspace_path)
-            if workspace_path in artifact_workspace_paths:
-                raise ValueError(
-                    f"page {page.page_id} body must be a separate reader-oriented "
-                    "workspace file, not an exact artifact file"
-                )
             raw = await self._read_workspace_bytes(
                 workspace_path,
                 tool_context=tool_context,
@@ -933,25 +434,9 @@ class SubmitWikiBundleTool(Tool):
             )
         return bundle.model_copy(update={"pages": pages})
 
-    async def _validate_bundle(
-        self, bundle: WikiBundleDraft, *, tool_context: ToolContext
-    ) -> tuple[list[bytes | None], list[str]]:
-        target_type = context_type_for_uri(self.target_uri)
+    async def _validate_bundle(self, bundle: WikiBundleDraft) -> list[str]:
         if not bundle.pages and bundle.links:
             raise ValueError("empty bundle must not contain links")
-        if target_type == "skill" and (bundle.pages or bundle.links):
-            raise ValueError("Skill targets only accept artifact files")
-        if bundle.files and target_type not in {"resource", "skill"}:
-            raise ValueError(
-                "raw artifact files are only supported for Resource targets or exact "
-                "Skill namespace targets; re-run ov compile with a supported target"
-            )
-        if self.require_workspace_files and any(file.content is not None for file in bundle.files):
-            artifact_writers = "write_file or exec" if self.exec_enabled else "write_file"
-            raise ValueError(
-                f"artifact files must be generated with {artifact_writers} and submitted "
-                "using workspace_path instead of inline content"
-            )
         page_ids: set[int] = set()
         page_uris: dict[int, str] = {}
         final_uris: set[str] = set()
@@ -966,12 +451,7 @@ class SubmitWikiBundleTool(Tool):
             if "\n" in page.summary.strip() or "\r" in page.summary.strip():
                 raise ValueError(f"page {page.page_id} summary must be one line")
             if page.body_markdown.lstrip().startswith("---"):
-                raise ValueError(
-                    f"page {page.page_id} must not include YAML frontmatter. If this is a "
-                    "Skill-prescribed artifact, do not edit or strip its frontmatter; submit "
-                    f"it through files and create a separate Wiki body under "
-                    f"{COMPILE_STAGING_ROOT}/wiki_pages/"
-                )
+                raise ValueError(f"page {page.page_id} body must not include YAML frontmatter")
             source_ids = list(
                 dict.fromkeys(source_id for source_id in page.source_ids if source_id)
             )
@@ -996,57 +476,13 @@ class SubmitWikiBundleTool(Tool):
                 hint = page.path_hint or wiki_page_path_from_title(page.title)
                 relative = validate_relative_page_path(hint)
                 final_uri = safe_join_viking_uri(self.target_uri, relative).rstrip("/")
-                if final_uri in self.file_catalog_uris:
+                if final_uri in self.catalog_uris:
                     raise ValueError(f"page {page.page_id} path exists; use its update_uri")
             if final_uri in final_uris:
                 raise ValueError(f"duplicate final Wiki path: {final_uri}")
             final_uris.add(final_uri)
             page_uris[page.page_id] = final_uri
 
-        file_payloads: list[bytes | None] = []
-        for index, file in enumerate(bundle.files):
-            if target_type == "skill":
-                if file.update_uri:
-                    raise ValueError("Skill bundles require relative path entries, not update_uri")
-                relative = validate_relative_file_path(file.path or "")
-                final_uri = safe_join_viking_uri(self.target_uri, relative).rstrip("/")
-            elif file.update_uri:
-                final_uri = validate_safe_viking_uri_path(file.update_uri).rstrip("/")
-                if is_reserved_wiki_page_uri(final_uri):
-                    raise ValueError(f"file {index} cannot update a reserved file")
-                if final_uri not in self.file_catalog_uris:
-                    raise ValueError(f"file {index} update_uri is not in the catalog")
-            else:
-                relative = validate_relative_file_path(file.path or "")
-                final_uri = safe_join_viking_uri(self.target_uri, relative).rstrip("/")
-                if final_uri in self.file_catalog_uris:
-                    raise ValueError(f"file {index} path exists; use its update_uri")
-            if final_uri in final_uris:
-                raise ValueError(f"duplicate final output path: {final_uri}")
-            final_uris.add(final_uri)
-
-            if file.content is not None:
-                payload = None
-                content_bytes = file.content.encode("utf-8")
-            else:
-                payload = await self._read_workspace_bytes(
-                    file.workspace_path or "",
-                    tool_context=tool_context,
-                    label=f"file {index}",
-                )
-                content_bytes = payload
-            if target_type == "resource":
-                page_type = validate_declared_okf_markdown(final_uri, content_bytes)
-                existing_wiki = bool(file.update_uri and await self._is_wiki_uri(final_uri))
-                if existing_wiki and page_type is None:
-                    raise ValueError(
-                        f"file {index} updates an existing Wiki page and must retain "
-                        "valid OKF frontmatter with a non-empty type"
-                    )
-            file_payloads.append(payload)
-
-        if target_type == "skill":
-            self.skill_name = self._validate_skill_bundle(bundle, file_payloads)
         page_by_id = {page.page_id: page for page in bundle.pages}
         link_errors: list[str] = []
         warnings: list[str] = []
@@ -1080,7 +516,7 @@ class SubmitWikiBundleTool(Tool):
         if link_errors:
             raise ValueError(f"{len(link_errors)} invalid link(s): " + "; ".join(link_errors))
         bundle.links = valid_links
-        return file_payloads, warnings
+        return warnings
 
     async def _is_wiki_uri(self, uri: str) -> bool:
         if not relative_uri_path(self.target_uri, validate_safe_viking_uri_path(uri)):
@@ -1094,57 +530,7 @@ class SubmitWikiBundleTool(Tool):
             return True
         return False
 
-    @staticmethod
-    def _validate_skill_bundle(bundle: WikiBundleDraft, file_payloads: list[bytes | None]) -> str:
-        if not bundle.files:
-            raise ValueError("Skill bundle must contain files")
-
-        skill_names: set[str] = set()
-        contents: dict[str, bytes] = {}
-        for index, file in enumerate(bundle.files):
-            relative = validate_relative_file_path(file.path or "")
-            parts = relative.split("/")
-            if len(parts) < 2:
-                raise ValueError(f"file {index} must be under <skill-name>/, got: {relative}")
-            skill_names.add(parts[0])
-            payload = (
-                file.content.encode("utf-8") if file.content is not None else file_payloads[index]
-            )
-            if payload is None:
-                raise ValueError(f"file {index} has no materialized content")
-            contents[relative] = payload
-
-        if len(skill_names) != 1:
-            raise ValueError("Skill bundle must contain exactly one top-level Skill directory")
-        skill_name = next(iter(skill_names))
-        skill_md_path = f"{skill_name}/SKILL.md"
-        skill_md = contents.get(skill_md_path)
-        if skill_md is None:
-            raise ValueError(f"Skill bundle must include {skill_md_path}")
-        try:
-            skill_md_text = skill_md.decode("utf-8")
-            parsed = SkillLoader.parse(skill_md_text, source_path=skill_md_path)
-            parsed_name = validate_skill_name(parsed.get("name"))
-        except (UnicodeDecodeError, ValueError, OpenVikingError, yaml.YAMLError) as exc:
-            raise ValueError(str(exc)) from exc
-        if parsed_name != skill_name:
-            raise ValueError(f"Skill name '{parsed_name}' does not match directory '{skill_name}'")
-        validation = validate_skill_format(
-            skill_md_text,
-            strict=True,
-            skill_dir_name=skill_name,
-            source_path=skill_md_path,
-        )
-        if not validation["valid"]:
-            messages = [
-                str(issue.get("message") or issue.get("rule") or "invalid Skill")
-                for issue in validation["errors"]
-            ]
-            raise ValueError("; ".join(messages))
-        return skill_name
-
 
 __all__ = [
-    "SubmitCompileOutputTool",
     "SubmitWikiBundleTool",
 ]

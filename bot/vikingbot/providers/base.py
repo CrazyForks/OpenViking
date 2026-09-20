@@ -87,7 +87,7 @@ def parse_tool_arguments(raw_arguments: Any) -> dict[str, Any]:
         if not (stripped.startswith("{") and stripped.endswith("}")):
             return {"raw": raw_arguments}
         try:
-            parsed = json_repair.loads(raw_arguments)
+            parsed = json_repair.loads(raw_arguments, stream_stable=True)
         except (ValueError, TypeError, RecursionError):
             return {"raw": raw_arguments}
         if not isinstance(parsed, dict):
@@ -152,6 +152,7 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float = 0.7,
         session_id: str | None = None,
+        thinking: bool | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -163,6 +164,7 @@ class LLMProvider(ABC):
             max_tokens: Maximum tokens in response. None uses the model provider default.
             temperature: Sampling temperature.
             session_id: Optional session ID for tracing.
+            thinking: Optional per-call reasoning mode; None preserves provider configuration.
 
         Returns:
             LLMResponse with content and/or tool calls.

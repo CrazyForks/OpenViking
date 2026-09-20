@@ -275,14 +275,6 @@ class AgentIterationLimitExceeded(RuntimeError):
         )
 
 
-class AgentRepairLimitExceeded(RuntimeError):
-    """Final validation repair stopped; usage and generated files remain available for submission."""
-
-    def __init__(self, usage: dict[str, int]):
-        self.usage = usage
-        super().__init__("Final output repair budget exhausted")
-
-
 def render_budget_reminder(
     remaining: int,
     thresholds: tuple[int, int, int] = (15, 8, 3),
@@ -2055,32 +2047,8 @@ class AgentLoop:
         """
 
         max_iterations = getattr(self, "max_iterations", 0)
-        submit_tool = tool_registry.get("submit_wiki_bundle")
-        repair_calls = 0
-
-        def stop_repair() -> bool:
-            """Bound final Resource repair without resetting the agent's total iteration budget."""
-            nonlocal repair_calls
-            attempts = getattr(submit_tool, "validation_attempts", 0)
-            if not attempts:
-                return False
-            if attempts >= 2 or repair_calls >= submit_tool.limits.repair_iterations:
-                return True
-            repair_calls += 1
-            return False
 
         async def status_note_provider(iteration: int) -> str | None:
-            if repair_calls:
-                remaining_repairs = submit_tool.limits.repair_iterations - repair_calls + 1
-                return (
-                    f"Final output validation failed: {submit_tool.validation_error}\n"
-                    f"This is repair round {repair_calls}/{submit_tool.limits.repair_iterations}; "
-                    f"{remaining_repairs} repair round(s) remain including this one. "
-                    "Fix the reported output error directly and call submit_wiki_bundle again. "
-                    "Inspections also consume repair rounds; do not investigate unrelated failures. "
-                    "When repair ends, the runtime commits every file in the final output directory "
-                    "as written, including files that fail validation. Preserve all generated output."
-                )
             remaining = max(0, max_iterations - iteration)
             if budget_reminder_thresholds and remaining in budget_reminder_thresholds:
                 return render_budget_reminder(remaining, budget_reminder_thresholds)
@@ -2118,13 +2086,10 @@ class AgentLoop:
             context_compact_budget=context_compact_budget,
             pre_compact_prompt=pre_compact_prompt,
             status_note_provider=status_note_provider,
-            should_stop=stop_repair,
         )
         submit_tool = tool_registry.get("submit_wiki_bundle")
         bundle = getattr(submit_tool, "bundle", None)
         if bundle is None:
-            if getattr(submit_tool, "validation_attempts", 0):
-                raise AgentRepairLimitExceeded(token_usage)
             if iteration >= self.max_iterations:
                 raise AgentIterationLimitExceeded(self.max_iterations, usage=token_usage)
             raise ValueError("AGENT_OUTPUT_INVALID: Agent did not submit a valid Wiki bundle")
@@ -2204,7 +2169,9 @@ class AgentLoop:
             if msg.metadata.get("studio_managed"):
                 from vikingbot.studio.policy import disabled_group_tools
 
-                disabled_tools = list(set(disabled_tools) | set(disabled_group_tools(self.tools.tool_names)))
+                disabled_tools = list(
+                    set(disabled_tools) | set(disabled_group_tools(self.tools.tool_names))
+                )
             openviking_connection = getattr(msg, "openviking_connection", None)
             if not isinstance(openviking_connection, dict):
                 openviking_connection = None
