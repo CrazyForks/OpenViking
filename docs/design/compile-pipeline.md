@@ -1,8 +1,8 @@
 # Compile collection pipeline
 
 Compile 根据自然语言 Skill，将一组来源材料转换为目标目录中的文件。
-Resource 与 Skill 命名空间共用 Map → Shuffle → Reduce → Merge 流水线；Memory 使用独立的页面提交路径。
-用户通过现有 API/CLI 提供来源、目标、Skill 和可选指令，无需编写执行计划。
+Resource 与 Skill 命名空间共用 Map → Shuffle → Reduce → Finalize 流水线；Memory 使用独立的页面提交路径。
+用户通过现有 API/CLI 提供来源、目标、Skill 和可选指令，无需编写执行计划。通过 `--args '{"wiki_links":true}'` 开启 Wiki 链接与导航处理；省略该参数时默认关闭。
 
 ## 使用
 
@@ -24,13 +24,13 @@ Planner 将 Skill 转换为结构化契约和受限计划；默认流程为：
 records = p.map(sources, task=contract.extract)
 groups = p.shuffle(records, by=contract.routing, against=target)
 changes = p.reduce(groups, task=contract.reduce)
-p.merge(changes, into=target)
+p.finalize(changes, into=target)
 ```
 
 - **Map**：按来源范围提取证据，保留来源引用；独立成品可同时提交完整正文。
 - **Shuffle**：通过全局向量候选和目标内检索组织工作组，不以路径或 scope 精确相等作为召回前提。
 - **Reduce**：结合组内证据与历史正文，决定合并、拆分、保留或更新，生成最终路径和内容。
-- **Merge**：检查来源、路径和版本，生成适用的导航，并通过目标命名空间的发布接口写入。
+- **Finalize**：检查路径唯一性、交付完整性和版本，按 `args.wiki_links` 选择是否整理 Wiki 链接及导航，返回待发布操作，由服务执行写入。
 
 工作组表示需要共同检查的材料，不表示事实等价，也不预定输出文件数量。
 契约支持以 records 为中间产物的有限多级综合；最终文件同路径时归并候选正文与来源。
@@ -55,7 +55,7 @@ Resource 新文件使用 create；更新绑定旧内容 hash，在服务端文�
 版本变化、目标消失或路径占用的文件跳过并报告冲突，其余文件继续写入。
 批量发布不承诺多文件原子性；索引刷新由现有写入链路异步执行。
 
-声明 OKF 的 Resource 页面应用 Wiki 校验、来源链接和祖先导航；普通文件保留其格式。
+声明 OKF 的 Resource 页面始终应用 Wiki 格式校验。`args.wiki_links` 是布尔值，默认 `false`：保留提交正文和已有链接，不自动补充链接或导航。设为 `true` 时，对 Wiki 页面整理链接、补充来源链接并生成祖先导航；普通文件和 Skill 包不受影响。来源追踪、覆盖率统计和版本检查始终执行。
 Skill 包通过现有格式校验及 `add_skill` / `update_skill` 发布，保留未修改附件。
 Skill 更新在发布前检查 hash，但检查与整包替换之间仍存在并发窗口。
 
@@ -80,10 +80,9 @@ Skill 更新在发布前检查 hash，但检查与整包替换之间仍存在并
 - [流水线执行](../../bot/vikingbot/compile/pipeline.py)：持有任务运行时与依赖，准备来源、解析计划、调度算子和流转数据集，汇总跨阶段状态与覆盖率。
 - [Map](../../bot/vikingbot/compile/ops/map.py)：`run` 分批调度提取，`map_job` 执行单个作业。
 - [Shuffle](../../bot/vikingbot/compile/ops/shuffle.py)：`Shuffle.run` 组织工作组；模块内包含向量候选、历史召回与分组逻辑。同次计划内复用召回缓存。
-- [Reduce](../../bot/vikingbot/compile/ops/reduce.py)：`run` 调度工作组，`reduce_group` 综合证据与历史，处理成品复用和结构化溢出聚合；`merge_candidates` 综合同路径候选正文。不同路径的候选合并按 `merge_concurrency` 有界并发，每个路径仅由一个任务处理，返回顺序保持稳定；服务默认从 `vlm.max_concurrent` 获取该上限，模型调用同时受全局并发限制。
-- [Merge](../../bot/vikingbot/compile/ops/merge.py)：`run` 汇总已接受成果，处理导航、链接和版本检查，返回待发布操作；服务的部分成果恢复使用同一入口。
+- [Reduce](../../bot/vikingbot/compile/ops/reduce.py)：`run` 调度工作组，`reduce_group` 综合证据与历史，处理成品复用和结构化溢出聚合；`merge_candidates` 综合同路径候选正文。不同路径的候选合并按 `merge_concurrency` 有界并发，每个路径仅由一个任务处理，返回顺序保持稳定；该上限由 `bot.compile.reduce_concurrency` 配置。Map 和 Shuffle 分别使用 `bot.compile.map_concurrency`、`bot.compile.shuffle_concurrency`，未配置的阶段继承 `vlm.max_concurrent`；模型调用同时受服务内所有 Compile 任务共享的 `vlm.max_concurrent` 限制。
+- [Finalize](../../bot/vikingbot/compile/ops/finalize.py)：`run` 汇总已接受成果，处理导航、链接和版本检查，返回待发布操作；服务的部分成果恢复使用同一入口。
 - [算子共享逻辑](../../bot/vikingbot/compile/ops/common.py)：Map 与 Reduce 共用 `transform`、`pack`、记录 prompt 和来源追踪；各算子共用 `job` 记录作业状态及重试。
-- [文件编辑与草稿](../../bot/vikingbot/compile/file_ops.py)：补丁应用、历史正文读取、文件校验与成果存储；直接使用同一运行时状态，不承担流程级 Merge 调度。
+- [文件编辑与草稿](../../bot/vikingbot/compile/file_ops.py)：补丁应用、历史正文读取、文件校验与成果存储；直接使用同一运行时状态，不承担流程级 Finalize 调度。
 - [模型调用与 I/O](../../bot/vikingbot/compile/pipeline_io.py)：通用模型请求、缓存、校验修复、任务文件及并发工作队列。
 - [任务与发布服务](../../bot/vikingbot/compile/service.py)
-- [增量编译测试](../../bot/tests/test_compile_incremental.py)与[分组测试](../../bot/tests/test_compile_shuffle.py)

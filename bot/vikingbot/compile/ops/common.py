@@ -45,19 +45,16 @@ path under the compile target.
 Put both fields at the record's top level, never inside payload.
 Before calling emit, check this pairing for every record.
 Each record.inputs lists ONLY supplied input IDs supporting its payload; runtime assigns IDs,
-stores complete source evidence and propagates provenance. Return records only; runtime tracks
+stores complete source evidence and propagates provenance. Return records (ready drafts allowed); runtime tracks
 unreferenced inputs. References establish provenance, not semantic completeness.
+Source text uses shard-local 1-based line numbers; source_range is the raw input ID. Optional top-level
+evidence_spans use inclusive start_line/end_line. Include relevant conditions, exceptions, headings
+and table headers/notes; omit uncertain locations.
 Read all supplied text; preserve required detail, citations, exceptions and applicability conditions.
 Use short routing_text; never group just by title. Independent finished files use ready_content with
 ready_path and concise identity/scope/relationship payloads. Evidence details already in the body
 need not be repeated in payload. Check finished content against originals and every Skill rule.
 Fragments requiring joint synthesis retain full necessary evidence in payload and no ready content.
-Other files generated in this assignment can be referenced by their exact titles; runtime resolves
-unambiguous mentions after ownership and final paths are accepted. Never assume proposed paths exist.
-Determine boundaries and relations before writing. Each page has one primary Skill classification
-and every required directory level; shared sources/products do not unite different reader purposes.
-For OKF Wiki, write content pages only; runtime owns navigation, so never draft or emit OKF index.md.
-Ordinary non-Wiki files follow their Skill.
 """
 )
 
@@ -67,6 +64,14 @@ async def payload(runtime: Pipeline, record: Record) -> dict:
     data = await runtime.files.get(record.payload_ref)
     if data is None:
         raise ValueError(f"Missing evidence/payload: {record.payload_ref}")
+    if "text" in data and "uri" in data:
+        # Number only the model-facing view; saved evidence and its hash remain unchanged.
+        data = {
+            **data,
+            "text": "".join(
+                f"{i}: {line}" for i, line in enumerate(data["text"].splitlines(keepends=True), 1)
+            ),
+        }
     item = {"id": record.record_id, "payload": data}
     if record.ready_ref:
         item["ready_file"] = await runtime.files.get(record.ready_ref)
@@ -128,6 +133,18 @@ async def transform(runtime: Pipeline, label, transform, records, extra=None) ->
     def validate(response):
         validate_input_refs(records, [i for draft in response.records for i in draft.inputs])
         for index, draft in enumerate(response.records):
+            allowed = {ref for r in records if r.record_id in draft.inputs for ref in r.source_refs}
+            for span in draft.evidence_spans:
+                if span.source_range not in allowed:
+                    raise ValueError("Evidence span must belong to this record's supporting inputs")
+                source = runtime.evidence[span.source_range]
+                line_count = (
+                    source["end_line"]
+                    - source["start_line"]
+                    + int(source["end_char"] > source["start_char"])
+                )
+                if not span.start_line <= span.end_line <= line_count:
+                    raise ValueError("Evidence span lines are outside the original source range")
             if draft.ready_content_ref is not None:
                 raise ValueError("Ready references require an agent with scratch access")
             # Agent file references are resolved before checking record content.
@@ -189,6 +206,7 @@ async def transform(runtime: Pipeline, label, transform, records, extra=None) ->
                 "unique_source_count": len(evidence_uris),
                 "source_examples": evidence_uris[:8],
                 "source_ranges": source_refs,
+                "evidence_spans": [span.model_dump() for span in draft.evidence_spans],
                 "routing_text": draft.routing_text,
                 "scope": draft.scope,
             },

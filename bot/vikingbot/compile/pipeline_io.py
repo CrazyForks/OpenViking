@@ -24,6 +24,7 @@ from vikingbot.compile.plan import (
     Contract,
     FileResponse,
     MissingReadyPathError,
+    RouteBatchResponse,
     Transform,
     digest,
     parse_plan,
@@ -271,13 +272,11 @@ class JsonModel:
 
     async def _ask(self, stage, system, data, schema, validate, *, agent):
         if schema is FileResponse:
-            # Original shards outrank derived records. Inline complete ranges that
-            # fit; the scoped reader supplies the remainder without catalog access.
+            # Inline original excerpts when located; unlocated records retain full shards.
+            # The scoped reader can expand partial evidence without catalog access.
             evidence = EvidenceReader(self.files, data)
             for reference in sorted(evidence.allowed - evidence.delivered):
-                source = await self.files.get(f"sources/{reference}")
-                if source is None:
-                    raise ValueError("Assigned source range is missing")
+                source = await evidence.read(reference, evidence.spans.get(reference, ()))
                 candidate = {
                     **data,
                     "original_evidence": {**data.get("original_evidence", {}), reference: source},
@@ -293,7 +292,7 @@ class JsonModel:
         key = digest(
             [self.identity, stage, system, data, schema.model_json_schema(), agent, dependencies]
         )
-        cached = await self.files.get(f"cache/{key}")
+        cached = None if schema is RouteBatchResponse else await self.files.get(f"cache/{key}")
         if cached is not None and (
             not self.resources or await self.resources.valid(cached["dependencies"])
         ):
@@ -314,6 +313,8 @@ class JsonModel:
             )
         else:
             result = await self.direct(stage, system, data, schema, validate, key)
+        if schema is RouteBatchResponse:
+            return result  # Shuffle persists only individually validated routing decisions.
         await self.files.put(
             f"cache/{key}",
             {
@@ -451,7 +452,11 @@ class JsonModel:
                 )
                 self.metrics["validation_failures"] += 1
                 failure_limit = 3 if isinstance(exc, MissingReadyPathError) else 2
-                if failures >= failure_limit or category == "truncated":
+                if (
+                    schema is RouteBatchResponse
+                    or failures >= failure_limit
+                    or category == "truncated"
+                ):
                     raise ValueError(f"{stage}: {category}: {error}") from exc
                 self.metrics["repairs"] += 1
                 messages.append(

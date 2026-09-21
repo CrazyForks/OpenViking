@@ -11,9 +11,8 @@ from collections.abc import Sequence
 from threading import Event
 
 from openviking.core.namespace import relative_uri_path
-from vikingbot.compile.ops.common import job
 from vikingbot.compile.pipeline_io import bounded_jobs
-from vikingbot.compile.plan import Group, Record, RouteResponse, digest
+from vikingbot.compile.plan import Group, Record, RouteBatchResponse, RouteDecision, digest
 
 
 def top_candidates(
@@ -173,7 +172,7 @@ class Shuffle:
         await bounded_jobs(
             (missing[start : start + 32] for start in range(0, len(missing), 32)),
             embed,
-            concurrency=r.limits.source_concurrency,
+            concurrency=r.limits.shuffle_concurrency,
             metrics=r.metrics,
         )
         return [vectors[text] for text in texts]
@@ -247,7 +246,7 @@ class Shuffle:
         """Assign every record to one work set, allowing cross-path and cross-scope links.
 
         Independent batches compare global candidates, including later records.
-        Only failed batches remain unfinished; successful records continue grouping.
+        Only failed primary records retry; successful decisions are persisted immediately.
         Unconfirmed candidates never become links. Recall failures
         are recorded without fabricating empty history; cancellation propagates.
         """
@@ -272,97 +271,160 @@ class Shuffle:
                 "sources": sorted({r.evidence[ref]["uri"] for ref in record.source_refs})[:3],
             }
 
+        accepted, errors = {}, {}
+        system = (
+            r.system
+            + "\nSHUFFLE: "
+            + getattr(r.contract, node.task)
+            + "\nJudge each primary independently; sharing a batch does not imply a group. "
+            "Select only IDs in that primary's candidates and URIs in its history. "
+            "Use identity, version, applicability and reader purpose; topical similarity alone "
+            "does not establish a link. Preserve potential supplements, versions and contradictions "
+            "for joint inspection; Reduce resolves facts and decides whether to combine or separate. "
+            "Different proposed paths or scope wording do not prevent joint processing. "
+            "Do not choose output paths, merge facts or exclude primary records. Return exactly "
+            "one decision per primary, with empty related/history lists when no comparison is needed."
+        )
+
         async def route(indices):
-            assigned = [records[i] for i in indices]
+            """Keep valid decisions and record per-primary failures for the next retry round."""
             data, evidence, candidates = [], {}, {}
             for index in indices:
                 record = records[index]
                 nearby = [records[i] for i in neighbours[index]]
-                history = (
-                    await self.candidates(record.routing_text, stable_uri=record.target_uri)
-                    if node.against_target
-                    else []
-                )
+                try:
+                    history = (
+                        await self.candidates(record.routing_text, stable_uri=record.target_uri)
+                        if node.against_target
+                        else []
+                    )
+                except (OSError, ValueError) as exc:
+                    errors[record.record_id] = str(exc)[:800]
+                    continue
                 data.append(
                     {
                         **describe(record),
                         "candidates": [other.record_id for other in nearby],
                         "history": history,
+                        **(
+                            {"previous_error": errors[record.record_id]}
+                            if record.record_id in errors
+                            else {}
+                        ),
                     }
                 )
                 candidates.update((other.record_id, describe(other)) for other in nearby)
                 for other in [record, *nearby]:
                     evidence[other.record_id] = {
                         "id": other.record_id,
-                        "payload": {
-                            "source_ranges": other.source_refs,
-                        },
+                        "payload": {"source_ranges": other.source_refs},
                     }
-
-            history_uris = {entry["uri"] for item in data for entry in item["history"]}
-
-            def validate(response):
-                if sorted(d.record for d in response.decisions) != sorted(
-                    x.record_id for x in assigned
-                ):
-                    raise ValueError("Routing must account for every supplied record exactly once")
-                for decision in response.decisions:
-                    if not set(decision.related) <= evidence.keys():
-                        raise ValueError(
-                            "Joint processing must refer to records shown in this request"
-                        )
-                    if not set(decision.history) <= history_uris:
-                        raise ValueError("Historical context must name a recalled file")
-
-            async def decide():
-                response = await r.model.ask(
-                    "route",
-                    r.system
-                    + "\nSHUFFLE: "
-                    + getattr(r.contract, node.task)
-                    + "\nSelect any records or candidates shown in this request that need joint "
-                    "synthesis, comparison or "
-                    "deduplication. Preserve potential supplements, versions and contradictions "
-                    "together; Reduce resolves their facts and applicability. Different proposed "
-                    "paths or scope wording do not prevent joint processing. Broad topical "
-                    "similarity alone does not require linking independent material. If identity "
-                    "is uncertain but joint inspection is needed, include the candidate. Select "
-                    "any recalled history shown in this request that needs comparison; "
-                    "it need not be updated. Do not "
-                    "choose output paths, merge facts or exclude records. One work set can "
-                    "produce several files. Return one decision per supplied record.",
+            # Primary descriptions already appear in records; share other candidates once.
+            for item in data:
+                candidates.pop(item["record"], None)
+            request = {
+                "records": data,
+                "scope_fields": r.contract.distinguish,
+                "candidates": candidates,
+                "inputs": list(evidence.values()),
+            }
+            attachments = getattr(r.model.resources, "snapshots", {})
+            budget_system = system + json.dumps(attachments, ensure_ascii=False)
+            if len(indices) > 1 and not r.model.fits(budget_system, request, RouteBatchResponse):
+                middle = len(indices) // 2
+                await route(indices[:middle])
+                await route(indices[middle:])
+                return
+            entries = {}
+            primary_ids = {item["record"] for item in data}
+            for index in indices:
+                key = records[index].record_id
+                await r.files.put(
+                    f"jobs/{node.name}-{key}",
                     {
-                        "records": data,
-                        "scope_fields": r.contract.distinguish,
-                        "candidates": candidates,
-                        "inputs": list(evidence.values()),
+                        "status": "running",
+                        "inputs": [key],
+                        "attempt": attempt,
                     },
-                    RouteResponse,
-                    validate,
                 )
-                return response.decisions
+            if data:
+                try:
+                    response = await r.model.ask("route", system, request, RouteBatchResponse)
+                    for raw in response.decisions:
+                        key = raw.get("record") if isinstance(raw, dict) else None
+                        if isinstance(key, str) and key in primary_ids:
+                            entries.setdefault(key, []).append(raw)
+                        else:
+                            r.metrics["route_unassigned_decisions"] += 1
+                except asyncio.CancelledError:
+                    for index in indices:
+                        key = records[index].record_id
+                        await r.files.put(
+                            f"jobs/{node.name}-{key}",
+                            {
+                                "status": "pending",
+                                "inputs": [key],
+                                "attempt": attempt,
+                            },
+                        )
+                    raise
+                except (OSError, ValueError) as exc:
+                    for item in data:
+                        errors[item["record"]] = str(exc)[:800]
+                else:
+                    for item in data:
+                        key = item["record"]
+                        try:
+                            if len(entries.get(key, [])) != 1:
+                                raise ValueError("Return exactly one decision for this primary")
+                            decision = RouteDecision.model_validate(entries[key][0])
+                            if not set(decision.related) <= set(item["candidates"]):
+                                raise ValueError(
+                                    "Related IDs must belong to this primary's candidates"
+                                )
+                            if not set(decision.history) <= {h["uri"] for h in item["history"]}:
+                                raise ValueError(
+                                    "History must belong to this primary's recalled files"
+                                )
+                        except ValueError as exc:
+                            r.metrics["route_validation_failures"] += 1
+                            errors[key] = str(exc)[:800]
+                        else:
+                            await r.files.put(f"routes/{node.name}-{key}", decision.model_dump())
+                            accepted[key] = decision
+                            errors.pop(key, None)
+            for index in indices:
+                key = records[index].record_id
+                state = "completed" if key in accepted else "failed" if attempt == 3 else "pending"
+                entry = {"status": state, "inputs": [key], "attempt": attempt}
+                if key in accepted:
+                    entry["output_count"] = 1
+                else:
+                    entry["error"] = errors[key]
+                    if state == "failed":
+                        r.status[key] = "failed"
+                await r.files.put(f"jobs/{node.name}-{key}", entry)
 
-            return await job(
-                r,
-                f"{node.name}-batch-{digest([item.record_id for item in assigned])[:16]}",
-                assigned,
-                decide,
+        pending = list(range(len(records)))
+        for attempt, size in enumerate([r.limits.shuffle_batch_size] * 2 + [1], start=1):
+            if attempt > 1:
+                r.metrics["route_record_retries"] += len(pending)
+            await bounded_jobs(
+                (pending[start : start + size] for start in range(0, len(pending), size)),
+                route,
+                concurrency=r.limits.shuffle_concurrency,
+                metrics=r.metrics,
             )
-
-        batches = ([index] for index in range(len(records)))
-        results = await bounded_jobs(
-            batches,
-            route,
-            concurrency=r.limits.source_concurrency,
-            metrics=r.metrics,
-            failures=r.failures,
-        )
+            pending = [index for index in pending if records[index].record_id not in accepted]
+            if not pending:
+                break
+        if pending:
+            r.failures.append(f"{len(pending)} routing records failed: {list(errors.values())[:4]}")
         links, targets = [], {}
-        for decisions in results:
-            for decision in decisions:
+        for record in records:
+            if decision := accepted.get(record.record_id):
                 links.extend((decision.record, other) for other in decision.related)
                 targets[decision.record] = decision.history
-                await r.files.put(f"routes/{node.name}-{decision.record}", decision.model_dump())
         # Missing routing decisions exclude only their own records, not successful neighbours.
         by_id = {record.record_id: record for record in records if record.record_id in targets}
         r.metrics["route_blocked_records"] += len(records) - len(by_id)

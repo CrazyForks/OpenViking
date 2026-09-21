@@ -193,10 +193,17 @@ class EvidenceReader(Tool):
     """Read only original source ranges assigned to this operator, never a source catalog."""
 
     name = "read_evidence"
-    description = "Read an assigned original source range by its source_range ID to verify details."
+    description = (
+        "Read assigned original evidence. Optional start_line/end_line are one-based, inclusive "
+        "lines within the source_range shard; omit both for the complete shard."
+    )
     parameters = {
         "type": "object",
-        "properties": {"source_range": {"type": "string"}},
+        "properties": {
+            "source_range": {"type": "string"},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+        },
         "required": ["source_range"],
         "additionalProperties": False,
     }
@@ -204,19 +211,71 @@ class EvidenceReader(Tool):
     def __init__(self, files, data):
         self.files = files
         self.allowed = set()
-        self.delivered = set(data.get("original_evidence", {})) if isinstance(data, dict) else set()
+        self.spans, full = {}, set()
+        self.delivered = (
+            {
+                ref
+                for ref, value in data.get("original_evidence", {}).items()
+                if value.get("complete", True)
+            }
+            if isinstance(data, dict)
+            else set()
+        )
         for item in data.get("inputs", []) if isinstance(data, dict) else []:
             payload = item.get("payload", {})
             if "text" in payload and "uri" in payload:
                 self.allowed.add(item["id"])
                 self.delivered.add(item["id"])
             self.allowed.update(payload.get("source_ranges", []))
+            spans = payload.get("evidence_spans", [])
+            full.update(set(payload.get("source_ranges", [])) - {s["source_range"] for s in spans})
+            for span in spans:
+                self.spans.setdefault(span["source_range"], []).append(
+                    (span["start_line"], span["end_line"])
+                )
+        # A record without locations still needs full evidence, even if a neighbour has hints.
+        for reference in full:
+            self.spans.pop(reference, None)
 
-    async def execute(self, tool_context=None, source_range=""):
-        """Resolve a runtime-issued evidence ID and return the complete immutable range."""
+    async def read(self, source_range, spans=()):
+        """Return exact original excerpts with shard metadata, or the full shard without bounds.
+
+        Reject unauthorized IDs and invalid shard-local lines; merge overlapping/adjacent
+        spans. Partial results retain context and explicitly keep full-shard reads available.
+        """
         if source_range not in self.allowed:
             raise ValueError("Evidence is outside this assignment")
         value = await self.files.get(f"sources/{source_range}")
         if value is None:
             raise ValueError("Assigned source range is missing")
-        return json.dumps(value, ensure_ascii=False)
+        lines = value["text"].splitlines(keepends=True)
+        merged = []
+        for start, end in sorted(spans):
+            if (
+                type(start) is not int
+                or type(end) is not int
+                or not 1 <= start <= end <= len(lines)
+            ):
+                raise ValueError("Evidence lines are outside the original source range")
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+            else:
+                merged.append((start, end))
+        if not merged or merged == [(1, len(lines))]:
+            return {**value, "complete": True, "line_count": len(lines)}
+        return {
+            **{k: v for k, v in value.items() if k != "text"},
+            "complete": False,
+            "line_count": len(lines),
+            "excerpts": [
+                {"start_line": start, "end_line": end, "text": "".join(lines[start - 1 : end])}
+                for start, end in merged
+            ],
+        }
+
+    async def execute(self, tool_context=None, source_range="", start_line=None, end_line=None):
+        """Read both inclusive line bounds or omit both for full evidence; return JSON."""
+        if (start_line is None) != (end_line is None):
+            raise ValueError("Supply both start_line and end_line, or neither")
+        spans = [] if start_line is None else [(start_line, end_line)]
+        return json.dumps(await self.read(source_range, spans), ensure_ascii=False)

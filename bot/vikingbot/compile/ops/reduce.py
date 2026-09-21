@@ -1,7 +1,7 @@
 """Reduce candidate work sets into records or revision-bound files.
 
 Structured overflow aggregation and same-path candidate synthesis belong to Reduce;
-Merge prepares the accepted file collection for publication without model calls.
+Finalize prepares the accepted file collection for publication without model calls.
 """
 
 from __future__ import annotations
@@ -36,8 +36,9 @@ _FILES = (
 Submit files[].path with content or content_ref. ready_* keys belong only to record transforms.
 Original evidence is authoritative; derived payload fields are fallible extraction notes.
 Verify numbers, units, boundaries, exceptions and claimed uncertainty against original_evidence.
-original_evidence contains complete original ranges. Consult read_evidence when details are missing,
-ambiguous or conflicting; use sufficient supplied evidence directly. Correct extraction mistakes.
+original_evidence may contain excerpts marked complete=false; absence from an excerpt is not absence
+from the source. Expand with read_evidence when conditions, table context or referenced clauses are
+missing, ambiguous or conflicting; omit line bounds to read the full shard. Correct extraction mistakes.
 Use original source citations carried by evidence; preserve exceptions and applicability conditions.
 For existing files, prefer exact unique-anchor patches and return the supplied base_hash.
 Patch anchors must be copied from the supplied old text, occur exactly once and not overlap.
@@ -53,14 +54,11 @@ related_outputs is a partial catalog of accepted current-task files with real fi
 relevant entries for links and avoid duplicating their full bodies. An unlisted page is unknown,
 not absent; never claim another group has not produced a page. When a target path is unknown,
 mention the relevant subject naturally without inventing a destination.
-related_subjects contains assigned topics, not accepted files. Use their exact names for relevant
-cross-page mentions; runtime links them only if an unambiguous matching final page exists.
+related_subjects contains assigned topics, not accepted files; do not treat them as link targets.
 Set each file.inputs to supplied input IDs actually used by that file. Multiple inputs may support
 one file; do not create a separate file for every input. Do not claim unrelated sources.
 Wiki files require YAML type, title, single-line description and source citations. Generic files
 follow their declared format. Never fabricate requirements, source identities or existing paths.
-Runtime exclusively builds OKF navigation indexes after all content files are prepared. Submit
-content files only; runtime fulfills any navigation duties mentioned in the Skill or transform.
 """
 )
 

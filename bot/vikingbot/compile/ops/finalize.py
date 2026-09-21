@@ -15,7 +15,6 @@ from vikingbot.compile.renderer import (
     _link_uri,
     finalize_resource_output,
     relocate_wiki_links,
-    validate_relative_file_path,
 )
 
 if TYPE_CHECKING:
@@ -25,9 +24,11 @@ if TYPE_CHECKING:
 async def run(runtime: Pipeline, references: list[str], *, partial=False) -> RenderedBundle:
     """Validate one writer per path and prepare revision-bound publication operations.
 
-    References name accepted task artifacts; the returned bundle contains write
-    operations for the service to publish, without performing target writes here.
-    Navigation uses code-rendered direct-child links and reads only ancestor indexes.
+    References name accepted task artifacts validated during generation or checkpoint
+    recovery. The returned bundle contains write operations for the service to publish,
+    without performing target writes here.
+    With wiki_links enabled, navigation uses code-rendered direct-child links and
+    reads only ancestor indexes. Otherwise accepted file contents remain unchanged.
     Retained arbitrary pages are never enumerated or loaded; old entries are preserved.
     Partial recovery retains the same write guards. Resource recovery permits missing
     prescribed outputs; Skill packages require all declared files before publication.
@@ -37,9 +38,7 @@ async def run(runtime: Pipeline, references: list[str], *, partial=False) -> Ren
     relocations = {}
     for reference in references:
         artifact = await runtime.files.get(reference)
-        if content_hash(artifact["content"]) != artifact["sha256"]:
-            raise ValueError("Prepared artifact content hash mismatch")
-        path = validate_relative_file_path(artifact["path"])
+        path = artifact["path"]
         if path in owners:
             raise ValueError(f"Multiple output writers claim {path}")
         owners[path] = artifact["owner"]
@@ -48,8 +47,6 @@ async def run(runtime: Pipeline, references: list[str], *, partial=False) -> Ren
         origin = artifact.get("origin", path)
         origins[path] = origin
         relocations[origin] = path if origin not in relocations else None
-        if any(ref not in runtime.evidence for ref in artifact["source_refs"]):
-            raise ValueError("Artifact refers to missing source evidence")
         source_uris[path] = sorted(
             {runtime.evidence[ref]["uri"] for ref in artifact["source_refs"]}
         )
@@ -58,7 +55,7 @@ async def run(runtime: Pipeline, references: list[str], *, partial=False) -> Ren
     wiki_files = {
         path: payload for path, payload in files.items() if file_ops.is_wiki(runtime, path, payload)
     }
-    if wiki_files:
+    if runtime.request.wiki_links and wiki_files:
         for path, payload in wiki_files.items():
             wiki_files[path] = relocate_wiki_links(
                 payload.decode(),
@@ -173,6 +170,6 @@ async def run(runtime: Pipeline, references: list[str], *, partial=False) -> Ren
     for path, output in outputs.items():
         output["sha256"] = content_hash(files[path])
     await runtime.files.put(
-        "merge", {"owners": owners, "prepared_files": len(files), "outputs": outputs}
+        "finalize", {"owners": owners, "prepared_files": len(files), "outputs": outputs}
     )
     return rendered

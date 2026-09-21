@@ -14,7 +14,7 @@ Resource 最终校验失败后，主 Agent 在最多 8 轮修复的每一轮收�
 
 Resource 子任务编译在最终提交前达到总轮次上限时，任务返回 `failed/COMPILE_INCOMPLETE`。失败或取消保留任务工作区中的草稿及 `__compile_staging__/merge-state.json`，供恢复使用。
 
-Resource Compile 的来源提取默认并发 `6` 个子 Agent，合并默认并发 `10` 个，由 `CompileLimits.source_concurrency` 和 `CompileLimits.merge_concurrency` 分别控制，不包含主 Agent。全部来源任务完成且结果领取后，运行时切换到合并并发上限。运行中、排队和已完成但未领取的结果合计不超过当前阶段并发数的两倍（默认分别为 `12` 和 `20`）；排队任务会自动启动。其他 Compile 目标继续使用 `bot.agents.subagent_max_concurrency`（默认 `8`）。来源阶段由主 Agent 按 `wait_subagents` 返回的容量派发；Resource 合并阶段由运行时自动调度完整计划，并仅重试未完成输入。主题判断由 Agent 负责，运行时校验草稿覆盖、输出路径、来源保留和 OKF 格式。
+Resource Compile 通过 `bot.compile.map_concurrency`、`bot.compile.shuffle_concurrency` 和 `bot.compile.reduce_concurrency` 配置各阶段工作并发数，同路径候选的最终 merge 复用 Reduce 上限。省略或设为 `null` 时继承 `vlm.max_concurrent`，显式值必须为正整数。这些单任务工作数限制适用于直接模型调用和 agent 执行，模型请求同时受服务级共享并发限制。参见[配置说明](../guides/01-configuration.md#botcompile)。
 
 `wait_subagents()` 默认等待到有子任务完成、失败或已无子任务；空等期间不再触发主 Agent 的模型调用，也不增加循环轮次，取消可中断等待。主 Agent 还有其他工作可做时，使用 `wait_subagents(block=false)` 立即领取已有结果。
 

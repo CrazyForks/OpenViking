@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-PROCESSING_VERSION = "compile-pipeline-26"
+PROCESSING_VERSION = "compile-pipeline-29"
 # Explicit output-token fallback when the configured VLM provides no value.
 DEFAULT_MAX_TOKENS = 32_000
 
@@ -19,7 +19,7 @@ DEFAULT_PLAN = (
     "records = p.map(sources, task=contract.extract)\n"
     "groups = p.shuffle(records, by=contract.routing, against=target)\n"
     "changes = p.reduce(groups, task=contract.reduce)\n"
-    "p.merge(changes, into=target)"
+    "p.finalize(changes, into=target)"
 )
 _PLANNER_CORE_FIELDS = {"extract", "reduce", "routing", "distinguish"}
 
@@ -55,7 +55,7 @@ class Transform(StrictModel):
         description="Payload field names mapped to optional simple descriptions; empty descriptions "
         "are allowed. Prefer one sentence per description, "
         "without a count limit. Runtime keys inputs, scope, "
-        "routing_text, ready_path, ready_content, ready_content_ref and target_uri are already "
+        "routing_text, evidence_spans, ready_path, ready_content, ready_content_ref and target_uri are already "
         "provided beside payload and must not be repeated. Leave the default for files output.",
     )
 
@@ -108,8 +108,7 @@ class Contract(StrictModel):
     overflow: Literal["direct", "structured"] = "direct"
     output_format: Literal["wiki", "files"] = Field(
         default="files",
-        description="wiki requires OKF Markdown pages; files permits arbitrary/mixed text files. "
-        "Resource OKF pages receive runtime ancestor indexes and Skill navigation formatting.",
+        description="wiki requires OKF Markdown pages; files permits arbitrary/mixed text files.",
     )
     required_paths: list[str] = Field(default_factory=list, max_length=16)
     validation: str = Field(default="", max_length=4000)
@@ -117,7 +116,7 @@ class Contract(StrictModel):
         default_factory=list,
         max_length=16,
         description="Only missing runtime capabilities that prevent this task. Deferred validation, "
-        "runtime navigation and checks delegated to operators are supported, not unsupported requirements.",
+        "checks delegated to operators are supported.",
     )
 
     @field_validator("distinguish", mode="before")
@@ -218,7 +217,7 @@ class Node:
 def parse_plan(program: str, contract: Contract) -> list[Node]:
     """Compile a small AST whitelist into typed nodes; no Python objects are evaluated.
 
-    Plans have at most 12 nodes, a single final merge, no unused datasets, rebinding,
+    Plans have at most 12 nodes, a single terminal finalize, no unused datasets, rebinding,
     implicit fan-out or literals. Each Shuffle record belongs to one work set.
     """
     if len(program) > 8000:
@@ -253,12 +252,12 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
         elif isinstance(statement, ast.Expr):
             name, call = "result", statement.value
         else:
-            raise ValueError("Only dataset assignments and a final p.merge are allowed")
+            raise ValueError("Only dataset assignments and a final p.finalize are allowed")
         if name in handles or name in {"p", "contract", "target", "sources"}:
             raise ValueError(f"Rebinding forbidden: {name}")
         if not isinstance(call, ast.Call):
             raise ValueError("Expected pipeline call")
-        op = reference(call.func, "p", {"map", "shuffle", "reduce", "merge"})
+        op = reference(call.func, "p", {"map", "shuffle", "reduce", "finalize"})
         if len(call.args) != 1 or not isinstance(call.args[0], ast.Name):
             raise ValueError("An operator takes one dataset handle")
         source = call.args[0].id
@@ -305,24 +304,34 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
         else:
             into = kwargs.get("into")
             if set(kwargs) != {"into"} or not isinstance(into, ast.Name) or into.id != "target":
-                raise ValueError("merge requires into=target")
+                raise ValueError("finalize requires into=target")
             valid, output_type = handles[source] == "files", "result"
             if index != len(tree.body) - 1:
-                raise ValueError("merge must be the final operation")
-        if not valid or (isinstance(statement, ast.Expr) and op != "merge"):
+                raise ValueError("finalize must be the final operation")
+        if not valid or (isinstance(statement, ast.Expr) and op != "finalize"):
             raise ValueError(f"Invalid dataset type for {op}: {handles[source]}")
         used.add(source)
         handles[name] = output_type
         nodes.append(Node(name, op, source, task, against))
-    if nodes[-1].op != "merge" or set(handles) - used != {nodes[-1].name}:
-        raise ValueError("Every dataset must reach the final merge")
+    if nodes[-1].op != "finalize" or set(handles) - used != {nodes[-1].name}:
+        raise ValueError("Every dataset must reach finalize")
     return nodes
+
+
+class EvidenceSpan(StrictModel):
+    """Original evidence location; line numbers are one-based, inclusive and shard-local."""
+
+    source_range: str
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
 
 
 class RecordDraft(StrictModel):
     """Model payload with local input references; runtime assigns identity and evidence."""
 
     inputs: list[str] = Field(min_length=1)
+    # Optional reading hints; omitted ranges retain full-shard evidence access.
+    evidence_spans: list[EvidenceSpan] = Field(default_factory=list)
     # JSON preserves nested facts and relations without prescribing their business shape.
     payload: dict[str, JsonValue] = Field(default_factory=dict)
     routing_text: str = Field(min_length=1, max_length=600)
@@ -383,7 +392,9 @@ class RecordResponse(StrictModel):
 
 def result_schema(schema, data):
     """Expose assignment fields and routing identities in direct and child tool schemas."""
-    result = schema.model_json_schema()
+    # The model receives strict routing instructions; malformed individual decisions
+    # remain available to Shuffle so valid neighbours survive a partial response.
+    result = (RouteResponse if schema is RouteBatchResponse else schema).model_json_schema()
     if schema is PlanProposal:
         # Keep common decisions prominent while retaining typed, opt-in advanced settings.
         contract = result["$defs"]["Contract"]
@@ -401,7 +412,7 @@ def result_schema(schema, data):
         output = result["$defs"]["Transform"]["properties"]["output"]
         output.pop("default")
         output["description"] = "Defaults to records; contract.reduce defaults to files."
-    if schema is RouteResponse:
+    if schema in (RouteResponse, RouteBatchResponse):
         ids = [item["record"] for item in data["records"]]
         result["properties"]["decisions"].update(minItems=len(ids), maxItems=len(ids))
         result["$defs"]["RouteDecision"]["properties"]["record"]["enum"] = ids
@@ -439,8 +450,8 @@ def result_schema(schema, data):
 class RouteDecision(StrictModel):
     """Candidate links for joint processing, without asserting identity or output paths.
 
-    related can name any record or candidate shown in the request for joint consideration.
-    history can name any recalled URI shown in the request, not mandatory updates.
+    related names only this primary record's candidates for joint consideration.
+    history names only this primary record's recalled URIs, not mandatory updates.
     Empty lists retain the record as an independent work set.
     """
 
@@ -454,6 +465,16 @@ class RouteResponse(StrictModel):
         description="Exactly one decision per supplied record ID, with no duplicates. "
         "Links request joint processing; Reduce decides the number and paths of output files.",
     )
+
+
+class RouteBatchResponse(StrictModel):
+    """Unvalidated routing entries; Shuffle validates and retries each primary independently.
+
+    Only the envelope is parsed here. Individual entries may be malformed and must
+    never enter the accepted-route store or the model's validated-response cache.
+    """
+
+    decisions: list[Any]
 
 
 class Patch(StrictModel):

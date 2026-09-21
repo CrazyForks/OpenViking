@@ -57,7 +57,7 @@ from vikingbot.compile.models import (
     SanitizedCompileRequest,
     utc_now,
 )
-from vikingbot.compile.ops import merge as merge_op
+from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.pipeline import Pipeline
 from vikingbot.compile.pipeline_agent import agent_runner as pipeline_agent_runner
 from vikingbot.compile.plan import content_hash
@@ -200,7 +200,10 @@ class BotCompileService:
         if model_concurrency < 1:
             raise ValueError("Compile requires vlm.max_concurrent >= 1")
         self.limits = limits or CompileLimits(
-            source_concurrency=model_concurrency, merge_concurrency=model_concurrency
+            source_concurrency=self.config.compile.map_concurrency or model_concurrency,
+            shuffle_concurrency=self.config.compile.shuffle_concurrency or model_concurrency,
+            shuffle_batch_size=self.config.compile.shuffle_batch_size,
+            merge_concurrency=self.config.compile.reduce_concurrency or model_concurrency,
         )
         self._semaphore = asyncio.Semaphore(self.limits.concurrent_tasks)
         self._model_slots = asyncio.Semaphore(model_concurrency)
@@ -452,11 +455,16 @@ class BotCompileService:
         connection: Mapping[str, Any],
     ) -> SanitizedCompileRequest:
         args = request.args or {}
-        if args.keys() - {"last_compile_time"}:
+        if args.keys() - {"last_compile_time", "wiki_links"}:
             raise CompileFailure(
                 "INVALID_ARGUMENT",
                 "VikingBot Compile does not implement provider-specific args.",
                 stage="queued",
+            )
+        wiki_links = args.get("wiki_links", False)
+        if not isinstance(wiki_links, bool):
+            raise CompileFailure(
+                "INVALID_ARGUMENT", "args.wiki_links must be a boolean", stage="queued"
             )
         raw_sources = [str(value).strip() for value in request.from_]
         if not raw_sources or any(not value for value in raw_sources):
@@ -518,6 +526,7 @@ class BotCompileService:
                 "instruction_provided": bool(instruction),
                 "skill": canonical_skill,
                 "last_compile_time": cutoff,
+                "wiki_links": wiki_links,
             }
         )
 
@@ -938,6 +947,7 @@ class BotCompileService:
         the surrounding lifecycle. Acknowledged partial output completes with diagnostic errors.
         Return whether the workspace must remain available for audit and replay.
         The surrounding lifecycle also preserves shards on failure/cancellation.
+        Local recovery sets resume to use a stopped task's copied Reduce checkpoint.
         """
         pipeline = Pipeline(
             client=client,
@@ -960,9 +970,10 @@ class BotCompileService:
                     "output": usage.get("completion_tokens", 0),
                     "cached": usage.get("cache_read_input_tokens", 0),
                 },
-                "errors": list(dict.fromkeys(e[:300] for e in pipeline.failures + pipeline.warnings)),
+                "errors": list(
+                    dict.fromkeys(e[:300] for e in pipeline.failures + pipeline.warnings)
+                ),
             }
-
 
         await self._set_state(task_id, status="running", stage="pipeline")
         # Split source work into small batches while retaining all source ranges.
@@ -1017,7 +1028,7 @@ class BotCompileService:
                     f"Partial output; Compile did not finish: {str(exc)[:500]}"
                 )
                 async with asyncio.timeout(self.limits.salvage_grace_seconds):
-                    rendered = await merge_op.run(
+                    rendered = await finalize_op.run(
                         pipeline, list(dict.fromkeys(pipeline.artifacts)), partial=True
                     )
             # Cancellation must stop recovery before any write, including a queued cancel.

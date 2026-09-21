@@ -1,6 +1,6 @@
 """Compile file editing, revision reads, validation and accepted artifact storage.
 
-These helpers serve record validation, Reduce drafts and Merge publication preparation.
+These helpers serve record validation, Reduce drafts and Finalize publication preparation.
 They share the task runtime without owning pipeline scheduling or publication.
 """
 
@@ -112,7 +112,11 @@ def validate_files(runtime: Pipeline, response, group, records, old):
         if len(value.encode()) > 8 * 1024 * 1024:
             raise ValueError("Assembled output exceeds 8 MiB")
         wiki = is_wiki(runtime, draft.path, value.encode())
-        if wiki and _split_frontmatter(value)[0].get("type") == "index":
+        if (
+            runtime.request.wiki_links
+            and wiki
+            and _split_frontmatter(value)[0].get("type") == "index"
+        ):
             raise ValueError("Runtime generates Wiki navigation indexes; submit only content files")
         if draft.path.endswith(".json"):
             json.loads(value)

@@ -1,4 +1,4 @@
-"""Finite Map/Shuffle/Reduce/Merge execution inside an existing Compile task."""
+"""Finite Map/Shuffle/Reduce/Finalize execution inside an existing Compile task."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from openviking.utils.path_safety import safe_join_viking_uri
 from openviking.utils.skill_processor import validate_skill_name
 from openviking_cli.exceptions import OpenVikingError
 from vikingbot.compile.models import CompileFailure, utc_now
+from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.ops import map as map_op
-from vikingbot.compile.ops import merge as merge_op
 from vikingbot.compile.ops import reduce as reduce_op
 from vikingbot.compile.ops.shuffle import Shuffle
 from vikingbot.compile.pipeline_io import JsonModel, TaskFiles
@@ -33,7 +33,7 @@ _PLANNER = """Plan this collection using the full authoritative Skill, attachmen
 Return contract.extract (what to extract), routing (what needs joint processing), distinguish (scope field names and meanings),
 and reduce (how to synthesize). Keep instructions specific to each operator; reference Skill rules
 instead of copying them. Do not enumerate inputs or jobs. Samples are excerpts, not complete sources.
-Omit plan for the default map(extract) -> shuffle(routing, against=target) -> reduce -> merge flow.
+Omit plan for the default map(extract) -> shuffle(routing, against=target) -> reduce -> finalize flow.
 Transforms default to direct execution; extract produces records and reduce produces final files.
 Choose agent for iterative work, Skill scripts or large/multiple files requiring scratch references.
 Declare only sufficient semantic payload fields for records; file transforms need no fields.
@@ -42,6 +42,7 @@ Independent ready files carry complete facts once in ready_content/ref, with rou
 in payload. Permit null evidence fields when their facts are already in the ready body; never require
 both full evidence and finished text. Fragments requiring joint synthesis retain sufficient evidence
 in payload and leave ready content absent. Preserve all conditions, exceptions and ambiguity.
+Do not issue a blanket ban on Map ready_content unless the Skill or user requires it.
 Runtime supplies source IDs, ranges, hashes and deduplicated counts; do not regenerate them in fields.
 Express distinguish as a mapping from short field names to their meanings, for example
 {"subject": "The product or entity and its applicability", "version": "The stated effective version"}.
@@ -60,14 +61,12 @@ become direct contract attributes in the DSL. An intermediate reduce explicitly 
 the final transform sets output=files. All Map transforms produce records.
 Custom plans use the default plan's assignment syntax and bound sources, target, contract, p.
 Map accepts sources/records, shuffle accepts records, reduce accepts groups; omit against for
-intermediate grouping. Consume each dataset once and finish with one merge; at most 12 nodes,
+intermediate grouping. Consume each dataset once and finish with one finalize; at most 12 nodes,
 no imports, loops or arbitrary calls. Overflow uses the contract.
 Runtime handles scoped history recall, source rereads, provenance, ownership and conditional writes.
 Full Skill attachments are supplied; read missing referenced resources with read_skill_resource.
 Agent tools read/write/edit private scratch files and run only Skill-supplied Python scripts through
 run_skill_script. There are no global history scans, external network tools or scratch script execution.
-Model/time are supplied. Runtime builds OKF navigation: never route content to OKF index.md or require
-derived indexes. Ordinary files, including non-Wiki index.md, follow the Skill.
 """
 
 
@@ -79,6 +78,10 @@ SKILL.md requires YAML name matching its directory and a nonempty description. P
 attachments in their native formats. No Wiki frontmatter, citations or navigation is added
 by the runtime. Use hierarchical synthesis when the Skill requires a shared entry point;
 individual work sets can generate different package files.
+"""
+
+_WIKI_OUTPUT = """For OKF Wiki, generate content pages only; navigation indexes are generated
+automatically. Do not generate or require OKF index pages.
 """
 
 
@@ -118,6 +121,13 @@ class Pipeline:
         # Each output path belongs to the group whose file is accepted last.
         self.owners: dict[str, str] = {}
 
+    @property
+    def output_instructions(self) -> str:
+        """Return target-specific output constraints; ordinary file generation adds none."""
+        if self.skill_target:
+            return _SKILL_OUTPUT
+        return _WIKI_OUTPUT if self.request.wiki_links else ""
+
     async def run(self, batches) -> RenderedBundle:
         """Plan, expand and execute collections; errors preserve honest pending/failed states."""
         started = time.monotonic()
@@ -141,8 +151,11 @@ class Pipeline:
                     "model_settings": self.model.identity,
                     "time": utc_now(),
                     "skill": self.request.skill,
+                    "wiki_links": self.request.wiki_links,
                 }
                 await self.files.put("runtime", runtime)
+            if runtime.get("wiki_links", False) != self.request.wiki_links:
+                raise ValueError("Wiki link setting differs from the task runtime")
             self.metrics["input_ranges"] = len(sources)
             self.metrics["input_files"] = len({x["uri"] for x in self.evidence.values()})
             samples = []
@@ -179,7 +192,7 @@ class Pipeline:
 
             proposal = await self.model.ask(
                 "plan",
-                _PLANNER + (_SKILL_OUTPUT if self.skill_target else ""),
+                _PLANNER + self.output_instructions,
                 {
                     "skill": self.skill,
                     "skill_resources": references,
@@ -188,6 +201,7 @@ class Pipeline:
                         "to": self.target,
                         "instruction": self.request.instruction,
                         "source_root_count": len(self.request.from_),
+                        "wiki_links": self.request.wiki_links,
                     },
                     "source_counts": dict(self.metrics),
                     "samples": samples,
@@ -212,7 +226,8 @@ class Pipeline:
                 + self.contract.model_dump_json(
                     include={"preserve", "validation", "required_paths"}
                 )
-                + (_SKILL_OUTPUT if self.skill_target else "")
+                + "\n"
+                + self.output_instructions
                 + "\nRuntime: "
                 + json.dumps(runtime)
                 + "\nSkill attachments (read necessary rules before use): "
@@ -257,7 +272,7 @@ class Pipeline:
                         self.warnings.append(
                             "Partial output; unfinished jobs: " + self.failures[0][:500]
                         )
-                    result = await merge_op.run(self, inputs, partial=bool(self.failures))
+                    result = await finalize_op.run(self, inputs, partial=bool(self.failures))
                     complete = not self.failures
                 self.metrics[f"{node.name}_milliseconds"] = round(
                     (time.monotonic() - stage_start) * 1000
@@ -326,9 +341,9 @@ class Pipeline:
                 **evidence,
                 "status": self.status[reference],
             }
-        merged = await self.files.get("merge") or {}
+        finalized = await self.files.get("finalize") or {}
         published = set(published)
-        for path, output in merged.get("outputs", {}).items():
+        for path, output in finalized.get("outputs", {}).items():
             uri = safe_join_viking_uri(self.target, path)
             for source in {self.evidence[ref]["uri"] for ref in output["source_refs"]}:
                 inputs[source]["outputs"].append(

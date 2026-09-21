@@ -38,8 +38,13 @@ class CompileLimits(BaseModel):
     pipeline_call_seconds: float = Field(default=600, gt=0)
     pipeline_plan_seconds: float = Field(default=600, gt=0)
     pipeline_agent_seconds: float = Field(default=1200, gt=0)
-    # Parallel Resource children per phase, excluding the parent; queue capacity is twice the limit.
+    # Per-task Map workers, also used for Resource source subagents.
     source_concurrency: int = Field(default=6, ge=1)
+    # Per-task Shuffle routing workers and embedding batches.
+    shuffle_concurrency: int = Field(default=6, ge=1)
+    # Maximum primary records per routing request; oversized batches split further.
+    shuffle_batch_size: int = Field(default=4, ge=1, strict=True)
+    # Per-task Reduce workers, also used for consolidating same-path candidate files.
     merge_concurrency: int = Field(default=10, ge=1)
     concurrent_tasks: int = 10
     accepted_tasks: int = 40
@@ -80,6 +85,8 @@ class SanitizedCompileRequest(BaseModel):
     skill: str
     # Inclusive source modification cutoff in UTC; None compiles all source files.
     last_compile_time: datetime | None = None
+    # Enable deterministic Wiki link repair, source links and navigation generation.
+    wiki_links: bool = Field(default=False, strict=True)
 
 
 class WikiPageDraft(BaseModel):
