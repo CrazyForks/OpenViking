@@ -6,7 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from vikingbot.compile.models import CompileLimits
+from vikingbot.compile import file_ops
+from vikingbot.compile.models import CompileFailure, CompileLimits
+from vikingbot.compile.ops import common
+from vikingbot.compile.ops import merge as merge_op
 from vikingbot.compile.pipeline import Pipeline
 from vikingbot.compile.pipeline_agent import EmitResult
 from vikingbot.compile.pipeline_io import JsonModel
@@ -88,7 +91,7 @@ async def test_merge_defers_resource_conflicts_and_unchanged_checks_to_locked_wr
     }
     pipeline.files.get = AsyncMock(return_value=artifact)
     pipeline.files.put = AsyncMock()
-    rendered = await pipeline.merge(["artifacts/page"])
+    rendered = await merge_op.run(pipeline, ["artifacts/page"])
     assert not rendered.unchanged
     assert len(rendered.operations) == 1
     operation = rendered.operations[0]
@@ -97,8 +100,9 @@ async def test_merge_defers_resource_conflicts_and_unchanged_checks_to_locked_wr
 
 
 @pytest.mark.parametrize("all_conflict", [False, True])
+@pytest.mark.parametrize("recover", [False, True])
 async def test_compile_partial_publication_reports_conflicts_and_only_acknowledges_written_pages(
-    monkeypatch, all_conflict
+    monkeypatch, all_conflict, recover
 ):
     root = "viking://resources/out"
     good, changed = root + "/good.md", root + "/changed.md"
@@ -111,10 +115,18 @@ async def test_compile_partial_publication_reports_conflicts_and_only_acknowledg
         model=SimpleNamespace(),
         run=AsyncMock(return_value=rendered),
         warnings=[],
+        failures=[],
         metrics={},
         files=SimpleNamespace(put=AsyncMock(), get=AsyncMock(return_value={})),
         write_coverage=AsyncMock(),
+        artifacts=["artifacts/good", "artifacts/changed"],
     )
+    recovery = AsyncMock(return_value=rendered)
+    monkeypatch.setattr(merge_op, "run", recovery)
+    if recover:
+        pipeline.run.side_effect = CompileFailure(
+            "COMPILE_INCOMPLETE", "Interrupted synthesis", stage="pipeline"
+        )
     monkeypatch.setattr("vikingbot.compile.service.Pipeline", lambda **kwargs: pipeline)
     service = object.__new__(BotCompileService)
     service.agent_loop = SimpleNamespace(provider=SimpleNamespace(), model="test", temperature=0)
@@ -153,12 +165,15 @@ async def test_compile_partial_publication_reports_conflicts_and_only_acknowledg
         usage={},
     )
     assert client.batch_write.call_args.kwargs["skip_conflicts"] is True
+    if recover:
+        recovery.assert_awaited_once_with(pipeline, pipeline.artifacts, partial=True)
+    else:
+        recovery.assert_not_awaited()
     pipeline.write_coverage.assert_awaited_once_with(published)
     assert task.result.created == published
     assert task.result.conflicts == conflicts
     assert task.result.page_count == len(published)
-    assert task.status == "failed" and task.stage == "salvaged"
-    assert task.error.code == "COMPILE_INCOMPLETE"
+
 
 
 @pytest.mark.parametrize(
@@ -205,7 +220,11 @@ async def test_delivery_requires_every_branch_and_acknowledged_final_bytes():
     await pipeline.write_coverage([pipeline.target + "/page.md"])
     assert shards["inputs"][source] == "failed"
     assert shards["coverage"]["inputs"][source]["outputs"][0]["delivered"]
-    pipeline.status.update(source="pending", missing="excluded")
+    pipeline.status.update(source="pending", missing="unreferenced")
+    await pipeline.write_coverage([pipeline.target + "/page.md"])
+    assert shards["inputs"][source] == "unreferenced"
+    assert shards["coverage"]["counts"] == {"unreferenced": 1}
+    pipeline.status.update(source="pending", missing="prepared")
     await pipeline.write_coverage()
     assert shards["inputs"][source] == "prepared"
     await pipeline.write_coverage([pipeline.target + "/page.md"])
@@ -221,8 +240,8 @@ async def test_rejected_result_can_be_edited_without_resubmitting_its_body(repai
     sandbox = AsyncMock()
     tool = EmitResult(
         FileResponse,
-        lambda result: Pipeline.coverage(
-            [source], [i for draft in result.files for i in draft.inputs], []
+        lambda result: common.validate_input_refs(
+            [source], [i for draft in result.files for i in draft.inputs]
         ),
         sandbox,
         "child",
@@ -274,7 +293,7 @@ def test_content_files_require_supporting_input_lineage(inputs):
         FileResponse.model_validate({"files": [draft]})
     draft["inputs"] = [source.record_id]
     response = FileResponse.model_validate({"files": [draft]})
-    pipeline.validate_files(response, group, [source], {})
+    file_ops.validate_files(pipeline, response, group, [source], {})
 
 
 def test_minimal_planner_output_expands_to_valid_flow_and_roundtrips():
@@ -453,6 +472,6 @@ async def test_map_preserves_scope_and_accepts_ready_body_without_duplicate_evid
         return value
 
     pipeline.model.ask = ask
-    records = await pipeline.transform("map", transform, [source])
+    records = await common.transform(pipeline, "map", transform, [source])
     assert bool(records[0].ready_ref) == ready and records[0].scope["scope"] == scope
     assert not pipeline.artifacts

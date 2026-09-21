@@ -23,6 +23,7 @@ from vikingbot.compile.plan import (
     PROCESSING_VERSION,
     Contract,
     FileResponse,
+    MissingReadyPathError,
     Transform,
     digest,
     parse_plan,
@@ -148,7 +149,8 @@ class JsonModel:
     Character estimates guide batching and evidence inlining, never reject requests. Usage
     estimates reuse AgentLoop's mixed-text estimator; provider usage is authoritative.
     Cache identity includes model settings, Skill/contract and processing version.
-    Only validated responses enter the cache. Each failed job gets one repair.
+    Only validated responses enter the cache. Validation gets one repair, plus one
+    extra attempt when the repaired result lacks a required ready_path.
     """
 
     def __init__(self, provider, model, temperature, files, limits, usage, metrics):
@@ -322,7 +324,7 @@ class JsonModel:
         return result
 
     async def direct(self, stage, system, data, schema, validate, key):
-        """Allow on-demand reads within the task timeout and one result repair."""
+        """Allow scoped reads and bounded repairs, including one extra for missing ready_path."""
         tools = [
             {
                 "type": "function",
@@ -442,10 +444,14 @@ class JsonModel:
                         "error": error,
                         "candidate": raw,
                         "candidate_truncated": False,
+                        "response_content": response.content,
+                        "response_tool_calls": [vars(call) for call in (response.tool_calls or [])],
+                        "finish_reason": response.finish_reason,
                     },
                 )
                 self.metrics["validation_failures"] += 1
-                if failures == 2 or category == "truncated":
+                failure_limit = 3 if isinstance(exc, MissingReadyPathError) else 2
+                if failures >= failure_limit or category == "truncated":
                     raise ValueError(f"{stage}: {category}: {error}") from exc
                 self.metrics["repairs"] += 1
                 messages.append(

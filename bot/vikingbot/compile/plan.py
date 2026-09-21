@@ -105,7 +105,7 @@ class Contract(StrictModel):
         "subject, page_role and version; explain what to extract in each value.",
     )
     preserve: list[str] = Field(default_factory=list, max_length=16)
-    overflow: Literal["fail", "structured"] = "fail"
+    overflow: Literal["direct", "structured"] = "direct"
     output_format: Literal["wiki", "files"] = Field(
         default="files",
         description="wiki requires OKF Markdown pages; files permits arbitrary/mixed text files. "
@@ -167,6 +167,41 @@ class PlanProposal(StrictModel):
 
     contract: Contract
     plan: str = Field(default=DEFAULT_PLAN, min_length=1, max_length=8000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_result(cls, value: Any) -> Any:
+        """Unwrap JSON results and relocate known contract fields without mutating input.
+
+        Explicit inner values win, including invalid values that validation rejects.
+        Unknown fields and ambiguous options remain errors; plan programs stay intact.
+        JSON decoding errors propagate to the existing model-repair path.
+        """
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            return value
+        if set(value) == {"plan"} and isinstance(value["plan"], str):
+            try:
+                wrapped = json.loads(value["plan"])
+            except ValueError:
+                wrapped = None
+            if isinstance(wrapped, dict) and "contract" in wrapped:
+                value = wrapped
+        value = dict(value)
+        contract = value.get("contract", {})
+        if isinstance(contract, str):
+            contract = json.loads(contract)
+        if not isinstance(contract, dict):
+            return value
+        contract = Contract.expand_options(contract)
+        misplaced = {
+            key: value.pop(key)
+            for key in list(value)
+            if key in Contract.model_fields or key == "options"
+        }
+        value["contract"] = {**Contract.expand_options(misplaced), **contract}
+        return value
 
 
 @dataclass(frozen=True)
@@ -289,7 +324,7 @@ class RecordDraft(StrictModel):
 
     inputs: list[str] = Field(min_length=1)
     # JSON preserves nested facts and relations without prescribing their business shape.
-    payload: dict[str, JsonValue]
+    payload: dict[str, JsonValue] = Field(default_factory=dict)
     routing_text: str = Field(min_length=1, max_length=600)
     scope: dict[str, str] = Field(default_factory=dict)
     # A path without content is only a hint, never a finished or publishable file.
@@ -300,6 +335,26 @@ class RecordDraft(StrictModel):
     )
     # An explicit URI present in supplied evidence, used as a candidate before search.
     target_uri: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def move_business_fields(cls, value):
+        """Move extra record fields into payload without mutating the supplied record.
+
+        Equal duplicates collapse; conflicting values require model repair. Invalid
+        payload types and missing structural fields remain subject to normal validation.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("payload", {}), dict):
+            return value
+        extra = value.keys() - cls.model_fields.keys()
+        if not extra:
+            return value
+        record, payload = dict(value), dict(value.get("payload", {}))
+        for name in extra:
+            if name in payload and payload[name] != record[name]:
+                raise ValueError(f"Conflicting values for payload field: {name}")
+            payload[name] = record.pop(name)
+        return {**record, "payload": payload}
 
     @field_validator("payload", mode="before")
     @classmethod
@@ -314,21 +369,16 @@ class RecordDraft(StrictModel):
         return value
 
 
-class Exclusion(StrictModel):
-    """An explicit semantic exclusion; duplicate_of must refer to a supplied input."""
-
-    input: str
-    reason: str = Field(min_length=1, max_length=1000)
-    duplicate_of: str | None = None
-
-
 class InputReferenceError(ValueError):
     """Invalid input accounting; file agents receive a bounded metadata repair window."""
 
 
+class MissingReadyPathError(ValueError):
+    """Finished content lacks its output path; direct calls allow one extra repair."""
+
+
 class RecordResponse(StrictModel):
     records: list[RecordDraft] = Field(default_factory=list, max_length=64)
-    excluded: list[Exclusion] = Field(default_factory=list)
 
 
 def result_schema(schema, data):
@@ -368,7 +418,7 @@ def result_schema(schema, data):
     if schema is RecordResponse and "record_fields" in data:
         record = result["$defs"]["RecordDraft"]
         properties = record["properties"]
-        record["required"] = ["inputs", "payload", "routing_text", "scope"]
+        record["required"] = ["inputs", "routing_text", "scope"]
         for name, fields in (("payload", data["record_fields"]), ("scope", data["scope_fields"])):
             value = properties[name]["additionalProperties"]
             if name == "scope":

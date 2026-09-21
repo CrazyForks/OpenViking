@@ -248,7 +248,7 @@ def agent_runner(loop, session_key, connection, limits):
             publish_events=False,
             tool_registry=registry,
             stop_tool_names=["emit"],
-            openviking_tool_names=set(),
+            openviking_tool_names=set(registry.tool_names),
             openviking_connection=connection,
             allow_final_fallback=False,
             inject_write_experience=False,

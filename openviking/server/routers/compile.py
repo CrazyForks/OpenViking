@@ -25,6 +25,8 @@ async def create_compile(
     """Queue a Compile task with the authenticated caller's forwarding identity."""
     connection = {"api_key": ctx.api_key} if ctx.api_key else {}
     connection.update(account_id=ctx.account_id, user_id=ctx.user.user_id)
+    if ctx.actor_peer_id:
+        connection["actor_peer_id"] = ctx.actor_peer_id
     # Persist the submission's request ID for all asynchronous Runtime calls.
     if x_request_id:
         connection["request_id"] = x_request_id

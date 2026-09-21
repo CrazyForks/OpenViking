@@ -127,6 +127,7 @@ class CompileAPIClient:
             ("api_key", "X-API-Key"),
             ("account_id", "X-OpenViking-Account"),
             ("user_id", "X-OpenViking-User"),
+            ("actor_peer_id", "X-OpenViking-Actor-Peer"),
         ):
             value = str(connection.get(field) or "").strip()
             if value:

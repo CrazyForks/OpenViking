@@ -57,6 +57,7 @@ from vikingbot.compile.models import (
     SanitizedCompileRequest,
     utc_now,
 )
+from vikingbot.compile.ops import merge as merge_op
 from vikingbot.compile.pipeline import Pipeline
 from vikingbot.compile.pipeline_agent import agent_runner as pipeline_agent_runner
 from vikingbot.compile.plan import content_hash
@@ -66,6 +67,7 @@ from vikingbot.compile.renderer import (
     has_unclosed_frontmatter,
     validate_declared_okf_markdown,
 )
+from vikingbot.compile.sandbox import CompileSandboxManager
 from vikingbot.compile.sources import CompileSourceRange, pack_source_batches
 from vikingbot.compile.store import CompileTaskStore
 from vikingbot.config.schema import SandboxBackend, SandboxMode, SessionKey
@@ -657,7 +659,9 @@ class BotCompileService:
                 update={"subagent_max_concurrency": self.limits.source_concurrency}
             )
         workspace_parent = self.config.bot_data_path / "compile_workspaces" / task_id
-        sandbox_manager = SandboxManager(task_config, workspace_parent, task_config.workspace_path)
+        sandbox_manager = CompileSandboxManager(
+            task_config, workspace_parent, task_config.workspace_path, connection=connection
+        )
         workspace = sandbox_manager.get_workspace_path(session_key)
         client: VikingClient | None = None
         sandbox: WorkspaceSandbox | None = None
@@ -803,7 +807,7 @@ class BotCompileService:
                     user_prompt=user_prompt,
                     session_key=session_key,
                     tool_registry=registry,
-                    openviking_tool_names=set(),
+                    openviking_tool_names=set(registry.tool_names),
                     stop_tool_names=["submit_wiki_bundle"],
                     openviking_connection=connection,
                     context_compact_budget=None,
@@ -926,11 +930,12 @@ class BotCompileService:
         source_files,
         usage,
         agent_runner=None,
+        resume=False,
     ) -> bool:
         """Run the shared collection pipeline and publish through the target namespace API.
 
         The API/task identity, admission, cancellation and target locks are owned by
-        the surrounding lifecycle. A failed pipeline never reports complete success.
+        the surrounding lifecycle. Acknowledged partial output completes with diagnostic errors.
         Return whether the workspace must remain available for audit and replay.
         The surrounding lifecycle also preserves shards on failure/cancellation.
         """
@@ -946,6 +951,19 @@ class BotCompileService:
             usage=usage,
         )
         pipeline.model.agent_runner = agent_runner
+
+        def record_metrics(task):
+            """Expose token totals and existing error summaries, without per-call counters."""
+            task.meta["pipeline"] = {
+                "tokens": {
+                    "input": usage.get("prompt_tokens", 0),
+                    "output": usage.get("completion_tokens", 0),
+                    "cached": usage.get("cache_read_input_tokens", 0),
+                },
+                "errors": list(dict.fromkeys(e[:300] for e in pipeline.failures + pipeline.warnings)),
+            }
+
+
         await self._set_state(task_id, status="running", stage="pipeline")
         # Split source work into small batches while retaining all source ranges.
         source_limits = self.limits.model_copy(
@@ -960,7 +978,8 @@ class BotCompileService:
             if source_files is not None
             else await self._list_source_files(client, request.from_)
         )
-        await pipeline.files.put("inputs", dict.fromkeys(ordered, "pending"))
+        if not resume:
+            await pipeline.files.put("inputs", dict.fromkeys(ordered, "pending"))
 
         async def source_batches():
             """Retain at most one read batch of source bodies while seeding task shards."""
@@ -985,7 +1004,12 @@ class BotCompileService:
 
         try:
             try:
-                rendered = await pipeline.run(source_batches())
+                if resume:
+                    from vikingbot.compile.resume import run as resume_pipeline
+
+                    rendered = await resume_pipeline(pipeline)
+                else:
+                    rendered = await pipeline.run(source_batches())
             except (CompileFailure, TimeoutError) as exc:
                 if not pipeline.artifacts:
                     raise
@@ -993,8 +1017,8 @@ class BotCompileService:
                     f"Partial output; Compile did not finish: {str(exc)[:500]}"
                 )
                 async with asyncio.timeout(self.limits.salvage_grace_seconds):
-                    rendered = await pipeline.merge(
-                        list(dict.fromkeys(pipeline.artifacts)), partial=True
+                    rendered = await merge_op.run(
+                        pipeline, list(dict.fromkeys(pipeline.artifacts)), partial=True
                     )
             # Cancellation must stop recovery before any write, including a queued cancel.
             current = await self.store.get(task_id)
@@ -1059,14 +1083,15 @@ class BotCompileService:
 
             def complete(task):
                 if task.status != "cancelling":
-                    task.status = "failed" if pipeline.warnings else "completed"
-                    task.stage = "salvaged" if pipeline.warnings else "completed"
+                    record_metrics(task)
+                    task.status = "completed" if published else "failed"
+                    task.stage = "completed" if published else "writing"
                     task.result = compiled
                     task.error = (
                         CompileErrorInfo(
-                            code="COMPILE_INCOMPLETE", message="\n".join(pipeline.warnings)
+                            code="COMPILE_INCOMPLETE", message="No output was acknowledged."
                         )
-                        if pipeline.warnings
+                        if not published
                         else None
                     )
 
@@ -1080,10 +1105,6 @@ class BotCompileService:
             )
             raise CompileFailure(code, str(exc), stage=stage) from exc
         finally:
-
-            def record_metrics(task):
-                task.meta["pipeline"] = dict(pipeline.metrics)
-
             await self.store.update(task_id, record_metrics)
 
     @staticmethod
@@ -1117,6 +1138,8 @@ class BotCompileService:
     ) -> None:
         async def cleanup() -> None:
             try:
+                if isinstance(sandbox_manager, CompileSandboxManager):
+                    await sandbox_manager.clear_credentials()
                 if preserve_workspace:
                     sandbox = await sandbox_manager.get_sandbox(session_key)
                     workspace = sandbox_manager.get_workspace_path(session_key)
@@ -1517,7 +1540,7 @@ class BotCompileService:
                 tool_registry=child_tools,
                 stop_tool_names=[submit_draft.name],
                 on_plain_text=require_draft_submission,
-                openviking_tool_names=set(),
+                openviking_tool_names=set(child_tools.tool_names),
                 openviking_connection=connection,
                 allow_final_fallback=False,
                 inject_write_experience=False,
@@ -1666,6 +1689,8 @@ class BotCompileService:
             return
 
         def mutate(task: CompileTask) -> None:
+            if "pipeline" in task.meta:
+                return
             task.meta["token_usage"] = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,

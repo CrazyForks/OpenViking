@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from threading import Event
 
 from openviking.core.namespace import relative_uri_path
+from vikingbot.compile.ops.common import job
 from vikingbot.compile.pipeline_io import bounded_jobs
 from vikingbot.compile.plan import Group, Record, RouteResponse, digest
 
@@ -102,26 +103,25 @@ def split_group(keys, vectors):
     return groups
 
 
-def connected_components(keys, links):
-    """Partition known IDs by candidate links while retaining isolated inputs.
+def group_related_records(keys, links):
+    """Partition IDs into groups whose members all have direct candidate links.
 
-    Connectivity means joint processing, not equivalent facts or one output file.
-    Unknown endpoints are rejected; input order determines stable component order.
+    Either link direction suffices. Unknown endpoints are rejected; input order
+    determines first-fit assignment, and records without links remain independent.
     """
-    parents = {key: key for key in keys}
-
-    def root(key):
-        while key != parents[key]:
-            parents[key] = parents[parents[key]]
-            key = parents[key]
-        return key
-
+    neighbours = {key: set() for key in keys}
     for left, right in links:
-        parents[root(right)] = root(left)
-    groups = {}
-    for key in parents:
-        groups.setdefault(root(key), []).append(key)
-    return list(groups.values())
+        neighbours[left].add(right)
+        neighbours[right].add(left)
+    groups = []
+    for key in neighbours:
+        for group in groups:
+            if all(member in neighbours[key] for member in group):
+                group.append(key)
+                break
+        else:
+            groups.append([key])
+    return groups
 
 
 class Shuffle:
@@ -342,15 +342,14 @@ class Shuffle:
                 )
                 return response.decisions
 
-            return await r.job(
+            return await job(
+                r,
                 f"{node.name}-batch-{digest([item.record_id for item in assigned])[:16]}",
                 assigned,
                 decide,
             )
 
-        batches = (
-            range(start, min(start + 4, len(records))) for start in range(0, len(records), 4)
-        )
+        batches = ([index] for index in range(len(records)))
         results = await bounded_jobs(
             batches,
             route,
@@ -358,20 +357,18 @@ class Shuffle:
             metrics=r.metrics,
             failures=r.failures,
         )
-        links, targets, historical = [], {}, {}
+        links, targets = [], {}
         for decisions in results:
             for decision in decisions:
                 links.extend((decision.record, other) for other in decision.related)
                 targets[decision.record] = decision.history
-                for uri in decision.history:
-                    links.append((decision.record, historical.setdefault(uri, decision.record)))
                 await r.files.put(f"routes/{node.name}-{decision.record}", decision.model_dump())
         # Missing routing decisions exclude only their own records, not successful neighbours.
         by_id = {record.record_id: record for record in records if record.record_id in targets}
         r.metrics["route_blocked_records"] += len(records) - len(by_id)
         links = [(left, right) for left, right in links if left in by_id and right in by_id]
         groups, components = [], []
-        for ids in connected_components(by_id, links):
+        for ids in group_related_records(by_id, links):
             components.extend(await asyncio.to_thread(split_group, ids, vectors))
         for ids in components:
             group = Group(
