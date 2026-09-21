@@ -719,6 +719,8 @@ def test_add_resource_log_level_contract():
             "[RNFVSnapshot]": "debug",
             "[ContextUpdatePlan]": "debug",
             "[add_resource]": "debug",
+        },
+        "openviking/storage/context_update_execution.py": {
             "[DirectIndexActions]": "debug",
         },
         "openviking/storage/queuefs/semantic_processor.py": {
@@ -2209,8 +2211,11 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
     )
     monkeypatch.setattr("openviking.storage.queuefs.get_queue_manager", lambda: queue_manager)
     monkeypatch.setattr("openviking.utils.embedding_utils._enqueue_embedding_message", enqueue)
+    vectorize_mock = AsyncMock()
+    monkeypatch.setattr(
+        "openviking.storage.context_update_execution.vectorize_resource_file", vectorize_mock
+    )
     processor = ResourceProcessor(SimpleNamespace(get_embedder=lambda: None))
-    processor._vectorize_resource_file = AsyncMock()
     ctx = RequestContext(UserIdentifier("acc", "user"), Role.USER)
     await processor._enqueue_index_actions(
         (
@@ -2242,7 +2247,7 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
     assert [msg.action.value for msg in enqueued] == ["delete", "update_fields"]
     assert enqueued[0].record_ids == ["id-a"]
     assert enqueued[1].update_fields["search_tags"] == ["scope=new"]
-    processor._vectorize_resource_file.assert_awaited_once_with(
+    vectorize_mock.assert_awaited_once_with(
         "viking://resources/repo/c.py",
         ctx=ctx,
         file_md5="new-md5",
