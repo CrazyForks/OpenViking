@@ -16,6 +16,7 @@ from openviking.core.namespace import (
     uri_parts,
     visible_roots,
 )
+from openviking.core.ttl import expiry_filter_now
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker_concurrency import run_to_completion
 from openviking.storage.acl import (
@@ -53,6 +54,7 @@ RETRIEVAL_OUTPUT_FIELDS = [
     "abstract",
     "active_count",
     "updated_at",
+    "expires_at",
     "search_tags",
 ]
 
@@ -69,6 +71,7 @@ FETCH_BY_URI_OUTPUT_FIELDS = [
     "context_type",
     "created_at",
     "updated_at",
+    "expires_at",
     "active_count",
     "level",
     "name",
@@ -2301,6 +2304,15 @@ class VikingVectorIndexBackend:
 
         if level:
             filters.append(In("level", level))
+
+        # TTL read barrier: hide objects whose frozen expires_at is at/past now.
+        # Injected here so every tenant query (search/filter/search_children) and
+        # every retrieval level shares one predicate, applied before candidate
+        # budget/top-k truncation. Returns None (no-op) when TTL is disabled, so
+        # default behaviour is unchanged.
+        ttl_barrier = expiry_filter_now()
+        if ttl_barrier is not None:
+            filters.append(ttl_barrier)
 
         return self._merge_filters(*filters)
 

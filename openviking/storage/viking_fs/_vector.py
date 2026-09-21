@@ -5,7 +5,9 @@
 from functools import partial
 from typing import TYPE_CHECKING, Any, List, Optional
 
+from openviking.core.ttl import expiry_filter_now
 from openviking.server.identity import RequestContext
+from openviking.storage.expr import And, FilterExpr, PathScope
 from openviking.storage.viking_fs._base import logger
 
 if TYPE_CHECKING:
@@ -14,6 +16,26 @@ if TYPE_CHECKING:
 
 class _VectorMixin:
     """Vector store integration: delete/update URIs, get store/embedder."""
+
+    @staticmethod
+    def _with_expiry_barrier(
+        filter_expr: Optional[FilterExpr],
+    ) -> Optional[FilterExpr]:
+        """AND the TTL read barrier onto a filesystem read filter.
+
+        The barrier hides objects whose frozen ``expires_at`` is at/past now and
+        is a no-op (``None``) when TTL is disabled, so default behaviour and
+        non-TTL data are untouched. Used by the FS read paths (grep/glob/stat)
+        that build their own filters instead of going through the backend's
+        ``_build_scope_filter`` retrieval seam. Cleanup and maintenance paths
+        deliberately do not call this — they must still see expired records.
+        """
+        barrier = expiry_filter_now()
+        if barrier is None:
+            return filter_expr
+        if filter_expr is None:
+            return barrier
+        return And([filter_expr, barrier])
 
     async def _delete_from_vector_store(
         self, uris: List[str], ctx: Optional[RequestContext] = None
@@ -34,6 +56,31 @@ class _VectorMixin:
         except Exception as e:
             logger.warning(f"[VikingFS] Failed to delete from vector store: {e}")
             raise
+
+    async def _confirm_vector_scope_cleared(
+        self, target_uri: str, ctx: Optional[RequestContext] = None
+    ) -> None:
+        """Strict-mode check: raise unless the vector scope is fully cleared.
+
+        Mirrors the delete-then-confirm pattern used for account files: after
+        the FS + vector deletes, re-count the recursive URI scope and refuse to
+        report success while any record remains. Backend count errors propagate
+        (they are not swallowed here), so a strict caller never observes a false
+        success. A lingering residue means either a partial vector delete or an
+        eventual-consistency lag; the caller (e.g. the cleanup queue) retries.
+        """
+        vector_store = self._get_vector_store()
+        if not vector_store:
+            return
+        residue = await vector_store.count(
+            filter=PathScope("uri", target_uri, depth=-1),
+            ctx=self._ctx_or_default(ctx),
+        )
+        if residue:
+            raise RuntimeError(
+                f"Vector records still present after delete: {target_uri} "
+                f"(residue={residue})"
+            )
 
     async def _copy_vector_store_uris(
         self,

@@ -53,6 +53,7 @@ from .retrieval_config import RetrievalConfig
 from .runtime_field import RuntimeField
 from .storage_config import StorageConfig
 from .telemetry_config import TelemetryConfig
+from .ttl_config import TTLConfig
 from .vlm_config import VLMConfig
 
 
@@ -421,6 +422,14 @@ class OpenVikingConfig(BaseModel):
     log: LogConfig = Field(default_factory=LogConfig, description="Logging configuration")
 
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
+
+    ttl: TTLConfig = Field(
+        default_factory=TTLConfig,
+        description=(
+            "Time-to-live policy for events and sessions. Default OFF. Only applies to "
+            "user events, peer events, and sessions directories."
+        ),
+    )
 
     agent_evolution: AgentEvolutionConfig = RuntimeField(
         default_factory=AgentEvolutionConfig,

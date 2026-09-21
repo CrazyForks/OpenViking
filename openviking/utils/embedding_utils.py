@@ -70,6 +70,7 @@ _PORTABLE_SCALAR_FIELDS = frozenset(
         "description",
         "tags",
         "abstract",
+        "expires_at",
     }
 )
 

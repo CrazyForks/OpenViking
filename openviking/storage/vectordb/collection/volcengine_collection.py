@@ -18,7 +18,7 @@ from openviking.storage.vectordb.collection.volcengine_clients import (
     ClientForConsoleApi,
     ClientForDataApi,
 )
-from openviking.utils.search_filters import VALID_TIME_FIELDS
+from openviking.utils.search_filters import DATE_TIME_FILTER_FIELDS
 from openviking_cli.utils.logger import default_logger as logger
 
 
@@ -270,7 +270,7 @@ class VolcengineCollection(ICollection):
             return obj
 
         normalized = {key: cls._normalize_date_time_filter(value) for key, value in obj.items()}
-        if normalized.get("op") == "range" and normalized.get("field") in VALID_TIME_FIELDS:
+        if normalized.get("op") == "range" and normalized.get("field") in DATE_TIME_FILTER_FIELDS:
             normalized["op"] = "time_range"
         return normalized
 

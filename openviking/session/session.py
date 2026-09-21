@@ -56,7 +56,7 @@ from openviking.storage.abstract_overview import body_for_preview, render_abstra
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.utils.model_retry import is_retryable_api_error, retry_async
-from openviking.utils.time_utils import get_current_timestamp
+from openviking.utils.time_utils import format_iso8601, get_current_timestamp
 from openviking.utils.token_estimation import estimate_text_tokens, truncate_text_to_token_budget
 from openviking_cli.exceptions import (
     FailedPreconditionError,
@@ -547,6 +547,14 @@ class SessionMeta:
     # session. Maps to config.memory_extraction_config.events.tags in the API.
     # None means no session default; a commit may still override per-call.
     event_search_tags: Optional[List[str]] = None
+    # Frozen TTL snapshot, computed once at session creation from the resolved
+    # sessions-scope policy. All None when TTL is off. received_at/expires_at are
+    # RFC 3339 UTC strings; expires_at is authoritative for the read barrier and
+    # cleanup scan. A successful commit renews expires_at from this frozen
+    # ttl_days snapshot, never from the (possibly changed) current config.
+    ttl_days: Optional[int] = None
+    received_at: str = ""
+    expires_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -578,6 +586,12 @@ class SessionMeta:
             data["total_message_count"] = self.total_message_count
         if self.event_search_tags is not None:
             data["event_search_tags"] = list(self.event_search_tags)
+        if self.ttl_days is not None:
+            data["ttl_days"] = self.ttl_days
+        if self.received_at:
+            data["received_at"] = self.received_at
+        if self.expires_at:
+            data["expires_at"] = self.expires_at
         return data
 
     @classmethod
@@ -628,6 +642,9 @@ class SessionMeta:
             last_message_at=data.get("last_message_at", ""),
             last_auto_commit_at=data.get("last_auto_commit_at", ""),
             event_search_tags=data.get("event_search_tags"),
+            ttl_days=data.get("ttl_days"),
+            received_at=data.get("received_at", ""),
+            expires_at=data.get("expires_at", ""),
         )
 
 
@@ -842,6 +859,11 @@ class Session:
         """Materialize session root and messages file if missing."""
         if await self.exists():
             return
+        # Freeze the TTL snapshot once, at first materialization. The sessions
+        # scope resolves against the current config; the frozen ttl_days then
+        # drives renewal on later commits, so a config change never moves an
+        # existing session's expiry. No-op when TTL is off for sessions.
+        self._freeze_ttl_snapshot()
         await self._viking_fs.mkdir(self._session_uri, exist_ok=True, ctx=self.ctx)
         await self._viking_fs.write_file(
             f"{self._session_uri}/messages.jsonl",
@@ -849,6 +871,35 @@ class Session:
             ctx=self.ctx,
         )
         await self._save_meta()
+
+    def _freeze_ttl_snapshot(self) -> None:
+        """Populate the session's frozen TTL fields from the current policy."""
+        from openviking.core.ttl import freeze_ttl_fields
+
+        snapshot = freeze_ttl_fields(self._session_uri)
+        if not snapshot:
+            return
+        self._meta.ttl_days = snapshot["ttl_days"]
+        self._meta.received_at = snapshot["received_at"]
+        self._meta.expires_at = snapshot["expires_at"]
+
+    def _renew_ttl_on_commit(self) -> None:
+        """Extend expires_at by the frozen ttl_days snapshot on a successful commit.
+
+        Renewal uses the session's own frozen ``ttl_days`` and the commit time as
+        the new ``received_at`` anchor, never the (possibly changed) current
+        config. No-op when the session has no frozen TTL.
+        """
+        if not self._meta.ttl_days:
+            return
+        from openviking.core.ttl import compute_expires_at
+
+        now = datetime.now(timezone.utc)
+        self._meta.received_at = get_current_timestamp()
+        self._meta.expires_at = format_iso8601(
+            compute_expires_at(now, self._meta.ttl_days)
+        )
+
 
     async def _save_meta(self, lease_ref: Optional[Any] = None) -> None:
         """Persist .meta.json to storage using an optional held PathLock lease."""
@@ -1807,6 +1858,9 @@ class Session:
                 self._archive_index_from_uri(archive_uri),
             )
             self._meta.last_commit_at = get_current_timestamp()
+            # A recovered Phase 1 completes an interrupted commit, so it renews
+            # TTL from the frozen snapshot just like a normal commit boundary.
+            self._renew_ttl_on_commit()
             await self._rebuild_pending_tokens()
             await self._save_meta()
             await self._write_phase1_ready_marker(archive_uri)
@@ -2196,6 +2250,9 @@ class Session:
                     self._compression.compression_index,
                 )
                 self._meta.last_commit_at = get_current_timestamp()
+                # A successful commit renews the session's TTL from its own frozen
+                # ttl_days snapshot (renewal-wins over a pending cleanup).
+                self._renew_ttl_on_commit()
                 if record_auto_commit_success:
                     # Stamp success in the same lock-protected meta write as the
                     # commit boundary, so an idle scan and a concurrent worker

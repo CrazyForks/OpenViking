@@ -1,0 +1,83 @@
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+# SPDX-License-Identifier: AGPL-3.0
+"""Unit tests for TTL policy configuration (``ttl_config``).
+
+Assert the default is OFF, the ``inherit``/``disabled``/``days`` resolution
+order, and the validators that keep the policy well-formed (positive ttl_days,
+no ``inherit`` at the global level).
+"""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+
+from openviking_cli.utils.config.ttl_config import (
+    TTL_SCOPES,
+    TTLConfig,
+    TTLPolicy,
+)
+
+
+def test_default_config_is_off():
+    config = TTLConfig()
+    assert config.enabled is False
+    for scope in TTL_SCOPES:
+        assert config.resolve_scope(scope) is None
+
+
+def test_scope_days_overrides_global():
+    config = TTLConfig(
+        **{"global": {"mode": "days", "ttl_days": 7}},
+        user_events={"mode": "days", "ttl_days": 30},
+    )
+    assert config.resolve_scope("user_events") == 30
+    # sessions/peer_events inherit -> global default of 7
+    assert config.resolve_scope("sessions") == 7
+    assert config.resolve_scope("peer_events") == 7
+    assert config.enabled is True
+
+
+def test_scope_disabled_blocks_global_inheritance():
+    config = TTLConfig(
+        **{"global": {"mode": "days", "ttl_days": 7}},
+        sessions={"mode": "disabled"},
+    )
+    assert config.resolve_scope("sessions") is None
+    assert config.resolve_scope("user_events") == 7
+
+
+def test_inherit_falls_through_to_global_off():
+    # global disabled + all scopes inherit -> nothing enabled
+    config = TTLConfig(**{"global": {"mode": "disabled"}})
+    assert config.enabled is False
+    assert config.resolve_scope("user_events") is None
+
+
+def test_global_inherit_is_rejected():
+    with pytest.raises(ValidationError):
+        TTLConfig(**{"global": {"mode": "inherit"}})
+
+
+def test_days_requires_positive_ttl_days():
+    with pytest.raises(ValidationError):
+        TTLPolicy(mode="days")  # missing ttl_days
+    with pytest.raises(ValidationError):
+        TTLPolicy(mode="days", ttl_days=0)  # ge=1
+    with pytest.raises(ValidationError):
+        TTLPolicy(mode="days", ttl_days=-5)
+
+
+def test_ttl_days_must_be_omitted_unless_days_mode():
+    with pytest.raises(ValidationError):
+        TTLPolicy(mode="disabled", ttl_days=5)
+    with pytest.raises(ValidationError):
+        TTLPolicy(mode="inherit", ttl_days=5)
+
+
+def test_global_alias_round_trips():
+    # The field is named ``global_default`` but aliased to ``global`` for config.
+    config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 3}})
+    assert config.global_default.ttl_days == 3
+    dumped = config.model_dump(by_alias=True)
+    assert dumped["global"]["ttl_days"] == 3

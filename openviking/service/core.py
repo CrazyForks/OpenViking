@@ -100,6 +100,7 @@ class OpenVikingService:
         self._uri_mutation_coordinator = UriMutationCoordinator()
         self._watch_scheduler: Optional[WatchScheduler] = None
         self._session_auto_commit_scheduler: Optional[SessionAutoCommitScheduler] = None
+        self._ttl_cleanup_service: Optional[Any] = None
         self._encryptor: Optional[Any] = None
         self._privacy_config_service: Optional[UserPrivacyConfigService] = None
         self._runtime_config_manager: Optional[Any] = None
@@ -568,6 +569,7 @@ class OpenVikingService:
             # Register durable cleanup work before restoring tracked tasks;
             # the deletion service binds consumers once auth is ready.
             self._queue_manager.get_queue(self._queue_manager.DATA_CLEANUP, allow_create=True)
+            self._queue_manager.get_queue(self._queue_manager.TTL_CLEANUP, allow_create=True)
             restored_tasks = await self._queue_manager.prepare_task_tracking(get_task_tracker())
             await self._external_task_service.restore_tasks(restored_tasks)
 
@@ -623,6 +625,11 @@ class OpenVikingService:
             await self._session_auto_commit_scheduler.stop()
             self._session_auto_commit_scheduler = None
             logger.info("SessionAutoCommitScheduler stopped")
+
+        if self._ttl_cleanup_service:
+            await self._ttl_cleanup_service.close()
+            self._ttl_cleanup_service = None
+            logger.info("TTLCleanupService stopped")
 
         if self._queue_manager:
             await asyncio.to_thread(self._queue_manager.stop)

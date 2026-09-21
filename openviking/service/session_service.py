@@ -7,11 +7,13 @@ Provides session management operations: session, sessions, add_message, commit, 
 """
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openviking.core.namespace import canonical_session_uri
+from openviking.core.ttl import hidden_by_ttl, ttl_enabled
 from openviking.server.config import ToolOutputExternalizationConfig
 from openviking.server.identity import RequestContext
 from openviking.server.user_config import read_user_memory_policy
@@ -283,7 +285,12 @@ class SessionService:
             raise
 
     async def get(
-        self, session_id: str, ctx: RequestContext, *, auto_create: bool = False
+        self,
+        session_id: str,
+        ctx: RequestContext,
+        *,
+        auto_create: bool = False,
+        include_expired: bool = False,
     ) -> Session:
         """Get an existing session.
 
@@ -292,6 +299,11 @@ class SessionService:
             ctx: Request context
             auto_create: If True, create the session when it does not exist.
                          Default is False (raise NotFoundError).
+            include_expired: If True, return a logically-expired session instead
+                         of hiding it. Only the physical-cleanup path (delete)
+                         sets this; every user-facing read leaves it False so an
+                         expired session is invisible the moment ``expires_at``
+                         passes, before the background sweep removes it.
         """
         try:
             session = self.session(ctx, session_id)
@@ -301,6 +313,15 @@ class SessionService:
                 session.meta.auto_commit_policy = self._new_session_auto_commit_policy()
                 await session.ensure_exists()
             await session.load()
+            if (
+                not include_expired
+                and not auto_create
+                and hidden_by_ttl(session.meta.expires_at)
+            ):
+                # Logically expired: hide from every read path exactly like a
+                # missing session. Physical files may still exist until the
+                # cleanup sweep runs, but they must not be observable here.
+                raise NotFoundError(session_id, "session")
             self._record_lifecycle_metric("get", "ok")
             return session
         except Exception:
@@ -316,6 +337,9 @@ class SessionService:
         self._ensure_initialized()
         session_base_uri = canonical_session_uri(ctx)
         sessions_by_id: Dict[str, Dict[str, Any]] = {}
+        # Only pay for the per-session meta read that resolves expiry when TTL is
+        # actually on; the default-off path keeps the original single ls.
+        filter_expired = ttl_enabled()
 
         try:
             entries = await self._viking_fs.ls(
@@ -328,9 +352,12 @@ class SessionService:
                 name = entry.get("name", "")
                 if name in [".", ".."]:
                     continue
+                session_uri = f"{session_base_uri}/{name}"
+                if filter_expired and await self._session_expired(session_uri, ctx):
+                    continue
                 sessions_by_id[name] = {
                     "session_id": name,
-                    "uri": f"{session_base_uri}/{name}",
+                    "uri": session_uri,
                     "is_dir": entry.get("isDir", False),
                     "mod_time": entry.get("modTime", ""),
                 }
@@ -339,11 +366,33 @@ class SessionService:
 
         return list(sessions_by_id.values())
 
-    async def delete(self, session_id: str, ctx: RequestContext) -> bool:
+    async def _session_expired(self, session_uri: str, ctx: RequestContext) -> bool:
+        """Whether a session is logically expired per its frozen ``.meta.json``.
+
+        Best-effort: an unreadable or malformed meta means we cannot prove
+        expiry, so the session stays visible (fail-open), matching the
+        absent-``expires_at``-is-visible rule of the vector read barrier.
+        """
+        try:
+            meta_content = await self._viking_fs.read_file(
+                f"{session_uri}/.meta.json", ctx=ctx
+            )
+            expires_at = json.loads(meta_content).get("expires_at", "")
+        except Exception:
+            return False
+        return hidden_by_ttl(expires_at)
+
+    async def delete(
+        self, session_id: str, ctx: RequestContext, *, strict: bool = False
+    ) -> bool:
         """Delete a session.
 
         Args:
             session_id: Session ID to delete
+            strict: When True (the TTL cleanup path), wait until every backing
+                record — session files and vector index — is confirmed removed
+                before returning success. The default interactive delete keeps
+                the historical best-effort semantics.
 
         Returns:
             True if deleted successfully
@@ -351,12 +400,14 @@ class SessionService:
         self._ensure_initialized()
 
         session_uri = canonical_session_uri(ctx, session_id)
-        session = await self.get(session_id, ctx)
+        # include_expired: deletion is the physical-cleanup path, so it must be
+        # able to act on a session that is already logically invisible.
+        session = await self.get(session_id, ctx, include_expired=True)
         if not await session.exists():
             self._record_lifecycle_metric("delete", "error")
             raise NotFoundError(session_id, "session")
 
-        await self._viking_fs.rm(session_uri, recursive=True, ctx=ctx)
+        await self._viking_fs.rm(session_uri, recursive=True, ctx=ctx, strict=strict)
         logger.info(f"Deleted session: {session_id}")
         self._record_lifecycle_metric("delete", "ok")
         return True

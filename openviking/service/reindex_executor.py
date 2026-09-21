@@ -1657,12 +1657,22 @@ class ReindexExecutor:
                 )
                 return file_counters
             body = body_source.text if body_source.exists else ""
-            memory_content = MemoryFileUtils.read(body).content if body else ""
+            memory_file = MemoryFileUtils.read(body) if body else None
+            memory_content = memory_file.content if memory_file else ""
+            # The memory file body is the authoritative source of the frozen TTL
+            # expiry. Re-derive it here (never from the current scope policy) so a
+            # reindex keeps the object's original deadline and read-barrier
+            # invisibility, even if the directory policy changed afterwards.
+            expires_at = (
+                memory_file.extra_fields.get("expires_at") if memory_file else None
+            )
             existing = await self._fetch_existing_record(
                 uri=file_uri,
                 level=2,
                 ctx=self._content_owner_ctx(file_uri, ctx),
             )
+            if expires_at is None and existing is not None:
+                expires_at = existing.get("expires_at") or None
             abstract = self._best_non_empty(
                 self._record_abstract(existing),
                 await self._best_file_summary(file_uri, ctx=ctx),
@@ -1686,6 +1696,7 @@ class ReindexExecutor:
                         level=ContextLevel.DETAIL,
                         ctx=ctx,
                         ingest_options=ingest_options,
+                        expires_at=expires_at,
                     )
                     file_counters.rebuilt_records += 1
                 except Exception as exc:
@@ -1704,6 +1715,7 @@ class ReindexExecutor:
                     level=ContextLevel.DETAIL,
                     ctx=ctx,
                     ingest_options=ingest_options,
+                    expires_at=expires_at,
                 )
                 file_counters.rebuilt_records += 1
                 file_counters.warnings.append(
@@ -1860,6 +1872,7 @@ class ReindexExecutor:
         ctx: RequestContext,
         meta: Optional[dict[str, Any]] = None,
         ingest_options: IngestOptions | None = None,
+        expires_at: Optional[str] = None,
     ) -> None:
         service = get_service()
         assert service.vikingdb_manager is not None
@@ -1877,6 +1890,7 @@ class ReindexExecutor:
             account_id=owner_ctx.account_id,
             owner_space=owner_space_for_uri(uri),
             meta=merged_meta,
+            expires_at=expires_at,
         )
         context.set_vectorize(Vectorize(text=vector_text))
         msg = EmbeddingMsgConverter.from_context(context)

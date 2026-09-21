@@ -219,6 +219,8 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
         lease_ref: Dict[str, Any] | None = None,
         auto_pathlock: bool = True,
+        *,
+        strict: bool = False,
     ) -> Dict[str, Any]:
         """Delete file/directory + recursively update vector index.
 
@@ -234,6 +236,14 @@ class _OpsMixin:
         delete runs with automatic pathlock disabled. Callers must guarantee the
         target is not concurrently mutated (e.g. best-effort shared upload
         cleanup that only deletes already-expired directories).
+
+        When ``strict`` is True the call does not return until every backing
+        record is gone: the vector delete already re-raises on backend error,
+        and after the FS delete we re-count the URI scope and raise if any
+        vector record remains. Physical cleanup (the TTL sweep) uses this so it
+        only marks an object cleaned — and stops billing for it — once files and
+        vectors are both removed. The default (False) keeps the historical
+        best-effort semantics for the interactive delete path.
 
         Returns:
             Dict with 'estimated_deleted_count' indicating the estimated number
@@ -278,6 +288,8 @@ class _OpsMixin:
             real_ctx = self._ctx_or_default(ctx)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
             await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
+            if strict:
+                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
             return {"estimated_deleted_count": estimated_count}
 
@@ -344,6 +356,8 @@ class _OpsMixin:
                 result["estimated_deleted_count"] = estimated_count
             else:
                 result = {"estimated_deleted_count": estimated_count}
+            if strict:
+                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
             return result
         finally:
             if lease_ref is None and lease is not None:
@@ -1151,7 +1165,12 @@ class _OpsMixin:
                     vector_store = self._get_vector_store()
                     if vector_store:
                         if not may_include_hidden_actor_peers(uri, real_ctx):
-                            filter_expr = PathScope("uri", uri, depth=-1)
+                            # User-facing directory count must match what reads
+                            # can see, so drop TTL-expired records (no-op when
+                            # TTL is disabled).
+                            filter_expr = self._with_expiry_barrier(
+                                PathScope("uri", uri, depth=-1)
+                            )
                             result["count"] = await vector_store.count(
                                 filter=filter_expr,
                                 ctx=real_ctx,
@@ -1335,6 +1354,10 @@ class _OpsMixin:
         filter_expr = self._remote_glob_filter(uri, pattern)
         if tag_filter:
             filter_expr = And([filter_expr, RawDSL(tag_filter)])
+        # Drop TTL-expired objects before the random-sample recall truncates to
+        # ``remote_limit``, so expired entries never consume a glob candidate
+        # slot. No-op when TTL is disabled.
+        filter_expr = self._with_expiry_barrier(filter_expr)
         full_pattern = _uri_to_remote_path_pattern(uri, pattern)
         advance = {
             "post_process_input_limit": _REMOTE_GLOB_POST_PROCESS_INPUT_LIMIT,

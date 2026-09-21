@@ -84,11 +84,13 @@ class _GrepMixin:
             if vector_store is None:
                 return {"matches": [], "count": 0, "match_count": 0, "files_scanned": 0}
             records = await vector_store.filter(
-                filter=And(
-                    [
-                        PathScope("uri", uri, depth=level_limit),
-                        RawDSL(tag_filter),
-                    ]
+                filter=self._with_expiry_barrier(
+                    And(
+                        [
+                            PathScope("uri", uri, depth=level_limit),
+                            RawDSL(tag_filter),
+                        ]
+                    )
                 ),
                 limit=100000,
                 output_fields=["uri", "search_tags"],
@@ -200,7 +202,15 @@ class _GrepMixin:
             return False
 
     async def _get_cached_count(self, uri: str, ctx) -> int:
-        """Get cached count of records for a URI (TTL=1h)."""
+        """Get cached count of records for a URI (TTL=1h).
+
+        This count only feeds engine-selection thresholds (fs vs. vikingdb for
+        grep/glob); it is never surfaced to callers or used to truncate results.
+        The TTL read barrier is therefore intentionally not applied here — both
+        engines filter expired objects out of their own result sets, and the
+        threshold is about total indexed volume, not visible count. The
+        user-facing directory count in ``stat`` applies the barrier separately.
+        """
         _COUNT_CACHE_TTL = 3600
         vector_store = self._get_vector_store()
 
@@ -304,6 +314,11 @@ class _GrepMixin:
         if tag_filter is not None:
             filter_expr = And([filter_expr, RawDSL(tag_filter)])
 
+        # Hide TTL-expired objects from the BM25 recall before it truncates to
+        # ``remote_return_limit`` candidates, so expired content cannot occupy a
+        # recall slot. No-op when TTL is disabled.
+        filter_expr = self._with_expiry_barrier(filter_expr)
+
         # Auto-adapt bm25 recall limit: recall up to 5x requested matches
         # while capping at VikingDB's max limit. If node_limit is unset,
         # use the maximum limit to avoid truncation.
@@ -331,11 +346,13 @@ class _GrepMixin:
             if tag_filter is not None and allowed_uris is None:
                 try:
                     records = await vector_store.filter(
-                        filter=And(
-                            [
-                                PathScope("uri", uri, depth=level_limit),
-                                RawDSL(tag_filter),
-                            ]
+                        filter=self._with_expiry_barrier(
+                            And(
+                                [
+                                    PathScope("uri", uri, depth=level_limit),
+                                    RawDSL(tag_filter),
+                                ]
+                            )
                         ),
                         limit=100000,
                         output_fields=["uri", "search_tags"],

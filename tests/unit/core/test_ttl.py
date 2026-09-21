@@ -1,0 +1,188 @@
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+# SPDX-License-Identifier: AGPL-3.0
+"""Unit tests for the central TTL resolution seam (``openviking.core.ttl``).
+
+These cover the pure resolution/barrier logic that every writer and reader
+shares: URI -> scope classification, frozen-snapshot computation, the
+absent/future/expired rules of ``is_expired``/``hidden_by_ttl``, and the
+``range_out`` read-barrier predicate. TTL is default OFF, so the disabled path
+(no barrier, nothing hidden) is asserted explicitly.
+"""
+
+from __future__ import annotations
+
+import types
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import openviking.core.ttl as ttl
+from openviking_cli.utils.config import TTLConfig
+
+
+def _install_config(monkeypatch, config: TTLConfig | None) -> None:
+    """Point the ttl module's config seam at a specific TTLConfig (or raise)."""
+
+    def _fake_get_config():
+        if config is None:
+            raise RuntimeError("config not initialized")
+        return types.SimpleNamespace(ttl=config)
+
+    monkeypatch.setattr(ttl, "get_openviking_config", _fake_get_config)
+
+
+# ── Scope classification ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "uri, expected",
+    [
+        ("viking://user/u1/memories/events/2026/e.md", "user_events"),
+        ("viking://user/u1/memories/events/e.md", "user_events"),
+        ("viking://user/u1/peers/p1/memories/events/e.md", "peer_events"),
+        ("viking://user/u1/sessions/s1", "sessions"),
+        ("viking://user/u1/sessions/s1/messages.jsonl", "sessions"),
+        # Out of scope: never TTL these.
+        ("viking://user/u1/memories/notes/n.md", None),
+        ("viking://user/u1/preferences/p", None),
+        ("viking://user/u1/resources/r.md", None),
+        ("viking://user/u1/peers/p1/memories/notes/n.md", None),
+        ("viking://user/u1", None),
+        ("not-a-viking-uri", None),
+    ],
+)
+def test_ttl_scope_for_uri(uri, expected):
+    assert ttl.ttl_scope_for_uri(uri) == expected
+
+
+def test_object_type_for_scope():
+    assert ttl.object_type_for_scope("sessions") == ttl.OBJECT_TYPE_SESSION
+    assert ttl.object_type_for_scope("user_events") == ttl.OBJECT_TYPE_EVENT
+    assert ttl.object_type_for_scope("peer_events") == ttl.OBJECT_TYPE_EVENT
+
+
+# ── resolve_ttl_days / freeze_ttl_fields ────────────────────────────────────
+
+
+def test_resolve_ttl_days_uses_scope_then_global(monkeypatch):
+    config = TTLConfig(
+        **{"global": {"mode": "days", "ttl_days": 7}},
+        user_events={"mode": "days", "ttl_days": 30},
+        # sessions inherits -> global (7); peer_events disabled -> off
+        peer_events={"mode": "disabled"},
+    )
+    _install_config(monkeypatch, config)
+
+    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/e.md") == 30
+    assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") == 7
+    assert ttl.resolve_ttl_days("viking://user/u1/peers/p1/memories/events/e.md") is None
+    # Out-of-scope URIs are never TTL'd even when global is on.
+    assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") is None
+
+
+def test_resolve_ttl_days_none_when_config_unavailable(monkeypatch):
+    _install_config(monkeypatch, None)
+    assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") is None
+
+
+def test_freeze_ttl_fields_snapshot(monkeypatch):
+    config = TTLConfig(user_events={"mode": "days", "ttl_days": 10})
+    _install_config(monkeypatch, config)
+
+    received = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    snap = ttl.freeze_ttl_fields(
+        "viking://user/u1/memories/events/e.md", received_at=received
+    )
+    assert snap == {
+        "ttl_days": 10,
+        "received_at": "2026-01-01T00:00:00.000Z",
+        "expires_at": "2026-01-11T00:00:00.000Z",
+    }
+
+
+def test_freeze_ttl_fields_none_when_out_of_scope(monkeypatch):
+    config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 5}})
+    _install_config(monkeypatch, config)
+    # sessions inherits global -> frozen; resources never in scope -> None
+    assert ttl.freeze_ttl_fields("viking://user/u1/resources/r.md") is None
+    assert ttl.freeze_ttl_fields("viking://user/u1/sessions/s1") is not None
+
+
+def test_freeze_ttl_fields_naive_received_at_treated_as_utc(monkeypatch):
+    config = TTLConfig(sessions={"mode": "days", "ttl_days": 1})
+    _install_config(monkeypatch, config)
+    naive = datetime(2026, 5, 1, 12, 0, 0)  # no tzinfo
+    snap = ttl.freeze_ttl_fields("viking://user/u1/sessions/s1", received_at=naive)
+    assert snap["received_at"] == "2026-05-01T12:00:00.000Z"
+    assert snap["expires_at"] == "2026-05-02T12:00:00.000Z"
+
+
+def test_compute_expires_at_day_granularity():
+    received = datetime(2026, 3, 10, 6, 30, tzinfo=timezone.utc)
+    assert ttl.compute_expires_at(received, 3) == datetime(
+        2026, 3, 13, 6, 30, tzinfo=timezone.utc
+    )
+
+
+# ── is_expired: absent / future / past rules ────────────────────────────────
+
+
+def test_is_expired_absent_is_never_expired():
+    assert ttl.is_expired(None) is False
+    assert ttl.is_expired("") is False
+    assert ttl.is_expired("not-a-timestamp") is False
+
+
+def test_is_expired_boundary_and_future():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    past = "2026-05-31T23:59:59.000Z"
+    future = "2026-06-01T00:00:01.000Z"
+    equal = "2026-06-01T00:00:00.000Z"
+    assert ttl.is_expired(past, now=now) is True
+    assert ttl.is_expired(equal, now=now) is True  # at-or-past
+    assert ttl.is_expired(future, now=now) is False
+
+
+def test_is_expired_naive_expiry_treated_as_utc():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    assert ttl.is_expired("2026-05-01T00:00:00", now=now) is True
+
+
+# ── ttl_enabled / hidden_by_ttl / expiry_filter_now gate ────────────────────
+
+
+def test_disabled_config_is_fully_inert(monkeypatch):
+    _install_config(monkeypatch, TTLConfig())  # default OFF
+    assert ttl.ttl_enabled() is False
+    assert ttl.expiry_filter_now() is None
+    # Even a clearly-past expiry is not hidden while TTL is off.
+    assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is False
+
+
+def test_unavailable_config_fails_closed_to_off(monkeypatch):
+    _install_config(monkeypatch, None)
+    assert ttl.ttl_enabled() is False
+    assert ttl.expiry_filter_now() is None
+    assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is False
+
+
+def test_enabled_config_hides_expired_only(monkeypatch):
+    _install_config(monkeypatch, TTLConfig(sessions={"mode": "days", "ttl_days": 1}))
+    assert ttl.ttl_enabled() is True
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    assert ttl.hidden_by_ttl("2026-05-01T00:00:00.000Z", now=now) is True
+    assert ttl.hidden_by_ttl("2999-01-01T00:00:00.000Z", now=now) is False
+    # Absent expiry stays visible even with TTL on.
+    assert ttl.hidden_by_ttl("", now=now) is False
+
+
+def test_expiry_filter_now_predicate_shape(monkeypatch):
+    _install_config(monkeypatch, TTLConfig(sessions={"mode": "days", "ttl_days": 1}))
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    barrier = ttl.expiry_filter_now(now=now)
+    assert barrier is not None
+    assert barrier.payload == {
+        "op": "range_out",
+        "field": "expires_at",
+        "lte": "2026-06-01T00:00:00.000Z",
+    }

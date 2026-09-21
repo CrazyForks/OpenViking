@@ -100,6 +100,9 @@ class CollectionSchemas:
             {"FieldName": "sparse_vector", "FieldType": "sparse_vector"},
             {"FieldName": "created_at", "FieldType": "date_time"},
             {"FieldName": "updated_at", "FieldType": "date_time"},
+            # expires_at 字段：TTL 到期时间（对象创建时固化）。
+            # 未启用 TTL 的对象该字段缺省，读取屏障将其视为"永不过期"。
+            {"FieldName": "expires_at", "FieldType": "date_time"},
             {"FieldName": "active_count", "FieldType": "int64"},
         ]
         fields.extend(
@@ -143,6 +146,7 @@ class CollectionSchemas:
             "context_type",
             "created_at",
             "updated_at",
+            "expires_at",
             "active_count",
         ]
         scalar_index.extend(
