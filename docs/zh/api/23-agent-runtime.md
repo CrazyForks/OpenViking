@@ -22,6 +22,8 @@ Agent Runtime Server 负责执行 Agent 任务，当前支持 Compile。应用�
 
 `args` 整体可省略，模型 Endpoint ID 也不是顶层字段。需要指定模型时使用 `args.model_name`；不传时由执行端使用其默认模型配置。
 
+下面的模型选择示例要求执行端支持 `args.model_name`。使用内置 VikingBot 时，省略 `args` 和 CLI 的 `--args`，它不接受非空扩展参数。Python 示例使用 `SyncHTTPClient`；使用 `AsyncHTTPClient` 时需 `await compile()`。
+
 **HTTP API**
 
 ```http
@@ -32,6 +34,7 @@ POST /api/v1/compile
 curl -X POST http://localhost:1933/api/v1/compile \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
+  -H "Idempotency-Key: studio-compile-001" \
   -d '{
     "from": ["viking://resources/research"],
     "to": "viking://resources/research-wiki",

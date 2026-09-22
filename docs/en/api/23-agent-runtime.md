@@ -22,6 +22,8 @@ Agent Runtime Server executes Agent tasks and currently supports Compile. Applic
 
 The entire `args` object is optional, and the model endpoint ID is not a top-level field. Use `args.model_name` to select a model; when omitted, the execution backend uses its default model configuration.
 
+The model-selection examples below require a backend that accepts `args.model_name`. When using bundled VikingBot, omit `args` and CLI `--args`; it rejects non-empty arguments. The Python example uses `SyncHTTPClient`; await `compile()` with `AsyncHTTPClient`.
+
 **HTTP API**
 
 ```http
@@ -32,6 +34,7 @@ POST /api/v1/compile
 curl -X POST http://localhost:1933/api/v1/compile \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
+  -H "Idempotency-Key: studio-compile-001" \
   -d '{
     "from": ["viking://resources/research"],
     "to": "viking://resources/research-wiki",
