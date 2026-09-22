@@ -59,4 +59,4 @@ client.add_message(
 result = client.commit_session(session_id=session_id)
 ```
 
-Resource imports and memory extraction run in the background. Save each returned `task_id` and check it with `client.get_task(result["task_id"])`. Wait for `completed` before checking results; inspect the task error if it is `failed` or `cancelled`. Call `client.close()` when finished.
+Resource imports and memory extraction run in the background. When a response contains a `task_id`, save it and check it with `client.get_task(result["task_id"])`. A no-op commit may return no task. Wait for `completed` before checking results; inspect the task error if it is `failed` or `cancelled`. Call `client.close()` when finished.

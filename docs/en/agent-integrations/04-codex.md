@@ -126,7 +126,7 @@ Change it with `OPENVIKING_PEER_SOURCE`, with `plugin.peerSource` in `ovcli.conf
 | MCP tool calls fail with an auth error | The active ovcli config has no valid `api_key` for an authenticated server | Fix `~/.openviking/ovcli.conf` (or run `node <plugin-dir>/scripts/setup.mjs`) and restart Codex; the stdio proxy re-reads it on launch and after auth failures. |
 | MCP tool calls fail with a connection error | Server unreachable or the URL is wrong | Check the endpoint: `curl "$(jq -r '.url' ~/.openviking/ovcli.conf)/health"` |
 | Hook review warning, or installed plugin with no recall/capture | Required hooks are untrusted, disabled, or the plugin is disabled | Review and enable the relevant entries in `/hooks`, then confirm `openviking-memory` in `/plugins`. |
-| Plugin still targets an old server after `ov config switch` | Codex keeps the proxy process from the previous session | Restart Codex; the proxy resolves credentials at startup. |
+| Plugin still targets an old server after `ov config switch` | The existing proxy retains its connection, or credential env vars override the selected config | Restart Codex and check credential env vars and `OPENVIKING_CLI_CONFIG_FILE`. Remote calls reload changed files after an auth failure, not on every successful request. |
 | Hooks use one server, MCP another | Stale `OPENVIKING_*` credential env vars in one context (env vars override ovcli.conf by default) | Unset the stale env vars (ovcli.conf then drives both), set `OPENVIKING_CREDENTIAL_SOURCE=cli`, or make the env vars consistent. |
 
 ## See also

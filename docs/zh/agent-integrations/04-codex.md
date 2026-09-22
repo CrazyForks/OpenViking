@@ -125,7 +125,7 @@ TraeCode CLI 2.0 用户启动 `trae-cli`，并可用 `trae-cli plugin list` 确�
 | MCP 工具调用报认证错误 | 当前 ovcli 配置没有 authenticated server 所需的有效 `api_key` | 修正 `~/.openviking/ovcli.conf`（或运行 `node <插件目录>/scripts/setup.mjs`）后重启 Codex；stdio 代理会在启动时和认证失败后重新读取配置 |
 | MCP 工具调用报连接错误 | 服务器不可达或 URL 配置错误 | 执行 `curl "$(jq -r '.url' ~/.openviking/ovcli.conf)/health"` 检查服务器状态 |
 | 提示审阅 hook，或插件已装但没有自动召回/捕获 | 相关 hook 未信任、未启用，或插件被禁用 | 在 `/hooks` 审阅并启用相关条目，再到 `/plugins` 确认插件已启用。 |
-| `ov config switch` 后插件仍指向旧服务器 | 上个会话的代理进程仍在运行 | 重启 Codex；代理在启动时解析凭据 |
+| `ov config switch` 后插件仍指向旧服务器 | 原代理仍保留连接，或凭据环境变量覆盖了选中的配置 | 重启 Codex，并检查凭据环境变量与 `OPENVIKING_CLI_CONFIG_FILE`。远程调用会在认证失败后检查文件变化，不会在每次成功请求时重载 |
 | Hook 与 MCP 指向不同服务器 | 某一侧残留了过期的 `OPENVIKING_*` 凭据环境变量（默认环境变量优先于 ovcli.conf） | 清除过期环境变量（让 ovcli.conf 同时驱动两者）、设置 `OPENVIKING_CREDENTIAL_SOURCE=cli`，或保证环境变量一致 |
 
 ## 参见

@@ -30,19 +30,9 @@
 
 **TRAE / TRAE CN**: open **Settings → MCP → Configured MCP Servers** and confirm that the `openviking` entry is visible.
 
-**TraeCode CLI 2.0**: hooks only run once you trust them. Start `trae-cli` and pick **Trust all and continue** at the prompt:
+**TraeCode CLI 2.0**: start `trae-cli`, review and enable the OpenViking hooks in `/hooks`, and confirm the plugin is enabled with `trae-cli plugin list`. New or changed hooks need another review. See the full guide for version-specific lifecycle support.
 
-```text
-Hooks need review
-6 hooks are new or changed.
-Hooks can run outside the sandbox after you trust them.
-
-  1. Review hooks
-> 2. Trust all and continue
-  3. Continue without trusting (hooks won't run)
-```
-
-Then run `trae-cli plugin list` and confirm that `openviking-memory` is enabled. If you miss the prompt or pick the third option, the hooks never run: enter `/hooks` to trust and enable the entries, and check `/plugins` shows the plugin as enabled — two independent switches, both have to be on. A plugin update that touches a hook asks for trust again.
+An MCP entry only confirms configuration. Ask the assistant to call OpenViking `health` and `list`, then check automatic recall separately using a new conversation in the same workspace after a previous session has been committed and processed.
 
 ## Troubleshoot
 

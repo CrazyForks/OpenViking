@@ -56,4 +56,4 @@ client.add_message(
 result = client.commit_session(session_id=session_id)
 ```
 
-资源导入和记忆提取都在后台处理。保存各次返回的 `task_id`，用 `client.get_task(result["task_id"])` 查询；等待 `completed` 后再检查结果，遇到 `failed` 或 `cancelled` 时先处理任务错误。用完后调用 `client.close()`。
+资源导入和记忆提取都在后台处理。响应包含 `task_id` 时，保存它并用 `client.get_task(result["task_id"])` 查询；无待处理内容的 commit 可能不返回任务。等待 `completed` 后再检查结果，遇到 `failed` 或 `cancelled` 时先处理任务错误。用完后调用 `client.close()`。
