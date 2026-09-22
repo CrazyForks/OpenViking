@@ -91,7 +91,7 @@ const results = await client.search("部署文档", {
 它与 Python、Go HTTP Client 使用相同的身份请求头和响应信封。更多示例见
 [`sdk/typescript/README_CN.md`](../../../sdk/typescript/README_CN.md)。
 
-未显式传入 `url` 时，HTTP 客户端会自动从 `ovcli.conf` 读取连接信息。`ovcli.conf` 是 HTTP 客户端和 CLI 共享的配置文件，默认路径 `~/.openviking/ovcli.conf`，也可通过环境变量指定：
+Python HTTP 客户端从 `ovcli.conf` 读取连接信息，显式传入的构造参数覆盖对应配置。`ovcli.conf` 是 HTTP 客户端和 CLI 共享的配置文件，默认路径 `~/.openviking/ovcli.conf`，也可通过环境变量指定：
 
 ```bash
 export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
@@ -299,8 +299,8 @@ JSON 输出 - 错误：
 
 ### 特殊情况
 
-- **字符串结果**（`read`、`abstract`、`overview`）：直接打印原文
-- **None 结果**（`mkdir`、`rm`、`mv`）：无输出
+- Table 模式下，`read`、`abstract`、`overview` 直接打印文本，`mkdir`、`rm`、`mv` 打印操作确认信息。
+- JSON 模式下，这些命令按上文的 JSON 格式输出。
 
 ### 退出码
 
@@ -351,7 +351,7 @@ JSON 输出 - 错误：
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 基础健康检查（无需认证） |
-| GET | `/ready` | AGFS、VectorDB 和 API Key 管理器就绪检查（无需认证） |
+| GET | `/ready` | AGFS、VectorDB、API Key 管理器和 Embedding 就绪检查（无需认证） |
 | GET | `/api/v1/system/status` | 系统状态 |
 | POST | `/api/v1/system/wait` | 等待后台处理完成 |
 | POST | `/api/v1/system/consistency` | 文件系统与向量索引一致性检查 |
@@ -395,7 +395,7 @@ JSON 输出 - 错误：
 | GET | `/api/v1/content/overview` | 读取概览（L1） |
 | GET | `/api/v1/content/download` | 下载原始文件字节 |
 | POST | `/api/v1/content/write` | 写入内容并刷新语义索引 |
-| POST | `/api/v1/content/batch-write` | 执行带前置条件的多文件写入 |
+| POST | `/api/v1/content/batch-write` | 写入多个文件并刷新索引 |
 | POST | `/api/v1/content/set_tags` | 设置检索标签 |
 | POST | `/api/v1/content/reindex` | 重建语义或向量索引 |
 

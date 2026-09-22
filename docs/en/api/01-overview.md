@@ -96,7 +96,7 @@ It uses the same identity headers and response envelope as the Python and Go
 HTTP clients. See [`sdk/typescript/README.md`](../../../sdk/typescript/README.md)
 for package-level examples.
 
-When `url` is not explicitly provided, the HTTP client automatically reads connection information from `ovcli.conf`. `ovcli.conf` is a configuration file shared between the HTTP client and CLI. Default path: `~/.openviking/ovcli.conf`. You can also specify the path via environment variable:
+The Python HTTP client reads connection information from `ovcli.conf`; explicit constructor values override the corresponding settings. `ovcli.conf` is a configuration file shared between the HTTP client and CLI. Default path: `~/.openviking/ovcli.conf`. You can also specify the path via environment variable:
 
 ```bash
 export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
@@ -304,8 +304,8 @@ JSON output - error:
 
 ### Special Cases
 
-- **String results** (`read`, `abstract`, `overview`): printed directly as plain text
-- **None results** (`mkdir`, `rm`, `mv`): no output
+- In table mode, `read`, `abstract`, and `overview` print text directly. `mkdir`, `rm`, and `mv` print a confirmation message.
+- In JSON mode, these commands use the JSON output format described above.
 
 ### Exit Codes
 
@@ -356,7 +356,7 @@ This catalog follows the routes actually mounted by the server. Each group headi
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Basic health check (no authentication) |
-| GET | `/ready` | AGFS, VectorDB, and API key manager readiness (no authentication) |
+| GET | `/ready` | AGFS, VectorDB, API key manager, and embedding readiness (no authentication) |
 | GET | `/api/v1/system/status` | System status |
 | POST | `/api/v1/system/wait` | Wait for background processing |
 | POST | `/api/v1/system/consistency` | Check filesystem and vector-index consistency |
@@ -400,7 +400,7 @@ This catalog follows the routes actually mounted by the server. Each group headi
 | GET | `/api/v1/content/overview` | Read an overview (L1) |
 | GET | `/api/v1/content/download` | Download original file bytes |
 | POST | `/api/v1/content/write` | Write content and refresh semantic indexes |
-| POST | `/api/v1/content/batch-write` | Apply preconditioned multi-file writes |
+| POST | `/api/v1/content/batch-write` | Write multiple files and refresh their indexes |
 | POST | `/api/v1/content/set_tags` | Set retrieval tags |
 | POST | `/api/v1/content/reindex` | Rebuild semantic or vector indexes |
 
