@@ -4,6 +4,10 @@ Privacy configs manage sensitive values by `category + target_key` (for example,
 
 Changed values create a version snapshot. You can query history and switch the active version. Submitting the same values as the current version does not create a new version.
 
+These examples use the current user’s API key. In trusted mode, supply the identity headers required by your deployment. Reads and CLI output contain the stored values; `***` below is an example placeholder, not automatic redaction.
+
+Activating a version changes only the values stored in OpenViking. It does not rotate, revoke, or restore credentials at the external provider.
+
 ## Endpoint Summary
 
 | Method | Path | Description |
@@ -15,8 +19,6 @@ Changed values create a version snapshot. You can query history and switch the a
 | GET | `/api/v1/privacy-configs/{category}/{target_key}/versions` | List version numbers |
 | GET | `/api/v1/privacy-configs/{category}/{target_key}/versions/{version}` | Get a specific version snapshot |
 | POST | `/api/v1/privacy-configs/{category}/{target_key}/activate` | Activate a specific version |
-
-Detailed sections are below.
 
 ---
 
@@ -82,9 +84,7 @@ GET /api/v1/privacy-configs
 
 ```bash
 curl -X GET http://localhost:1933/api/v1/privacy-configs \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice"
+  -H "X-API-Key: your-key"
 ```
 
 **Response**
@@ -110,9 +110,7 @@ GET /api/v1/privacy-configs/{category}
 
 ```bash
 curl -X GET http://localhost:1933/api/v1/privacy-configs/skill \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice"
+  -H "X-API-Key: your-key"
 ```
 
 **Response**
@@ -138,9 +136,7 @@ GET /api/v1/privacy-configs/{category}/{target_key}
 
 ```bash
 curl -X GET "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-search-knowledgebase" \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice"
+  -H "X-API-Key: your-key"
 ```
 
 **Response**
@@ -178,7 +174,7 @@ Write a new version and set it as active.
 
 **Behavior**
 
-- `values` is written as a full snapshot for that version
+- `values` replaces the complete value map for that version; omitted keys are absent from the new snapshot
 - New keys are allowed and persisted
 - If `values` is identical to the current version, no new version is created
 
@@ -200,8 +196,6 @@ POST /api/v1/privacy-configs/{category}/{target_key}
 curl -X POST "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-search-knowledgebase" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice" \
   -d '{
     "values": {
       "api_key": "secret-2",
@@ -248,9 +242,7 @@ GET /api/v1/privacy-configs/{category}/{target_key}/versions
 
 ```bash
 curl -X GET "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-search-knowledgebase/versions" \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice"
+  -H "X-API-Key: your-key"
 ```
 
 **Response**
@@ -278,9 +270,7 @@ GET /api/v1/privacy-configs/{category}/{target_key}/versions/{version}
 
 ```bash
 curl -X GET "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-search-knowledgebase/versions/2" \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice"
+  -H "X-API-Key: your-key"
 ```
 
 **Response**
@@ -324,8 +314,6 @@ POST /api/v1/privacy-configs/{category}/{target_key}/activate
 curl -X POST "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-search-knowledgebase/activate" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
-  -H "X-OpenViking-User: alice" \
   -d '{"version": 2}'
 ```
 
@@ -354,25 +342,28 @@ curl -X POST "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-se
 
 ```bash
 # Categories and targets
-openviking privacy categories
-openviking privacy list skill
+ov privacy categories
+ov privacy list skill
 
 # Active config (shortcut supported)
-openviking privacy get skill byted-viking-search-knowledgebase
-openviking privacy skill byted-viking-search-knowledgebase
+ov privacy get skill byted-viking-search-knowledgebase
+ov privacy skill byted-viking-search-knowledgebase
 
 # Upsert with full JSON snapshot
-openviking privacy upsert skill byted-viking-search-knowledgebase \
+ov privacy upsert skill byted-viking-search-knowledgebase \
   --values-json '{"api_key":"secret-2","base_url":"https://example.com"}'
 
+# Read values from a local JSON file instead of command arguments
+ov privacy upsert skill byted-viking-search-knowledgebase --values-file ./privacy-values.json
+
 # Partial key update (CLI merges with current first)
-openviking privacy upsert skill byted-viking-search-knowledgebase \
+ov privacy upsert skill byted-viking-search-knowledgebase \
   --key-api_key secret-3
 
 # Version query and activation
-openviking privacy versions skill byted-viking-search-knowledgebase
-openviking privacy version skill byted-viking-search-knowledgebase 2
-openviking privacy activate skill byted-viking-search-knowledgebase 2
+ov privacy versions skill byted-viking-search-knowledgebase
+ov privacy version skill byted-viking-search-knowledgebase 2
+ov privacy activate skill byted-viking-search-knowledgebase 2
 ```
 
 ---
