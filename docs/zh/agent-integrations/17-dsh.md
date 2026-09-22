@@ -61,7 +61,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 每个 DSH 会话映射为 OpenViking 中的 `dsh-<session-id>`，子 agent 各自拥有独立会话。
 
-模型看到的工具面就是 OpenViking 的 MCP 工具集，经由与其他记忆集成相同的 stdio 代理接入，以 `mcp__openviking__` 前缀发布。由于该代理每个 profile 只起一个进程，`mcp__openviking__remember` 写入的是服务端一个短生命周期的会话而不是当前会话（对话本身仍由自动捕获记录），工具调用带的也是启动时解析的 actor peer。若一个进程要服务多个工作区且需要精确归属工具调用，请显式设置 `OPENVIKING_PEER_ID`。插件同时附带两个共享技能：`openviking-memory` 让模型知道何时该检索、读取和写入，`openviking-skills` 讲如何查找、使用、创建、共享和迁移存放在 OpenViking 里的技能。
+模型看到的工具面就是 OpenViking 的 MCP 工具集，经由与其他记忆集成相同的 stdio 代理接入，以 `mcp__openviking__` 前缀发布。由于该代理每个 profile 只起一个进程，`mcp__openviking__remember` 写入的是服务端一个短生命周期的会话而不是当前会话（对话本身仍由自动捕获记录），工具调用带的也是启动时解析的 actor peer。固定的 `OPENVIKING_PEER_ID` 会把该 profile 的工具调用归属到同一个 peer；多个工作区需要不同工具身份时，使用独立 profile/进程。插件同时附带两个共享技能：`openviking-memory` 让模型知道何时该检索、读取和写入，`openviking-skills` 讲如何查找、使用、创建、共享和迁移存放在 OpenViking 里的技能。
 
 文件工具误把 `viking://` URI 当本地路径时，调用会被拦截，并提示改用对应的 OpenViking 工具；写入或编辑的若是 `viking://~/skills/<name>/` 这类技能目录，提示的工具是 `mcp__openviking__add_skill`，它用完整的 `SKILL.md` 文本创建或替换整个技能。shell 命令带 `viking://` URI 时照常执行，模型会收到一条改用 OpenViking 工具的提示，URI 是有意传入的数据时可以忽略。
 
@@ -77,7 +77,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 | `OPENVIKING_ACCOUNT` / `OPENVIKING_USER` | — | 可信模式下的 account 与 user |
 | `OPENVIKING_PEER_ID` | — | 显式指定 actor peer |
 | `OPENVIKING_WORKSPACE_PEER` | `true` | 按每个会话的工作区推导 peer；设为 `0` 则不发送 peer |
-| `OPENVIKING_RECALL_PEER_SCOPE` | `all` | 设为 `actor` 可将召回限制在当前工作区 |
+| `OPENVIKING_RECALL_PEER_SCOPE` | `all` | 设为 `actor` 可限定当前工作区的 peer 召回；用户级记忆仍共享 |
 | `OV_DEBUG_LOG` | — | 把调试日志写到该路径 |
 
 行为参数写在 profile 的 Cordis patch 条目里：
@@ -99,7 +99,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
             commitTokenThreshold: 20000
 ```
 
-同一个 `config` 块里的 `syncTurns: false` 让该集成变成只读：画像注入和记忆召回照常，但什么都不再写回——不捕获对话、不 commit，也不重放此前会话排入队列的写入，那些写入会一直留在队列里，直到某个仍在写入的会话把它们排空。
+同一个 `config` 块里的 `syncTurns: false` 关闭自动捕获、commit 和待写队列重放，画像注入和召回照常。排队的写入保留到后续开启写入的会话处理；该开关不会撤销模型的 MCP 写工具或改变服务端权限。
 
 同一个 `config` 块里的 `peerSource` 决定工作区 peer 的派生方式。默认的 `"git"` 取仓库归一化后的 `origin` URL（`git@github.com:volcengine/OpenViking.git` 得到 `github.com-volcengine-openviking`），其次是仓库根路径，因此同一个仓库的每个 clone、worktree 和子目录共用同一个 peer；不在仓库中则完全不发送 peer，在那里记下的内容进入用户级空间 `viking://user/<you>/memories`。`"cwd"` 恢复此前的行为——把工作目录路径中的非字母数字字符全部替换成 `-`；`"none"` 则完全不发送 peer。要让仓库之外的目录拥有独立记忆，请为它设置 `OPENVIKING_PEER_ID`（见[让一个目录拥有独立记忆](../configuration/02-client.md#让一个目录拥有独立记忆)）。
 
@@ -115,7 +115,7 @@ patch 中写的凭证优先于环境变量。行为配置按优先级从高到�
 |------|----------|
 | 没有注入，也没有 OpenViking 工具 | `dsh --profile web --dump-config` 里应能看到 `openviking-memory`；重新运行安装器或 `dsh plugin --profile web add …` |
 | 装到了错误的 profile | 安装器默认 `web`；用 `--dsh-profile <name>` 重新运行 |
-| 安装时报 `ERESOLVE` | `@deepseek-ai/dsh-*` 各包预发布 tag 不同步；请精确安装 `@deepseek-ai/dsh@0.1.0-rc.6` |
+| 安装时报 `ERESOLVE` | 核对 DSH 版本与插件声明的依赖，按插件 README 对齐宿主包版本；旧预发布版本的固定值不能作为通用升级方案。 |
 | 安装时报包「不在 npm registry 中」 | pnpm 默认拒绝发布不满 24 小时的版本（`minimumReleaseAge`）。等一等，或把该精确版本加进 profile 的 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` |
 | 召不回任何内容 | `curl http://localhost:1933/health`；检查端点配置，以及 prompt 是否长于最小查询长度（3 个字符） |
 | OpenViking 返回 401 / 403 | 检查 `OPENVIKING_API_KEY`；可信模式部署还要检查 `OPENVIKING_ACCOUNT` 与 `OPENVIKING_USER` |
