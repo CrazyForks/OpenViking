@@ -2,6 +2,8 @@
 
 QueueFS determines completion from one backend status snapshot: a queue is empty only when both `pending` and `processing` are zero. An empty pending queue alone does not mean processing has finished.
 
+An empty queue means no messages are currently unacknowledged. It does not prove every operation succeeded or prevent new work from arriving. To verify an import or session commit, inspect its [task](../api/17-tasks.md), including the terminal status and error.
+
 ## Problem
 
 The previous implementation inferred completion from two independent sources:
