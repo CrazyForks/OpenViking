@@ -190,7 +190,6 @@ Get system status including initialization state and authenticated user info. `r
 
 **Code Entry Points**:
 - `openviking/server/routers/system.py:system_status` - HTTP route
-- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.get_status` - SDK entry
 - `crates/ov_cli/src/commands/system.rs` - CLI command
 
 #### 2. Interface and Parameters
@@ -210,18 +209,7 @@ curl -X GET http://localhost:1933/api/v1/system/status \
   -H "X-API-Key: your-key"
 ```
 
-**Python SDK**
-
-```python
-status = client.get_status()
-print(status)
-```
-
-**TypeScript SDK**
-
-```typescript
-console.log(await client.getStatus());
-```
+The public SDK `get_status()` / `getStatus()` / `GetStatus()` methods return aggregate Observer status, not this endpoint’s identity payload. Use HTTP for this endpoint; see [Observer](18-observer.md) for those SDK methods.
 
 **CLI**
 
@@ -377,10 +365,7 @@ curl -X POST http://localhost:1933/api/v1/system/wait \
 **Python SDK**
 
 ```python
-# Add resources
-client.add_resource(path="./docs/")
-
-# Wait for all processing to complete
+# Wait for the current processing queues to drain
 status = client.wait_processed(timeout=60.0)
 print(status)  # Inspect each queue’s error_count and errors
 ```

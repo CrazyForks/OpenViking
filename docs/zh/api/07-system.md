@@ -188,7 +188,6 @@ curl -X GET http://localhost:1933/ready
 
 **代码入口**:
 - `openviking/server/routers/system.py:system_status` - HTTP 路由
-- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.get_status` - SDK 入口
 - `crates/ov_cli/src/commands/system.rs` - CLI 命令
 
 #### 2. 接口和参数说明
@@ -208,18 +207,7 @@ curl -X GET http://localhost:1933/api/v1/system/status \
   -H "X-API-Key: your-key"
 ```
 
-**Python SDK**
-
-```python
-status = client.get_status()
-print(status)
-```
-
-**TypeScript SDK**
-
-```typescript
-console.log(await client.getStatus());
-```
+公开 SDK 的 `get_status()` / `getStatus()` / `GetStatus()` 返回 Observer 汇总状态，不是本接口的身份信息。访问本接口使用 HTTP；这些 SDK 方法见[运行观测](18-observer.md)。
 
 **CLI**
 
