@@ -1663,21 +1663,13 @@ class ReindexExecutor:
             # expiry. Re-derive it here (never from the current scope policy) so a
             # reindex keeps the object's original deadline and read-barrier
             # invisibility, even if the directory policy changed afterwards.
-            expires_at = (
-                memory_file.extra_fields.get("expires_at") if memory_file else None
-            )
-            ttl_generation = (
-                memory_file.extra_fields.get("ttl_generation") if memory_file else None
-            )
+            expires_at = memory_file.extra_fields.get("expires_at") if memory_file else None
+            ttl_generation = memory_file.extra_fields.get("ttl_generation") if memory_file else None
             existing = await self._fetch_existing_record(
                 uri=file_uri,
                 level=2,
                 ctx=self._content_owner_ctx(file_uri, ctx),
             )
-            if expires_at is None and existing is not None:
-                expires_at = existing.get("expires_at") or None
-            if ttl_generation is None and existing is not None:
-                ttl_generation = existing.get("ttl_generation") or None
             abstract = self._best_non_empty(
                 self._record_abstract(existing),
                 await self._best_file_summary(file_uri, ctx=ctx),

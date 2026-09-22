@@ -1357,10 +1357,10 @@ class _OpsMixin:
                             # User-facing directory count must match what reads
                             # can see, so drop TTL-expired records (no-op when
                             # TTL is disabled).
-                            filter_expr = self._with_expiry_barrier(PathScope("uri", uri, depth=-1))
                             result["count"] = await vector_store.count(
-                                filter=filter_expr,
+                                filter=PathScope("uri", uri, depth=-1),
                                 ctx=real_ctx,
+                                include_expired=False,
                             )
                 except Exception as e:
                     logger.warning(f"[VikingFS] Failed to count nodes for directory stat: {e}")
@@ -1553,10 +1553,6 @@ class _OpsMixin:
         filter_expr = self._remote_glob_filter(uri, pattern)
         if tag_filter:
             filter_expr = And([filter_expr, RawDSL(tag_filter)])
-        # Drop TTL-expired objects before the random-sample recall truncates to
-        # ``remote_limit``, so expired entries never consume a glob candidate
-        # slot. No-op when TTL is disabled.
-        filter_expr = self._with_expiry_barrier(filter_expr)
         full_pattern = _uri_to_remote_path_pattern(uri, pattern)
         advance = {
             "post_process_input_limit": _REMOTE_GLOB_POST_PROCESS_INPUT_LIMIT,

@@ -68,13 +68,8 @@ async def _fake_stat(uri, ctx=None, skip_count=False):
 
 
 def _assert_expiry_barrier(filter_expr, expected_filter):
-    assert isinstance(filter_expr, And)
-    assert filter_expr.conds[0] == expected_filter
-    expiry_filter = filter_expr.conds[1]
-    assert isinstance(expiry_filter, RawDSL)
-    assert expiry_filter.payload["op"] == "range_out"
-    assert expiry_filter.payload["field"] == "expires_at"
-    assert isinstance(expiry_filter.payload["lte"], str)
+    # TTL validation/refill is in the backend, not a new cloud scalar filter.
+    assert filter_expr == expected_filter
 
 
 @pytest.mark.asyncio

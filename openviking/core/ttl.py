@@ -25,7 +25,6 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from openviking.core.namespace import uri_parts
-from openviking.storage.expr import RawDSL
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_config
 
@@ -34,9 +33,7 @@ from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_conf
 OBJECT_TYPE_EVENT = "event"
 OBJECT_TYPE_SESSION = "session"
 TTL_GENERATION_FIELD = "ttl_generation"
-TTL_FIELD_NAMES = frozenset(
-    {"ttl_days", "received_at", "expires_at", TTL_GENERATION_FIELD}
-)
+TTL_FIELD_NAMES = frozenset({"ttl_days", "received_at", "expires_at", TTL_GENERATION_FIELD})
 
 
 def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
@@ -56,12 +53,7 @@ def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
     if parts[2] == "sessions":
         return "sessions"
     # peer events: viking://user/{uid}/peers/{pid}/memories/events/...
-    if (
-        len(parts) >= 6
-        and parts[2] == "peers"
-        and parts[4] == "memories"
-        and parts[5] == "events"
-    ):
+    if len(parts) >= 6 and parts[2] == "peers" and parts[4] == "memories" and parts[5] == "events":
         return "peer_events"
     # user events: viking://user/{uid}/memories/events/...
     if len(parts) >= 4 and parts[2] == "memories" and parts[3] == "events":
@@ -207,9 +199,8 @@ def ttl_enabled() -> bool:
 def hidden_by_ttl(expires_at: Optional[str], *, now: Optional[datetime] = None) -> bool:
     """Whether a read/compute path should treat ``expires_at`` as logically gone.
 
-    Scalar counterpart to :func:`expiry_filter_now` for code paths that already
-    hold a frozen ``expires_at`` (session load/list, the idle scan) instead of
-    issuing a vector query. Visibility follows the frozen object snapshot, not
+    Used by filesystem reads and vector candidate validation against source
+    metadata. Visibility follows the frozen object snapshot, not
     current policy: disabling TTL stops new snapshots but cannot revive an
     already-expired object. Objects without ``expires_at`` remain visible.
     """
@@ -222,30 +213,3 @@ def _current_ttl_config() -> Optional[TTLConfig]:
     except Exception:
         # Config not initialized (e.g. unit tests, bootstrap). Fail closed to OFF.
         return None
-
-
-def expiry_filter_now(*, now: Optional[datetime] = None) -> Optional[RawDSL]:
-    """Return the read-barrier filter that hides expired object snapshots.
-
-    The predicate is always present because current policy only controls creation
-    of new snapshots. It keeps legacy/non-TTL objects visible while ``expires_at``
-    is absent or strictly in the future, and hides an object once
-    ``expires_at <= now``:
-
-        ``{"op": "range_out", "field": "expires_at", "lte": <now RFC3339>}``
-
-    ``range_out`` is the negation of ``range``: a row matches when ``expires_at``
-    is *outside* ``(-inf, now]`` (i.e. still in the future). Rows without an
-    ``expires_at`` value never satisfy the inner range, so ``range_out`` keeps
-    them visible — matching :func:`is_expired`'s absent-is-not-expired rule. The
-    barrier is injected as a raw DSL node because the typed filter AST compiles
-    ``Range``/``TimeRange`` down to ``range`` and has no ``range_out`` variant.
-    """
-    current = now or datetime.now(timezone.utc)
-    return RawDSL(
-        {
-            "op": "range_out",
-            "field": "expires_at",
-            "lte": format_iso8601(current),
-        }
-    )

@@ -84,17 +84,11 @@ class _GrepMixin:
             if vector_store is None:
                 return {"matches": [], "count": 0, "match_count": 0, "files_scanned": 0}
             records = await vector_store.filter(
-                filter=self._with_expiry_barrier(
-                    And(
-                        [
-                            PathScope("uri", uri, depth=level_limit),
-                            RawDSL(tag_filter),
-                        ]
-                    )
-                ),
+                filter=And([PathScope("uri", uri, depth=level_limit), RawDSL(tag_filter)]),
                 limit=100000,
                 output_fields=["uri", "search_tags"],
                 ctx=ctx,
+                include_expired=False,
             )
             allowed_uris = {str(record["uri"]) for record in records if record.get("uri")}
             if not allowed_uris:
@@ -287,7 +281,9 @@ class _GrepMixin:
         """VikingDB bm25 recall + local fs precise matching."""
         vector_store = self._get_vector_store()
         tags_by_uri: Dict[str, List[str]] = {}
-        output_fields = ["uri", "search_tags"] if tag_filter is not None or include_tags else ["uri"]
+        output_fields = (
+            ["uri", "search_tags"] if tag_filter is not None or include_tags else ["uri"]
+        )
 
         # Split regex alternation (e.g. "error|warning|fail") and join as a
         # single query string for bm25 search. VikingDB's standard tokenizer
@@ -313,11 +309,6 @@ class _GrepMixin:
             )
         if tag_filter is not None:
             filter_expr = And([filter_expr, RawDSL(tag_filter)])
-
-        # Hide TTL-expired objects from the BM25 recall before it truncates to
-        # ``remote_return_limit`` candidates, so expired content cannot occupy a
-        # recall slot. No-op when TTL is disabled.
-        filter_expr = self._with_expiry_barrier(filter_expr)
 
         # Auto-adapt bm25 recall limit: recall up to 5x requested matches
         # while capping at VikingDB's max limit. If node_limit is unset,
@@ -346,17 +337,11 @@ class _GrepMixin:
             if tag_filter is not None and allowed_uris is None:
                 try:
                     records = await vector_store.filter(
-                        filter=self._with_expiry_barrier(
-                            And(
-                                [
-                                    PathScope("uri", uri, depth=level_limit),
-                                    RawDSL(tag_filter),
-                                ]
-                            )
-                        ),
+                        filter=And([PathScope("uri", uri, depth=level_limit), RawDSL(tag_filter)]),
                         limit=100000,
                         output_fields=["uri", "search_tags"],
                         ctx=ctx,
+                        include_expired=False,
                     )
                 except Exception as filter_error:
                     logger.warning(
@@ -507,9 +492,7 @@ class _GrepMixin:
         # Native grep applies node_limit before VikingFS can enforce object TTL.
         # Only accounts that have ever registered TTL objects need the wider
         # candidate set; default-off accounts preserve the existing fast path.
-        apply_ttl_filter = await self.ttl_registry.account_may_have_records(
-            real_ctx.account_id
-        )
+        apply_ttl_filter = await self.ttl_registry.account_may_have_records(real_ctx.account_id)
 
         excluded_path = None
         if exclude_uri:

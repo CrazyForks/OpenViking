@@ -764,8 +764,15 @@ class _AccessMixin:
             )
         return await self._ttl_uri_visible(visible_uri, ctx, path=path)
 
-    async def _ttl_summary_visible(self, uri: str, raw: bytes | str, ctx: RequestContext) -> bool:
-        from openviking.storage.abstract_overview import parse_abstract_overview
+    async def _ttl_summary_visible(
+        self,
+        uri: str,
+        raw: bytes | str,
+        ctx: RequestContext,
+        *,
+        vector_abstract: Optional[str] = None,
+    ) -> bool:
+        from openviking.storage.abstract_overview import body_for_preview, parse_abstract_overview
 
         try:
             document = parse_abstract_overview(raw)
@@ -773,12 +780,26 @@ class _AccessMixin:
             return False
         expires_at = document.metadata.get("expires_at")
         if expires_at:
+            if vector_abstract is not None:
+                from openviking.utils.embedding_utils import _truncate_abstract_bytes
+
+                # A regenerated sidecar can have a later deadline while its
+                # asynchronous vector still contains the old expired summary.
+                if (
+                    vector_abstract.strip()
+                    != _truncate_abstract_bytes(body_for_preview(raw)).strip()
+                ):
+                    return False
             return not hidden_by_ttl(expires_at)
         if ttl_scope_for_uri(uri) in {"user_events", "peer_events"}:
             # Legacy summaries have no trustworthy dependency deadline. Once
             # TTL is in use they must be regenerated before serving their body.
-            directory_uri = uri.rsplit("/", 1)[0] if uri.endswith(("/.abstract.md", "/.overview.md")) else uri
-            return not await self.ttl_registry.summary_requires_snapshot(ctx.account_id, directory_uri)
+            directory_uri = (
+                uri.rsplit("/", 1)[0] if uri.endswith(("/.abstract.md", "/.overview.md")) else uri
+            )
+            return not await self.ttl_registry.summary_requires_snapshot(
+                ctx.account_id, directory_uri
+            )
         return True
 
     async def _ttl_uri_visible(
@@ -787,14 +808,16 @@ class _AccessMixin:
         ctx: RequestContext,
         *,
         path: Optional[str] = None,
+        require_source: bool = False,
+        vector_abstract: Optional[str] = None,
     ) -> bool:
         """Return object-level TTL visibility without recursing through VikingFS.
 
         Event expiry is stored in the event markdown file itself. Session expiry
         is stored at the session root and hides the complete session subtree.
         Directory policy nodes are never visibility objects by themselves.
-        Malformed or unreadable metadata fails open because expiry cannot be
-        proven; physical cleanup follows the same absent-expiry rule.
+        Vector candidates require a readable source: stale index rows must not
+        become visible when cleanup has already removed their source metadata.
         """
         scope = ttl_scope_for_uri(uri)
         if scope != "sessions" and uri.rsplit("/", 1)[-1] in {".abstract.md", ".overview.md"}:
@@ -806,8 +829,12 @@ class _AccessMixin:
                 except Exception as exc:
                     if is_not_found_error(exc):
                         continue
+                    if require_source:
+                        raise
                     return False
-                return await self._ttl_summary_visible(uri, raw, ctx)
+                return await self._ttl_summary_visible(
+                    uri, raw, ctx, vector_abstract=vector_abstract
+                )
             return False
         if scope is None:
             return True
@@ -855,6 +882,8 @@ class _AccessMixin:
             except Exception as exc:
                 if is_not_found_error(exc):
                     continue
+                if require_source:
+                    raise
                 return True
             try:
                 if scope == "sessions":
@@ -866,6 +895,8 @@ class _AccessMixin:
 
                     metadata = parse_memory_file_with_fields(self._decode_bytes(raw))
             except Exception:
+                if require_source:
+                    raise
                 return True
             if not isinstance(metadata, dict):
                 return True
@@ -882,10 +913,12 @@ class _AccessMixin:
             try:
                 record = await self.ttl_registry.get(ctx.account_id, object_uri)
             except Exception:
+                if require_source:
+                    raise
                 return True
             if record is not None and hidden_by_ttl(record.expires_at):
                 return False
-        return True
+        return not require_source
 
     def _alias_uri_for_path(
         self,

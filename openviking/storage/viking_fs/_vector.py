@@ -5,9 +5,8 @@
 from functools import partial
 from typing import TYPE_CHECKING, Any, List, Optional
 
-from openviking.core.ttl import expiry_filter_now
 from openviking.server.identity import RequestContext
-from openviking.storage.expr import And, Eq, FilterExpr, In, Or, PathScope
+from openviking.storage.expr import Eq, In, Or, PathScope
 from openviking.storage.viking_fs._base import logger
 
 if TYPE_CHECKING:
@@ -16,26 +15,6 @@ if TYPE_CHECKING:
 
 class _VectorMixin:
     """Vector store integration: delete/update URIs, get store/embedder."""
-
-    @staticmethod
-    def _with_expiry_barrier(
-        filter_expr: Optional[FilterExpr],
-    ) -> Optional[FilterExpr]:
-        """AND the TTL read barrier onto a filesystem read filter.
-
-        The barrier hides objects whose frozen ``expires_at`` is at/past now;
-        rows without a snapshot are preserved, so legacy and non-TTL data keep
-        their existing behavior. Used by the FS read paths (grep/glob/stat)
-        that build their own filters instead of going through the backend's
-        ``_build_scope_filter`` retrieval seam. Cleanup and maintenance paths
-        deliberately do not call this — they must still see expired records.
-        """
-        barrier = expiry_filter_now()
-        if barrier is None:
-            return filter_expr
-        if filter_expr is None:
-            return barrier
-        return And([filter_expr, barrier])
 
     async def _delete_from_vector_store(
         self,

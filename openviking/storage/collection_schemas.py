@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from openviking.core.context import ContextType, ResourceContentType
+from openviking.core.ttl import OBJECT_TYPE_EVENT, ttl_object_for_uri
 from openviking.models.embedder.base import embed_compat
 from openviking.server.error_mapping import is_not_found_error
 from openviking.server.identity import RequestContext, Role
@@ -101,12 +102,6 @@ class CollectionSchemas:
             {"FieldName": "sparse_vector", "FieldType": "sparse_vector"},
             {"FieldName": "created_at", "FieldType": "date_time"},
             {"FieldName": "updated_at", "FieldType": "date_time"},
-            # expires_at 字段：TTL 到期时间（对象创建时固化）。
-            # 未启用 TTL 的对象该字段缺省，读取屏障将其视为"永不过期"。
-            {"FieldName": "expires_at", "FieldType": "date_time"},
-            # Incarnation fence used to reject delayed writes after cleanup or
-            # delete/recreate. It is intentionally not indexed.
-            {"FieldName": "ttl_generation", "FieldType": "string"},
             {"FieldName": "active_count", "FieldType": "int64"},
         ]
         fields.extend(
@@ -150,7 +145,6 @@ class CollectionSchemas:
             "context_type",
             "created_at",
             "updated_at",
-            "expires_at",
             "active_count",
         ]
         scalar_index.extend(
@@ -621,11 +615,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             inserted_data = embedding_msg.context_data
             account_id = inserted_data.get("account_id", "default")
             context_user = inserted_data.get("user") or {}
-            user_id = (
-                context_user.get("user_id")
-                or inserted_data.get("owner_user_id")
-                or "default"
-            )
+            user_id = context_user.get("user_id") or inserted_data.get("owner_user_id") or "default"
             user = UserIdentifier(account_id=account_id, user_id=user_id)
             ctx = RequestContext(user=user, role=Role.USER, bypass_acl=True)
             collector = resolve_telemetry(embedding_msg.telemetry_id)
@@ -856,19 +846,15 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             context_data=inserted_data,
                         )
                         if result is None:
-                            self._merge_request_stats(
-                                embedding_msg.telemetry_id, processed=1
-                            )
+                            self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
                             self._record_request_success(embedding_msg)
                             return ProcessResult.success(inserted_data)
-                    elif inserted_data.get("ttl_generation"):
+                    elif (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT:
                         result = await self._write_ttl_vector_if_current(
                             embedding_msg, ctx, _write_vector
                         )
                         if result is None:
-                            self._merge_request_stats(
-                                embedding_msg.telemetry_id, processed=1
-                            )
+                            self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
                             self._record_request_success(embedding_msg)
                             return ProcessResult.success(inserted_data)
                     else:
@@ -971,19 +957,15 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         lease = await viking_fs._async_agfs.pathlock_acquire_exact(path)
         try:
             try:
-                content = await viking_fs.read_file(
-                    object_uri, ctx=ctx, include_expired=True
-                )
+                content = await viking_fs.read_file(object_uri, ctx=ctx, include_expired=True)
             except Exception as exc:
                 if is_not_found_error(exc):
                     return None
                 raise
             fields = parse_memory_file_with_fields(content)
-            if (
-                hidden_by_ttl(fields.get("expires_at"))
-                or str(fields.get("ttl_generation") or "")
-                != str(data.get("ttl_generation") or "")
-            ):
+            if hidden_by_ttl(fields.get("expires_at")) or str(
+                fields.get("ttl_generation") or ""
+            ) != str(data.get("ttl_generation") or ""):
                 return None
             return await write_vector()
         finally:

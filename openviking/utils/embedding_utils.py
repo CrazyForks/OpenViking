@@ -429,9 +429,7 @@ async def vectorize_directory_meta(
             msg_abstract = EmbeddingMsgConverter.from_context(context_abstract, creator_acl_grant)
             if msg_abstract is not None and context_type == "memory":
                 msg_abstract.context_data["_source_sidecar_uri"] = f"{uri}/.abstract.md"
-                msg_abstract.context_data["_source_sidecar_digest"] = semantic_body_digest(
-                    abstract
-                )
+                msg_abstract.context_data["_source_sidecar_digest"] = semantic_body_digest(abstract)
             _apply_scalar_overrides(
                 msg_abstract,
                 (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value)),
@@ -480,9 +478,7 @@ async def vectorize_directory_meta(
             msg_overview = EmbeddingMsgConverter.from_context(context_overview, creator_acl_grant)
             if msg_overview is not None and context_type == "memory":
                 msg_overview.context_data["_source_sidecar_uri"] = f"{uri}/.overview.md"
-                msg_overview.context_data["_source_sidecar_digest"] = semantic_body_digest(
-                    overview
-                )
+                msg_overview.context_data["_source_sidecar_digest"] = semantic_body_digest(overview)
             _apply_scalar_overrides(
                 msg_overview,
                 (scalar_overrides or {}).get(int(ContextLevel.OVERVIEW.value)),
@@ -545,6 +541,18 @@ async def vectorize_file(
         queue_manager = get_queue_manager()
         embedding_queue = queue_manager.get_queue(queue_manager.EMBEDDING)
         viking_fs = get_viking_fs()
+
+        # Capture the incarnation before reading/vectorizing content. A source
+        # replacement during this operation must invalidate the queued write.
+        from openviking.core.ttl import TTL_FIELD_NAMES, ttl_scope_for_uri
+
+        source_ttl = None
+        if ttl_scope_for_uri(file_path) in {"user_events", "peer_events"}:
+            from openviking.session.memory.utils.messages import parse_memory_file_with_fields
+
+            source_ttl = parse_memory_file_with_fields(
+                await viking_fs.read_file(file_path, ctx=ctx)
+            )
 
         file_name = summary_dict.get("name") or os.path.basename(file_path)
         summary = summary_dict.get("summary", "")
@@ -648,6 +656,13 @@ async def vectorize_file(
             return False
 
         _apply_scalar_overrides(embedding_msg, scalar_override)
+        # OVPack/reindex must take the incarnation fence from the restored
+        # source, never from vector scalars (cloud schemas have no TTL fields).
+        if source_ttl is not None:
+            for field in TTL_FIELD_NAMES:
+                embedding_msg.context_data.pop(field, None)
+                if source_ttl.get(field) is not None:
+                    embedding_msg.context_data[field] = source_ttl[field]
         _apply_ingest_options(embedding_msg, ingest_options)
         enqueued = await _enqueue_embedding_message(
             embedding_queue,

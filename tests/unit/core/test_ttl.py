@@ -184,7 +184,7 @@ def test_is_expired_naive_expiry_treated_as_utc():
     assert ttl.is_expired("2026-05-01T00:00:00", now=now) is True
 
 
-# ── ttl_enabled / hidden_by_ttl / expiry_filter_now snapshot semantics ─────
+# ── ttl_enabled / hidden_by_ttl snapshot semantics ─────
 
 
 def test_disabled_config_stops_creation_but_does_not_revive_snapshots(monkeypatch):
@@ -193,14 +193,12 @@ def test_disabled_config_stops_creation_but_does_not_revive_snapshots(monkeypatc
     assert ttl.freeze_ttl_fields("viking://user/u1/sessions/new") is None
     # A snapshot frozen while an earlier policy was active stays authoritative.
     assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is True
-    assert ttl.expiry_filter_now() is not None
 
 
 def test_unavailable_config_stops_creation_without_reviving_snapshots(monkeypatch):
     _install_config(monkeypatch, None)
     assert ttl.ttl_enabled() is False
     assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is True
-    assert ttl.expiry_filter_now() is not None
 
 
 def test_enabled_config_hides_expired_only(monkeypatch):
@@ -211,15 +209,3 @@ def test_enabled_config_hides_expired_only(monkeypatch):
     assert ttl.hidden_by_ttl("2999-01-01T00:00:00.000Z", now=now) is False
     # Absent expiry stays visible even with TTL on.
     assert ttl.hidden_by_ttl("", now=now) is False
-
-
-def test_expiry_filter_now_predicate_shape(monkeypatch):
-    _install_config(monkeypatch, TTLConfig(sessions={"mode": "days", "ttl_days": 1}))
-    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    barrier = ttl.expiry_filter_now(now=now)
-    assert barrier is not None
-    assert barrier.payload == {
-        "op": "range_out",
-        "field": "expires_at",
-        "lte": "2026-06-01T00:00:00.000Z",
-    }

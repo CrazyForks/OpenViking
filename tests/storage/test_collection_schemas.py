@@ -685,9 +685,8 @@ async def test_directory_embedding_skips_when_sidecar_body_changed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_directory_embedding_carries_the_persisted_summary_deadline(monkeypatch):
-    from openviking.core.ttl import expiry_filter_now
+    from openviking.core.ttl import hidden_by_ttl
     from openviking.storage.abstract_overview import render_abstract_overview, semantic_body_digest
-    from openviking.storage.vectordb.index.cuvs_index import matches_filter
 
     uri = "viking://user/default/memories/events"
     expiry = "2026-09-23T00:00:00.000Z"
@@ -697,15 +696,22 @@ async def test_directory_embedding_carries_the_persisted_summary_deadline(monkey
     ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
     data = {"uri": uri, "level": 0}
     written = []
+
     async def write():
         written.append(dict(data))
         return "id"
+
     await handler._write_directory_vector_if_current(
-        uri + "/.abstract.md", semantic_body_digest("summary"), ctx, write, context_data=data,
+        uri + "/.abstract.md",
+        semantic_body_digest("summary"),
+        ctx,
+        write,
+        context_data=data,
     )
     assert written[0]["expires_at"] == expiry
     from openviking.utils.time_utils import parse_iso_datetime
-    assert not matches_filter(data, expiry_filter_now(now=parse_iso_datetime(expiry)).payload, {})
+
+    assert hidden_by_ttl(data["expires_at"], now=parse_iso_datetime(expiry))
 
 
 @pytest.mark.asyncio

@@ -17,12 +17,6 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _RELATIVE_RE = re.compile(r"^(?P<value>\d+)(?P<unit>[smhdw])$")
 TimeField = Literal["updated_at", "created_at"]
 VALID_TIME_FIELDS = {"updated_at", "created_at"}
-# All date_time scalar fields that the commercial data-plane must receive as
-# ``time_range`` rather than numeric ``range``. This is a superset of the public
-# ``time_field`` search parameter (VALID_TIME_FIELDS): it also covers the frozen
-# TTL ``expires_at`` used by the read barrier and cleanup scan, which is never a
-# user-supplied ``time_field`` but is still a date_time column.
-DATE_TIME_FILTER_FIELDS = VALID_TIME_FIELDS | {"expires_at"}
 SearchContextTypeValue = Union[ContextType, str]
 SearchContextTypeInput = Union[SearchContextTypeValue, List[SearchContextTypeValue]]
 
