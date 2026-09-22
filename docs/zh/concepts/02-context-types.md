@@ -6,9 +6,32 @@ OpenViking 管理三类上下文：资源提供参考资料，记忆保存交互
 
 | 类型 | 用途 | 生命周期 | 主动性 |
 |------|------|----------|--------|
-| **Resource** | 知识和规则 | 长期，相对静态 | 用户添加 |
+| **Resource** | 知识和规则 | 保留至更新或删除 | 用户添加 |
 | **Memory** | 偏好、事实和任务经验 | 长期，动态更新 | 从会话提取或主动记录 |
 | **Skill** | 任务指令和配套资源 | 长期，可更新 | 用户或系统添加 |
+
+## 示例准备
+
+以下示例使用同步 Python SDK，需先启动服务端。导入和会话提交可能在索引完成前返回，因此先用下面的函数查询对应任务，再检索新内容。轮询超时不会取消服务端任务。
+
+```python
+import time
+from openviking_sdk import SyncHTTPClient
+
+client = SyncHTTPClient(url="http://localhost:1933", api_key="your-key")
+
+
+def wait_for_task(task_id):
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        task = client.get_task(task_id)
+        if task["status"] == "completed":
+            return task
+        if task["status"] in {"failed", "cancelled"}:
+            raise RuntimeError(task)
+        time.sleep(1)
+    raise TimeoutError(f"Task {task_id} is still running")
+```
 
 ## Resource（资源）
 
@@ -17,7 +40,7 @@ OpenViking 管理三类上下文：资源提供参考资料，记忆保存交互
 ### 特点
 
 - **用户主动**：由用户主动添加的资源类信息，用于补充大模型的知识，比如产品手册、代码仓库
-- **静态内容**：添加后内容很少发生变化，通常为用户主动修改
+- **显式更新**：内容变化后重新导入；支持 Watch 的远程来源可定时刷新
 - **结构化存储**：将按照项目或主题以目录层级组织，并提取出多层信息。
 
 ### 示例
@@ -30,10 +53,12 @@ OpenViking 管理三类上下文：资源提供参考资料，记忆保存交互
 
 ```python
 # 添加资源
-client.add_resource(
+added = client.add_resource(
     path="https://docs.example.com/api.pdf",
     options={"reason": "API 文档"},
 )
+
+wait_for_task(added["task_id"])
 
 # 搜索资源
 results = client.find(
@@ -76,17 +101,18 @@ Schema 定义的 `memories/tools/` 和 `memories/skills/` 类型已禁用。它�
 from openviking_sdk import TextPart
 
 # 记忆从会话中自动提取
-session_info = await client.create_session()
+session_info = client.create_session()
 session = client.session(session_id=session_info["session_id"])
-await session.add_message(
+session.add_message(
     role="user",
     parts=[TextPart(text="我喜欢深色模式")],
 )
-commit = await session.commit()  # 启动后台记忆提取
-task = await client.get_task(task_id=commit["task_id"])  # 轮询直到 task["status"] == "completed"
+commit = session.commit()  # 启动后台记忆提取
+if commit.get("task_id"):
+    wait_for_task(commit["task_id"])
 
 # 搜索记忆
-results = await client.find(
+results = client.find(
     query="用户界面偏好",
     target_uri="viking://~/memories/"
 )
@@ -111,7 +137,7 @@ viking://~/skills/{skill-name}/  # 默认存储路径
 ├── SKILL.md              # L2: 技能定义
 └── scripts               # L2: 附加实现
 
-viking://agent/skills/{skill-name}/  # 通过 --uri 覆盖，公开共享（account 全局）
+viking://agent/skills/{skill-name}/  # 通过 -p/--parent-auto-create 覆盖，公开共享（account 全局）
 ├── .abstract.md          # L0: 简短描述
 ├── .overview.md          # L1: 目录概览（生成后）
 ├── SKILL.md              # L2: 技能定义
@@ -133,7 +159,7 @@ viking://agent/skills/{skill-name}/  # 通过 --uri 覆盖，公开共享（acco
 
 ```python
 # 添加技能（默认写入 viking://~/skills/）
-await client.add_skill(
+added = client.add_skill(
     data={
         "name": "search-web",
         "description": "搜索网络获取信息",
@@ -141,29 +167,37 @@ await client.add_skill(
     },
 )
 
-# 通过 -p 指定写入全局 agent 技能根（公开共享）
-ov skills add search-web -p viking://agent/skills
+wait_for_task(added["task_id"])
 
 # 搜索用户技能
-results = await client.find(
+results = client.find(
     query="网络搜索",
     target_uri="viking://~/skills/"
 )
 
 # 搜索全局 agent 技能
-results = await client.find(
+results = client.find(
     query="网络搜索",
     target_uri="viking://agent/skills/",
 )
 ```
 
+通过 CLI 安装到账户共享技能目录（需要该路径的写入权限）：
+
+```bash
+ov skills add ./skills/search-web -p viking://agent/skills
+```
+
 ## 统一检索
 
-可在同一次检索中查找资源、记忆和技能：
+一次检索可返回搜索范围内的资源、记忆和技能。默认范围包含当前用户空间和共享资源；如需同时查找共享技能，应显式加入 `viking://agent/skills`：
 
 ```python
 # 跨所有上下文类型搜索
-results = await client.find(query="用户认证")
+results = client.find(
+    query="用户认证",
+    target_uri=["viking://~", "viking://resources", "viking://agent/skills"],
+)
 
 for context in results.get("memories", []):
     print(f"记忆: {context['uri']}")
@@ -171,6 +205,12 @@ for context in results.get("resources", []):
     print(f"资源: {context['uri']}")
 for context in results.get("skills", []):
     print(f"技能: {context['uri']}")
+```
+
+操作结束后关闭客户端：
+
+```python
+client.close()
 ```
 
 ## 相关文档

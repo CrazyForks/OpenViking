@@ -4,56 +4,31 @@ OpenViking is a context database designed for AI Agents, unifying all context ty
 
 ## System Overview
 
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                        OpenViking System Architecture                       │
-├────────────────────────────────────────────────────────────────────────────┤
-│                                                                            │
-│                              ┌─────────────┐                               │
-│                              │   Client    │                               │
-│                              │ (OpenViking)│                               │
-│                              └──────┬──────┘                               │
-│                                     │ delegates                            │
-│                              ┌──────▼──────┐                               │
-│                              │   Service   │                               │
-│                              │    Layer    │                               │
-│                              └──────┬──────┘                               │
-│                                     │                                      │
-│           ┌─────────────────────────┼─────────────────────────┐            │
-│           │                         │                         │            │
-│           ▼                         ▼                         ▼            │
-│    ┌─────────────┐          ┌─────────────┐          ┌─────────────┐      │
-│    │  Retrieve   │          │   Session   │          │    Parse    │      │
-│    │  (Context   │          │  (Session   │          │  (Context   │      │
-│    │  Retrieval) │          │  Management)│          │  Extraction)│      │
-│    │ search/find │          │ add         │          │ Doc parsing │      │
-│    │ Intent      │          │ commit      │          │ L0/L1/L2    │      │
-│    │ Rerank      │          │ commit      │          │ Tree build  │      │
-│    └──────┬──────┘          └──────┬──────┘          └──────┬──────┘      │
-│           │                        │                        │             │
-│           │                        │ Memory extraction      │             │
-│           │                        ▼                        │             │
-│           │                 ┌─────────────┐                 │             │
-│           │                 │ Compressor  │                 │             │
-│           │                 │ Compress/   │                 │             │
-│           │                 │ Deduplicate │                 │             │
-│           │                 └──────┬──────┘                 │             │
-│           │                        │                        │             │
-│           └────────────────────────┼────────────────────────┘             │
-│                                    ▼                                      │
-│    ┌─────────────────────────────────────────────────────────────────┐    │
-│    │                         Storage Layer                            │    │
-│    │               AGFS (File Content)  +  Vector Index               │    │
-│    └─────────────────────────────────────────────────────────────────┘    │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
+```text
+CLI / SDK / HTTP client
+          |
+      HTTP Server
+          |
+      Service Layer
+          |
+   +------+------+----------------+
+   |             |                |
+Retrieval     Sessions       Resource / Skill import
+   |             |                |
+   |       Memory extraction  Parse / Semantic queues
+   |             |                |
+   +-------------+----------------+
+                 |
+             VikingFS
+           /          \
+       AGFS         Vector index
 ```
 
 ## Core Modules
 
 | Module | Responsibility | Key Capabilities |
 |--------|----------------|------------------|
-| **Client** | Unified entry | Provides all operation interfaces, delegates to Service layer |
+| **Client** | Unified entry | Sends supported SDK/CLI operations to the HTTP API |
 | **Service** | Business logic | FSService, SearchService, SessionService, ResourceService, PackService, DebugService |
 | **Retrieve** | Context retrieval | Intent analysis (IntentAnalyzer), hierarchical retrieval (HierarchicalRetriever), Rerank |
 | **Session** | Session management | Message recording, usage tracking, session compression, memory commit |
@@ -63,7 +38,7 @@ OpenViking is a context database designed for AI Agents, unifying all context ty
 
 ## Service Layer
 
-The Service layer decouples business logic from the transport layer, enabling reuse across HTTP Server and CLI:
+The Service layer decouples business logic from the transport layer, the CLI and SDKs access it through the HTTP Server:
 
 | Service | Responsibility | Key Methods |
 |---------|----------------|-------------|
@@ -81,7 +56,7 @@ OpenViking uses a dual-layer storage architecture separating content from index 
 | Layer | Responsibility | Content |
 |-------|----------------|---------|
 | **AGFS** | Content storage | L0/L1/L2 full content, multimedia files |
-| **Vector Index** | Index storage | URIs, vectors, metadata (no file content) |
+| **Vector Index** | Index storage | URIs, vectors, metadata, and text used for retrieval, including abstracts |
 
 ## Data Flow Overview
 
@@ -91,7 +66,7 @@ OpenViking uses a dual-layer storage architecture separating content from index 
 Input → Parser → TreeBuilder → AGFS → SemanticQueue → Vector Index
 ```
 
-1. **Parser**: Parse documents, create file and directory structure (no LLM calls)
+1. **Parser**: Parse source documents into files and directories; model use depends on the selected parser
 2. **TreeBuilder**: Move temp directory to AGFS, enqueue for semantic processing
 3. **SemanticQueue**: Async bottom-up L0/L1 generation
 4. **Vector Index**: Build index for semantic search
@@ -99,12 +74,12 @@ Input → Parser → TreeBuilder → AGFS → SemanticQueue → Vector Index
 ### Retrieving Context
 
 ```
-Query → Query Preparation (optional intent analysis) → Hierarchical Retrieval (optional rerank) → Results
+Query → Query Preparation (optional intent analysis) → Vector Retrieval (optional directory traversal and rerank) → Results
 ```
 
 1. **Query Preparation**: `find()` uses the query directly; `search()` generates typed queries when intent analysis is enabled and session content exists
-2. **Hierarchical Retrieval**: Directory-level recursive search using priority queue
-3. **Rerank**: Rerank candidates when a reranking model is configured
+2. **QUICK retrieval**: `find`, image queries, and `search` without a reranker use vector retrieval without directory expansion
+3. **THINKING retrieval**: Text `search` with a configured reranker traverses directories and reranks candidates
 4. **Results**: Return contexts sorted by relevance
 
 ### Session Commit
@@ -127,13 +102,16 @@ For team sharing, production deployment, and cross-language integration:
 
 ```python
 # Python SDK connects to OpenViking Server
-client = SyncHTTPClient(url="http://localhost:1933", api_key="xxx")
+from openviking_sdk import SyncHTTPClient
+
+client = SyncHTTPClient(url="http://localhost:1933", api_key="your-key")
 ```
 
 ```bash
 # Or use curl / any HTTP client
 curl http://localhost:1933/api/v1/search/find \
-  -H "X-API-Key: xxx" \
+  -H "X-API-Key: your-key" \
+  -H "Content-Type: application/json" \
   -d '{"query": "how to use openviking"}'
 ```
 
@@ -148,8 +126,8 @@ curl http://localhost:1933/api/v1/search/find \
 |-----------|-------------|
 | **Pure Storage Layer** | Storage only handles AGFS operations and basic vector search; Rerank is in retrieval layer |
 | **Three-Layer Information** | L0/L1/L2 enables progressive detail loading, saving token consumption |
-| **Two-Stage Retrieval** | Vector search recalls candidates + Rerank improves accuracy |
-| **Single Data Source** | All content read from AGFS; vector index only stores references |
+| **Two-Stage Retrieval** | Vector retrieval supplies candidates; text search can traverse directories and rerank when configured |
+| **Single Data Source** | AGFS holds source files; vector records retain the text and metadata needed for retrieval |
 
 ## Related Documents
 
@@ -162,6 +140,6 @@ curl http://localhost:1933/api/v1/search/find \
 - [Session Management](./08-session.md) - Session and memory management
 - [Transaction Model](./09-transaction.md) - Write and consistency model
 - [Data Encryption](./10-encryption.md) - At-rest encryption and key architecture
-- [Multi-Tenant](./11-multi-tenant.md) - Account / user / agent isolation model
+- [Multi-Tenant](./11-multi-tenant.md) - Account, user, and peer isolation model
 - [Metrics](./12-metrics.md) - `/metrics` usage and key metric explanations
 - [Privacy Configs and Skill Privacy Extraction/Restore](./13-privacy.md) - Versioning, placeholder extraction, and read-time restore
