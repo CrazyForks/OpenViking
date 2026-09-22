@@ -73,7 +73,7 @@ fields.
 When enabled, a newly created shared file or directory grants its creator direct
 `manage` on its first context record, and parent permissions are merged as
 inherited ACL. Existing content without an ACL is not migrated or modified and
-remains public. Disabling the setting also stops enforcing existing ACLs.
+remains shared within the account. Disabling the setting also stops enforcing existing ACLs.
 `add-resource` treats only the generated import root (or the root file with
 `no_split`) as the created node: the root gets the direct creator grant and
 descendants only inherit it. Re-embedding or replacing an existing context record
@@ -140,6 +140,8 @@ account disables the switch, retrieval uses only the original account and URI
 scope filters and ignores these ACL fields.
 
 ## Example
+
+These operations require account-level `acl.enabled` and `manage` permission on the target.
 
 Grant Bob read-only access to a directory:
 

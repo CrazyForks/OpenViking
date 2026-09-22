@@ -57,7 +57,7 @@ OpenViking Server 支持两种多租户相关认证模式：
 
 ### `root_api_key` 的作用
 
-配置 `server.root_api_key` 后，OpenViking 才进入正式多租户模式：
+在 `api_key` 模式下，配置 `server.root_api_key` 后启用基于 key 的账户和用户管理：
 
 - Root key 用于管理 account 和 user
 - User key 由 Admin API 生成，用于普通业务读写
@@ -103,14 +103,14 @@ viking://user/alice/peers/web-visitor-alice/resources/
 /local/{account_id}/user/alice/peers/web-visitor-alice/resources/
 ```
 
-因此多租户隔离不是靠“不同 URI 前缀”，而是靠请求上下文中的 `account_id` 和 `user_id` 共同生效。
+同一个公共 URI 在不同 account 下指向不同数据；服务端按请求身份解析路径并校验 user 权限。
 
 ### 文件系统与检索层
 
 文件系统操作和语义检索都受租户约束：
 
 - 非 ROOT 请求会自动按 `account_id` 过滤
-- `resources` 默认允许检索 account 内共享资源；设置 ACL 后按有效 ACL 过滤
+- `resources` 默认允许检索 account 内共享资源；开启账号级 `acl.enabled` 并设置 ACL 后按有效 ACL 过滤
 - 用户资源始终按当前 `user space` 隔离；需要共享时移动到 `viking://resources`
 - 记忆和私有技能按当前 `user space` 过滤；共享技能位于 account 内的 `viking://agent/skills`
 - Actor peer 会把 `viking://user/{user}/peers` 过滤到一个 peer，并作用于文件系统和检索操作
@@ -237,43 +237,38 @@ openclaw config set plugins.entries.openviking.config.peer_prefix "<peer-prefix>
 如果给插件直接配置 root key，则普通租户数据 API 没有从 key 绑定出来的租户用户，
 这不适合作为日常读写方式。
 
-### Vikingbot：root key 代管用户身份
+<a id="vikingbot-root-key-代管用户身份"></a>
 
-Vikingbot 当前的实践与 OpenClaw 插件不同，它更接近“平台代理多个终端用户”：
+### VikingBot：匹配 Server 的认证模式
 
-- bot 连接 OpenViking 时持有 root key
-- bot 配置固定的 `account_id`
-- bot 会在该 account 下自动注册用户
-- bot 会缓存每个 user 的 user key，并尽量用对应 user key 去提交/检索 memory
+当前 VikingBot 通过 `bot.ov_server.api_key_type` 选择连接方式，不会通过 root key 自动注册并缓存每个终端用户的 user key：
 
-相关配置示例：
+- `user`：连接 `api_key` 模式的 Server，`api_key` 必须是 User/Admin key，数据身份由 key 决定。
+- `root`：用于 trusted 模式，Bot 以受信连接传递 account/user 身份；不能拿它访问 `api_key` 模式的租户数据接口。
+- 同配置启动时可以继承当前 Server 的地址和认证设置；外部 Server 应显式配置连接。
+
+固定用户身份的配置示例：
 
 ```json
 {
   "bot": {
     "ov_server": {
       "server_url": "http://127.0.0.1:1933",
-      "root_api_key": "test",
-      "account_id": "default",
-      "admin_user_id": "default"
+      "api_key_type": "user",
+      "api_key": "your-user-api-key"
     }
   }
 }
 ```
 
-这种模式的特点：
-
-- 适合一个 bot 服务承载多个聊天用户
-- 同一 account 下的 `resources` 默认共享，ACL 可以对具体目录或文件细化权限
-- 用户记忆通过自动注册的 user 身份隔离
-- bot 侧需要承担更多租户生命周期管理逻辑
+共享同一个 user key 的聊天参与者仍属于同一 OpenViking user。`actor_peer_id` 可限制其 peer 集合视图，但不会把该用户自己的记忆和共享资源变成逐聊天用户私有数据。需要独立 user 边界时，应由可信身份入口提供不同的用户连接或使用 trusted 身份传递，见[VikingBot 安装与配置](../guides/17-vikingbot.md)。
 
 ## 什么时候选哪种实践
 
 | 场景 | 推荐方式 |
 |------|----------|
 | 一个 OpenClaw 实例对应一个固定身份 | OpenClaw 插件 + user key |
-| 一个网关/机器人服务承载很多最终用户 | Vikingbot + root key 代管用户 |
+| 一个网关/机器人服务承载很多最终用户 | 按用户配置连接或由受信入口传递 trusted 身份 |
 | 受信网关统一注入身份 | `trusted` 模式 |
 | 单机本地体验、无需真正租户隔离 | 开发模式（无 `root_api_key`） |
 
@@ -311,7 +306,7 @@ peer 集合过滤选择当前用户内的 peer 内容子空间，例如
 ### 4. OpenClaw 插件和 Vikingbot 不是同一种租户实践
 
 - OpenClaw 插件：更像“客户端拿到一个 user 身份后直接访问”
-- Vikingbot：更像“平台代理多个用户，并代为申请和管理 user key”
+- VikingBot：支持固定 User/Admin key，也可作为受信入口传递身份；选择取决于 Server 认证模式
 
 ## 相关文档
 

@@ -69,7 +69,7 @@ read user:carol on viking://resources/A/B/C/report.md
 可见性和写入规则，不解析或校验 ACL，也不为新建内容写入 ACL。
 
 开启后，新建共享文件或目录的创建者会在首条 context 记录上获得直接 `manage`；
-父目录权限作为继承 ACL 合并。已有且未设置 ACL 的内容不会迁移或改权，仍按公开
+父目录权限作为继承 ACL 合并。已有且未设置 ACL 的内容不会迁移或改权，仍按账户内共享
 规则访问；重新关闭后，已有 ACL 也不再参与访问判断。`add-resource` 只把本次生成
 的根目录（`no_split` 时为根文件）作为创建节点：根节点获得创建者直接 `manage`，
 内部节点只继承，不重复写直接授权。重新向量化或覆盖已有 context 不会改变直接 ACL。
@@ -131,6 +131,8 @@ acl_inherited_grants
 只使用原有 account 和 URI scope 过滤，不使用这些 ACL 字段。
 
 ## 示例
+
+以下操作要求账号已开启 `acl.enabled`，且调用者对目标有 `manage` 权限。
 
 将目录授权给 Bob 只读：
 
