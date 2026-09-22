@@ -10,9 +10,9 @@ Use a running OpenViking service and credentials for that service. For a new sel
 
 The MCP endpoint is at `http://<server>:1933/mcp`, sharing the same process and port as the REST API.
 
-## Verified Platforms
+## Client Connections
 
-The following platforms have been successfully integrated with OpenViking MCP:
+The following table links the available connection configurations. Verify tool discovery and a permitted data read with your client version:
 
 | Platform | Integration Method |
 |----------|-------------------|
@@ -27,12 +27,12 @@ The following platforms have been successfully integrated with OpenViking MCP:
 
 ## Authentication
 
-The MCP endpoint shares the same API-Key authentication system as the OpenViking REST API. Pass either header:
+MCP uses the server authentication configuration. In API Key mode, use a User/Admin key with either header:
 
 - `X-Api-Key: <your-key>`
 - `Authorization: Bearer <your-key>`
 
-No authentication is required in local dev mode (server bound to localhost).
+Only `dev` mode disables authentication; binding to localhost alone does not. OAuth clients follow the authorization flow below; see [Authentication](04-authentication.md) for other server modes.
 
 ## Client Configuration
 
@@ -103,7 +103,7 @@ Configure `~/.config/opencode/opencode.json`:
 
 ### Claude.ai / Claude Desktop (OAuth)
 
-These clients only accept OAuth 2.1 — API Keys cannot be passed directly.
+For remote connectors configured through the Claude.ai / Claude Desktop connector UI, use the OAuth flow below.
 OpenViking ships a native OAuth 2.1 implementation (DCR + PKCE + opaque
 tokens, backed by SQLite, with a Studio consent screen for authorization) so
 no external proxy is needed.
@@ -120,9 +120,7 @@ Enable `oauth.enabled` on the server and configure HTTPS as described in the OAu
 - Token model (`ovat_` / `ovrt_` / `ovac_` prefixes) and revocation
 
 > The community [MCP-Key2OAuth](https://github.com/t0saki/MCP-Key2OAuth)
-> Cloudflare Worker proxy is still around and remains a valid third-party
-> option, but the native flow is recommended now: no extra deployment unit,
-> no third-party trust boundary on the API key.
+> Cloudflare Worker proxy is a separate third-party project. Use the native flow above when no external authentication bridge is needed; deployments choosing the proxy should review its configuration and credential handling.
 
 
 ## Available MCP Tools
@@ -133,7 +131,7 @@ The built-in MCP tools are listed below. Use the connected server's `tools/list`
 |------|-------------|----------------|
 | `find` | Fast semantic retrieval without session context. `context_type="skill"` on its own switches to package-level skill retrieval: one hit per skill package, its URI pointing at that package's `SKILL.md` and its summary taken from the skill itself, even when an auxiliary file inside the package is what matched. Without `target_uri` it searches both your own skills and the account-shared `viking://agent/skills`. Mixing `skill` with another context type keeps the generic retrieval path | `query`, `target_uri` (optional), `limit`, `min_score`, `level` (optional), `context_type` (optional), `read_content` (optional — inline each hit's content) |
 | `search` | Deep semantic retrieval; `mode="context"` assembles injection-ready context and replaces the former `recall` tool. `list` mode also returns one hit per skill package, its URI pointing at `SKILL.md` and its summary taken from the package itself, but `limit` applies before that merge, so a package matching in several files takes several slots and fewer than `limit` results come back | `query`, `mode` (`list` or `context`), `target_uri` (list mode only), `session_id` (optional), `limit`, `min_score`, `level` (list mode), `context_type` (optional), plus context-mode `quotas`, `purpose`, `max_tokens`, `detail` or `detail_by_category`, `dedup_turns`, `exclude_uris`, `peer_scope`, scalar `other_peer_penalty` or `other_peer_penalties` by category, and `rewrite` (`off` or `auto`) |
-| `read` | Read one or more `viking://` URIs. PNG, JPEG, GIF, and WebP return native MCP image content; WAV, MP3, FLAC, OGG, and M4A return native audio content. Video is not supported because MCP has no standard video content block | `uris` (single string or array) |
+| `read` | Read one or more `viking://` URIs. PNG, JPEG, GIF, and WebP return native MCP image content; WAV, MP3, FLAC, OGG, and M4A return native audio content. Video is not supported because MCP has no standard video content block | `uris` (single string or array), `offset`, `limit` (text lines) |
 | `list` | List entries under a `viking://` directory | `uri`, `recursive`, `offset`, `limit`, `sort_by`, `sort_order` (optional) |
 | `tree` | Show the recursive directory tree under a `viking://` URI, indented by depth — use when you need a full picture of the file tree (prefer `list` for a single level, `glob` for filename patterns) | `uri` (optional), `level_limit` (default 3), `node_limit` (default 1000), `offset`, `limit`, `include_abstract` (optional — also show each directory's summary; for a skill directory that is its name and description) |
 | `remember` | Store messages into long-term memory (triggers extraction) | `messages` (list of `{role, content}`) |
@@ -170,10 +168,10 @@ user spaces, not a shortcut to yours. See
 
 The `add_resource` tool accepts both **remote URLs** and **local file paths**, handled differently:
 
-- **Remote URL** (`http(s)://`, `git@`, `ssh://`, `git://`): single round-trip — the server fetches and ingests directly.
-- **Local file path**: the tool returns an **upload instruction** (plain prose). The agent POSTs the file as `multipart/form-data` (field name `file`) to the `temp_upload` URL given in the response. The URL embeds a one-shot token (10-minute TTL by default) that authorizes the upload, so no API key is needed. The server then ingests the file **automatically in the same request** and returns the final result — the agent does **not** call `add_resource` again.
+- **Remote URL** (`http(s)://`, `git@`, `ssh://`, `git://`): one tool call submits a server-side import. A returned task ID means background work may still be running; check [task status](../api/17-tasks.md) before assuming the content is searchable.
+- **Local file path**: the tool returns an **upload instruction** (plain prose). The agent POSTs the file as `multipart/form-data` (field name `file`) to the `temp_upload` URL given in the response. The URL embeds a one-shot token (10-minute TTL by default) that authorizes the upload, so no API key is needed. The server then submits ingestion **in the same request** and returns its result — the agent does **not** call `add_resource` again.
 
-This lets any MCP client — including sandboxed environments without a local filesystem (Claude web, Manus, etc.) — push files into OpenViking without pre-installing the `ov` CLI. The token upload reuses the authenticated `temp_upload` route (API key first, otherwise the one-shot `?token=`) and its `TempUploadStore` persistence, so the same `local` / `shared` upload modes apply. Note: the one-shot token is held in-process, so in a multi-worker deployment the `add_resource` call and the follow-up upload POST must reach the same worker (or run single-worker) for the token to resolve.
+A client that can read the source bytes and send a multipart HTTP request can upload without the `ov` CLI. A sandbox must provide those capabilities; an inaccessible local path alone cannot transfer a file. The token upload reuses the authenticated `temp_upload` route (API key first, otherwise the one-shot `?token=`) and its `TempUploadStore` persistence, so the same `local` / `shared` upload modes apply. Note: the one-shot token is held in-process, so in a multi-worker deployment the `add_resource` call and the follow-up upload POST must reach the same worker (or run single-worker) for the token to resolve.
 
 #### When you must set `OPENVIKING_PUBLIC_BASE_URL`
 
@@ -226,3 +224,5 @@ curl http://localhost:1933/health
 - [MCP Specification](https://modelcontextprotocol.io/)
 - [OpenViking Configuration](01-configuration.md)
 - [OpenViking Deployment](03-deployment.md)
+
+Client configuration references: [Claude Code MCP](https://code.claude.com/docs/en/mcp), [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/).
