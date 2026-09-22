@@ -38,7 +38,7 @@ pipx upgrade openviking
 vikingbot --version
 ```
 
-使用 pip 时先激活虚拟环境。源码安装还需要准备[开发构建依赖](../getting-started/03-quickstart-server.md)。
+使用 pip 时先激活虚拟环境。源码安装还需要准备[开发构建依赖](https://github.com/volcengine/OpenViking/blob/main/CONTRIBUTING.md)。
 
 ### 从源码安装
 

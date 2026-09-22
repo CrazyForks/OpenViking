@@ -71,7 +71,7 @@ The plugin hooks into the Claude Code lifecycle:
 - **For each subagent** — assigns an isolated memory session
 - **Before a native file tool touches a `viking://` path** — blocks the call and names the OpenViking MCP tool to use instead; a `Write` or `Edit` on a skill path is pointed to `add_skill`
 
-All write operations run asynchronously, ensuring they never block your conversation.
+Capture normally runs in a detached worker. Lifecycle hooks still have timeouts and may wait for capture or commit work; background execution does not guarantee immediate persistence or zero delay.
 
 The skill catalog is an `<available-skills>` block that lists the skills stored in OpenViking: your own under `viking://~/skills` first, then the ones shared with your account under `viking://agent/skills`, each with a short description. Before following a listed skill, Claude reads its `SKILL.md` with the OpenViking `read` tool. The catalog has its own token budget: when the descriptions do not fit, it lists names only, and when not even one name fits, it shrinks to a one-line count. The bundled `openviking-skills` skill tells Claude how to find and use OpenViking skills, create, install, and share them with the `add_skill` MCP tool, delete them, and move local skills such as `~/.claude/skills` into OpenViking when you ask.
 
@@ -124,7 +124,7 @@ The plugin renders an OpenViking status indicator beneath your Claude Code input
 | Hooks fire but recall is empty | Server is not running or the URL is incorrect | Check server health: `curl "$(jq -r '.url' ~/.openviking/ovcli.conf)/health"` |
 | MCP tools hit `127.0.0.1` instead of the remote server | `~/.openviking/ovcli.conf` has no `url` (the proxy falls back to the local default) | Fix `ovcli.conf` (or run `node <plugin-dir>/scripts/setup.mjs`), then restart Claude Code |
 | MCP tool calls fail with an auth error | The active ovcli config has no valid `api_key` for an authenticated server | Update the `api_key` in `ovcli.conf`; the stdio proxy re-reads it after auth failures |
-| Remote auth 401 / 403 | Incorrect API key or missing tenant headers | Verify `OPENVIKING_API_KEY`; for multi-tenant setups, also check `OPENVIKING_ACCOUNT` and `OPENVIKING_USER` |
+| Remote auth 401 / 403 | Invalid credentials or insufficient permission | Check the active user/admin key and resource access. Only trusted mode requires administrator-supplied account/user headers; these headers cannot change a user key’s identity. |
 
 ## See also
 

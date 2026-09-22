@@ -19,7 +19,7 @@ Clients accepting `mcpServers` and custom headers can use this example. For othe
 }
 ```
 
-No authentication is needed when connecting to a local server without `root_api_key` configured (dev mode).
+No authentication is needed for a server running in `dev` mode. Keep it bound to loopback; an authenticated server still requires credentials when accessed locally.
 
 ## Platform-specific notes
 
@@ -73,7 +73,7 @@ Use OpenCode's native `mcp` config in `~/.config/opencode/opencode.json`:
 
 ### Claude Desktop / Claude.ai (OAuth)
 
-These clients require OAuth 2.1 — API keys cannot be passed directly. OpenViking ships a native OAuth 2.1 implementation, so no external proxy is needed.
+For the hosted remote-connector flow, use OpenViking’s native OAuth implementation. At the authorization page, sign in with an existing OpenViking User/Admin key. Claude Desktop’s local stdio configuration is a separate connection path.
 
 Enable `oauth.enabled` on the server and configure HTTPS, then connect the client to `https://your-server.com/mcp` and complete authorization in the browser.
 

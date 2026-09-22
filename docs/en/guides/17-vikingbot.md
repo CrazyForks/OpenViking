@@ -38,7 +38,7 @@ Verify the installation:
 vikingbot --version
 ```
 
-Use a virtual environment for the pip option. Source installation also requires the [development build dependencies](../getting-started/03-quickstart-server.md).
+Use a virtual environment for the pip option. Source installation also requires the [development build dependencies](https://github.com/volcengine/OpenViking/blob/main/CONTRIBUTING.md).
 
 ### Install from Source
 

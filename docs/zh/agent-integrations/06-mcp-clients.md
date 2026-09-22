@@ -19,7 +19,7 @@
 }
 ```
 
-本地服务未配置 `root_api_key` 时（dev 模式）无需认证。
+服务运行在 `dev` 模式时无需认证，应仅监听本机回环地址。认证模式下，即使从本机访问也需要凭据。
 
 ## 各平台注意事项
 
@@ -73,7 +73,7 @@ Codex 请使用 [Codex 记忆插件](./04-codex.md)。插件通过 manifest 提�
 
 ### Claude Desktop / Claude.ai (OAuth)
 
-这些客户端要求 OAuth 2.1——无法直接传 API Key。OpenViking 自带原生 OAuth 2.1 实现，无需外部代理。
+托管的远程连接器流程使用 OpenViking 原生 OAuth；在授权页填写已有的 OpenViking User/Admin Key。Claude Desktop 的本地 stdio 配置是另一种接入方式。
 
 在服务端启用 `oauth.enabled` 并配置 HTTPS 后，让客户端连接 `https://your-server.com/mcp`，在浏览器中完成授权。
 

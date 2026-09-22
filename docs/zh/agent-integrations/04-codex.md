@@ -33,26 +33,9 @@ codex
 
 ### 首次启动：信任 hooks
 
-插件的 hooks 对 Codex 是新的，启动时会先停在一次信任确认上，选 **Trust all and continue**；想先看一眼 hook 命令就选 Review hooks：
+安装插件不会自动信任它的 hooks。在 `/hooks` 中检查 OpenViking 命令，信任并启用准备使用的条目；同时在 `/plugins` 中确认 `openviking-memory` 已启用。当前插件声明了 6 个 hook，新增或修改定义后需要重新审阅。不同 Codex 版本的提示界面可能不同，规则见[官方 hook 信任说明](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)。
 
-```text
-Hooks need review
-6 hooks are new or changed.
-Hooks can run outside the sandbox after you trust them.
-
-  1. Review hooks
-> 2. Trust all and continue
-  3. Continue without trusting (hooks won't run)
-```
-
-全新安装会一次列出插件注册的全部 6 个 hook。之后每次插件更新只要动了 hook，Codex 都会再拦一次，数字是这次新增或改动的条数（比如只改了一个就是 `1 hook is new or changed`），同样选 Trust all and continue。
-
-选第 3 项或错过这一步，hooks 就不会运行：MCP 工具仍能调用，但自动召回和捕获全部停摆。要恢复，得让两个彼此独立的开关都处于开启状态：
-
-- `/hooks` — hook 的信任与开关，把标着 *New hook - review required* 或 *Modified since last trusted* 的条目信任并打开。
-- `/plugins` — 插件本身的启用状态，确认 `openviking-memory` 是 enabled。
-
-任何一边是关着的，自动召回和捕获都不会发生。
+Hook 关闭时，MCP 工具仍可能正常使用。自动召回需要 `UserPromptSubmit`，捕获需要 `Stop`，其余生命周期提交见下表。之前跳过设置的，可以回到 `/hooks` 启用相关条目。
 
 <details>
 <summary><b>手动安装</b></summary>
@@ -121,7 +104,7 @@ TraeCode CLI 2.0 用户启动 `trae-cli`，并可用 `trae-cli plugin list` 确�
 | `OPENVIKING_CAPTURE_FILTERS` | `""` | CSV 格式的 sed 风格正则规则，作用于每个被捕获的回合（同一套语法） |
 | `OPENVIKING_DEBUG` | `false` | 是否将日志写入 `~/.openviking/logs/codex-hooks.log` |
 
-这些配置大多也可以写在 `ovcli.conf` 的 `plugin` 段下——见[插件配置](../configuration/02-client.md#插件配置)。两个过滤器 尤其建议写在那里，用 JSON 数组，因为环境变量形式会按逗号切分。
+这些配置大多也可以写在 `ovcli.conf` 的 `plugin` 段下——见[插件配置](../configuration/02-client.md#插件配置)。两个过滤器建议使用 JSON 数组，避免环境变量中的逗号被当作分隔符。
 
 如果更看重召回响应速度，请参阅[低延迟召回](./01-overview.md#低延迟召回)，其中说明了如何通过环境变量或 `ovcli.conf` 关闭查询扩展与 Codex 本地结果压缩。
 
@@ -141,7 +124,7 @@ TraeCode CLI 2.0 用户启动 `trae-cli`，并可用 `trae-cli plugin list` 确�
 |------|------|------|
 | MCP 工具调用报认证错误 | 当前 ovcli 配置没有 authenticated server 所需的有效 `api_key` | 修正 `~/.openviking/ovcli.conf`（或运行 `node <插件目录>/scripts/setup.mjs`）后重启 Codex；stdio 代理会在启动时和认证失败后重新读取配置 |
 | MCP 工具调用报连接错误 | 服务器不可达或 URL 配置错误 | 执行 `curl "$(jq -r '.url' ~/.openviking/ovcli.conf)/health"` 检查服务器状态 |
-| `6 hooks need review`，或插件已装但 hook 不生效 | 全新安装要信任全部 6 个 hook，之后每次插件更新改动到 hook 时还会再问一次；当时选了 *Continue without trusting* 或直接跳过，hooks 就一直不会运行 | `/hooks` 里信任并开启相关条目，`/plugins` 里确认 `openviking-memory` 已启用——两个开关相互独立，都要是开着的 |
+| 提示审阅 hook，或插件已装但没有自动召回/捕获 | 相关 hook 未信任、未启用，或插件被禁用 | 在 `/hooks` 审阅并启用相关条目，再到 `/plugins` 确认插件已启用。 |
 | `ov config switch` 后插件仍指向旧服务器 | 上个会话的代理进程仍在运行 | 重启 Codex；代理在启动时解析凭据 |
 | Hook 与 MCP 指向不同服务器 | 某一侧残留了过期的 `OPENVIKING_*` 凭据环境变量（默认环境变量优先于 ovcli.conf） | 清除过期环境变量（让 ovcli.conf 同时驱动两者）、设置 `OPENVIKING_CREDENTIAL_SOURCE=cli`，或保证环境变量一致 |
 

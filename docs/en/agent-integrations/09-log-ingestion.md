@@ -98,7 +98,7 @@ openviking-server ingest run
 openviking-server ingest status
 ```
 
-`--reset` deletes and recreates the OV session before replaying. Without `--reset`, re-running is idempotent — the cursor store guarantees nothing is appended twice.
+`--reset` deletes and recreates the OV session before replaying; it does not remove memories already extracted from earlier imports. Normal reruns resume from the persisted cursor and reconcile interrupted batches against the server message count. Keep the cursor database, avoid simultaneous replay processes or other writers to imported sessions, and do not reuse one cursor database for a different server or user.
 
 ## peer_id
 
@@ -123,13 +123,13 @@ Each harness has a thin adapter that parses its logs into normalized messages an
 - **Backfill** enumerates every session, replays from the cursor to the end, then commits once per session.
 - **Watch** mirrors OpenViking's own `WatchScheduler`: it uses **interval polling** (not filesystem events) driven by durable cursors, so a missed tick, a sleep, or a restart just reads cursor→end on the next tick and self-heals. JSONL uses a byte-offset cursor (with partial-line / truncation / rotation handling); SQLite uses a `(time, id)` cursor read read-only (WAL-aware).
 
-Cursor state persists in `~/.openviking/ingest/state.db`, so both backfill and watch resume across restarts without re-ingesting.
+Cursor state persists in `~/.openviking/ingest/state.db`, so backfill and watch can resume after a restart under the same connection identity.
 
 ## Cost and privacy
 
 - Commit triggers memory extraction (an LLM call). Backfilling months of history at once can produce many calls — prefer `--dry-run` first, narrow with `--since`, and enable harnesses in batches.
 - Logs may contain sensitive content (credentials, file contents). Use this in a trusted deployment and confirm `server_url` points at the server you intend.
-- Tool-call inputs/outputs are dropped as low-value by default; only user / assistant text is ingested.
+- The default import keeps user/assistant text and drops tool-call inputs and outputs. Use a runtime plugin when you need structured tool capture.
 
 ## See also
 
