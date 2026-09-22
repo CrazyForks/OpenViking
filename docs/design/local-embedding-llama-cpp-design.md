@@ -1,5 +1,7 @@
 # OpenViking 本地 Embedding Llama-cpp 设计文档
 
+> **设计范围：** 本文保留 2026-04-11 的本地 embedding 提案，文中的默认模型、安装 extra 和重建行为属于方案要求，不表示当前发行版已按此实现。当前可用配置见[模型配置指南](../zh/guides/01-configuration.md)。
+
 Date: 2026-04-11
 Status: 已批准进入实现
 
