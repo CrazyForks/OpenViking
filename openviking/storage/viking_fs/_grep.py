@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from openviking.core.namespace import is_session_uri
-from openviking.pyagfs.exceptions import AGFSInvalidOperationError, AGFSNotSupportedError
+from openviking.pyagfs.exceptions import AGFSNotSupportedError
 from openviking.server.identity import RequestContext
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs._base import logger
@@ -249,18 +249,22 @@ class _GrepMixin:
         after_context=0,
     ):
         """Filesystem grep path: prefer native agfs grep and fall back if unavailable."""
-        native_safe = (
-            content_transform is None
-            and allowed_uris is None
-            and await self._session_native_grep_safe(uri, ctx)
-        )
-        if native_safe:
-            session_uri = is_session_uri(uri)
-            if session_uri:
-                # Session grep used Python ``re`` before the native fast path was
-                # introduced. Keep rejecting patterns that Python itself rejects,
-                # and retain Python-only constructs through the fallback below.
-                re.compile(pattern, re.IGNORECASE if case_insensitive else 0)
+        native_safe = content_transform is None and allowed_uris is None
+        session_uri = is_session_uri(uri)
+        if native_safe and session_uri:
+            # Sessions historically use Python re and split("\n"). Native
+            # engines differ in Unicode, empty-line and context semantics even
+            # when both accept a regex. Only accelerate nonempty, case-sensitive
+            # literal searches without context; keep all regexes on Python.
+            re.compile(pattern, re.IGNORECASE if case_insensitive else 0)
+            native_safe = (
+                bool(pattern)
+                and not case_insensitive
+                and not before_context
+                and not after_context
+                and not any(char in "\\.^$*+?{}[]|()\n\r\0" for char in pattern)
+            )
+        if native_safe and await self._session_native_grep_safe(uri, ctx):
             try:
                 # Session grep historically used the Python fallback, where
                 # level_limit counts directory expansions and therefore
@@ -279,24 +283,6 @@ class _GrepMixin:
                     ctx=ctx,
                     before_context=before_context,
                     after_context=after_context,
-                )
-            except AGFSInvalidOperationError as e:
-                message = str(e).lower()
-                if not session_uri or not any(
-                    marker in message
-                    for marker in (
-                        "invalid regex",
-                        "invalid regular expression",
-                        "regex parse error",
-                        r'the literal "\n" is not allowed in a regex',
-                        "compiled regex exceeds size limit",
-                    )
-                ):
-                    raise
-                logger.debug(
-                    "agfs does not support this Python regex, falling back to VikingFS "
-                    "implementation: %s",
-                    e,
                 )
             except (AttributeError, AGFSNotSupportedError, NotImplementedError) as e:
                 logger.debug(f"agfs grep unavailable, falling back to VikingFS implementation: {e}")

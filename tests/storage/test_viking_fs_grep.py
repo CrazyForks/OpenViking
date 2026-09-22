@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 import re
+import shutil
 import time
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,7 @@ import pytest
 import openviking.storage.viking_fs as viking_fs_module
 from openviking.pyagfs.exceptions import AGFSInvalidOperationError
 from openviking.server.identity import RequestContext, Role
+from openviking.service.fs_service import FSService
 from openviking.storage.acl import AclEntry, AclLevel, AclMode, DirectAcl, EffectiveAcl
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs import _DEFAULT_GREP_FILE_CONCURRENCY, VikingFS
@@ -319,7 +321,8 @@ async def test_session_grep_forces_fs_engine_in_auto_mode(monkeypatch, uri):
 
 
 @pytest.mark.asyncio
-async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
+@pytest.mark.parametrize("pattern", ["needle", "中文", "two words", "session-id", "123"])
+async def test_primary_only_session_grep_uses_native_agfs(monkeypatch, pattern):
     viking_fs = VikingFS(agfs=_DummyAgfs())
     native_result = {"matches": [], "count": 0, "match_count": 0, "files_scanned": 4}
     native_grep = AsyncMock(return_value=native_result)
@@ -330,9 +333,9 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
 
     result = await viking_fs._grep_fs(
         uri="viking://user/alice/sessions/session-1",
-        pattern="needle",
+        pattern=pattern,
         exclude_uri="viking://user/alice/sessions/session-1/tools",
-        case_insensitive=True,
+        case_insensitive=False,
         node_limit=7,
         level_limit=3,
         ctx=None,
@@ -341,9 +344,9 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
     assert result == native_result
     native_grep.assert_awaited_once_with(
         uri="viking://user/alice/sessions/session-1",
-        pattern="needle",
+        pattern=pattern,
         exclude_uri="viking://user/alice/sessions/session-1/tools",
-        case_insensitive=True,
+        case_insensitive=False,
         node_limit=7,
         level_limit=4,
         ctx=None,
@@ -353,35 +356,131 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
     fallback_grep.assert_not_awaited()
 
 
+@pytest.fixture(params=["in_process", "ripgrep"])
+def native_session_fs(request, monkeypatch, tmp_path):
+    from openviking.pyagfs import RAGFSBindingClient
+
+    if RAGFSBindingClient is None:
+        pytest.skip("RAGFS native binding is not built")
+    if request.param == "in_process":
+        monkeypatch.setenv("PATH", "")
+    elif shutil.which("rg") is None:
+        pytest.skip("external ripgrep is not installed")
+    agfs = RAGFSBindingClient()
+    agfs.mount("localfs", "/local", {"local_dir": str(tmp_path)})
+    return VikingFS(agfs=agfs)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("pattern", "native_error", "content", "matched_line"),
+    ("pattern", "content", "case_insensitive", "expected_lines"),
     [
-        (r"(?<=foo)bar", "regex parse error: look-around is not supported", "foobar", "foobar"),
-        (r"(foo)\1", "Invalid regex pattern: backreferences are not supported", "foofoo", "foofoo"),
-        (r"(?=foo)foo", "Invalid regex: look-around is not supported", "foobar", "foobar"),
-        (r"(?a)\w+", "Invalid regular expression: unrecognized flag", "needle", "needle"),
-        (
-            r"a{1000000000}|needle",
-            "rg failed: rg: compiled regex exceeds size limit of 104857600",
-            "needle",
-            "needle",
-        ),
-        (
-            r"foo\nbar|needle",
-            r'rg failed: rg: the literal "\n" is not allowed in a regex',
-            "foo\nbar\nneedle",
-            "needle",
-        ),
+        (r"^\w+$", "²", False, [1]),
+        (r"^\w+$", "a\u0301", False, []),
+        (r"\b²\b", "²", False, [1]),
+        (r"^\s$", "\x1c", False, [1]),
+        ("i", "ı", True, [1]),
+        ("(?i:i)", "ı", False, [1]),
+        ("(?i)[a-z]+", "İ", False, [1]),
+        ("^$", "needle\n", False, [2]),
+        ("^$", "needle", False, []),
+        ("^$", "", False, [1]),
+        ("^$", "\n\n", False, [1, 2, 3]),
+        ("", "needle\n", False, [1, 2]),
+        ("x*", "needle\n", False, [1, 2]),
+        ("needle|$", "needle\n", False, [1, 2]),
+        (r"(?<=foo)bar", "foobar", False, [1]),
+        (r"(foo)\1", "foofoo", False, [1]),
+        (r"(?a)\w+", "needle", False, [1]),
+        (r"foo\nbar|needle", "foo\nbar\nneedle", False, [3]),
+        (r"a{1000000000}|needle", "needle", False, [1]),
+        (r"needle\Z", "needle", False, [1]),
+        ("needle", "needle\n", False, [1]),
+        ("中文", "中文\n", False, [1]),
     ],
 )
-async def test_session_native_grep_falls_back_for_python_only_regex(
-    monkeypatch, pattern, native_error, content, matched_line
+async def test_session_grep_preserves_python_matches(
+    native_session_fs, pattern, content, case_insensitive, expected_lines
+):
+    fs = native_session_fs
+    ctx = RequestContext(user=UserIdentifier("test-account", "alice"), role=Role.ROOT)
+    uri = "viking://user/alice/sessions/session-1"
+    file_uri = f"{uri}/messages.jsonl"
+    await fs.write(file_uri, content, ctx=ctx)
+
+    result = await FSService(viking_fs=fs).grep(
+        uri=uri, pattern=pattern, case_insensitive=case_insensitive, ctx=ctx
+    )
+
+    lines = content.split("\n")
+    assert result["matches"] == [
+        {"uri": file_uri, "line": number, "content": lines[number - 1]}
+        for number in expected_lines
+    ]
+    assert result["count"] == result["match_count"] == len(expected_lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern", ["^$", "needle"])
+@pytest.mark.parametrize("node_limit", [None, 1])
+async def test_session_grep_keeps_trailing_context_and_filters(
+    native_session_fs, pattern, node_limit
+):
+    fs = native_session_fs
+    ctx = RequestContext(user=UserIdentifier("test-account", "alice"), role=Role.ROOT)
+    uri = "viking://user/alice/sessions/session-1"
+    for name in ["a.jsonl", "b.jsonl", "tools/skip.jsonl", "history/deep.jsonl"]:
+        await fs.write(f"{uri}/{name}", "needle\n", ctx=ctx)
+    kwargs = {
+        "uri": uri,
+        "pattern": pattern,
+        "exclude_uri": f"{uri}/tools",
+        "level_limit": 0,
+        "node_limit": node_limit,
+        "before_context": 1,
+        "after_context": 1,
+        "ctx": ctx,
+    }
+
+    result = await FSService(viking_fs=fs).grep(**kwargs)
+    expected = await fs._grep_encrypted(**kwargs)
+
+    assert result == expected
+    assert [match["uri"] for match in result["matches"]] == [
+        f"{uri}/{name}.jsonl" for name in (["a"] if node_limit else ["a", "b"])
+    ]
+    for match in result["matches"]:
+        if pattern == "^$":
+            assert match["line"] == 2
+            assert match["content"] == ""
+            assert match["before_context"] == [{"line": 1, "content": "needle"}]
+            assert match["after_context"] == []
+        else:
+            assert match["line"] == 1
+            assert match["content"] == "needle"
+            assert match["before_context"] == []
+            assert match["after_context"] == [{"line": 2, "content": ""}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pattern", "content", "matched_line"),
+    [
+        (r"(?<=foo)bar", "foobar", "foobar"),
+        (r"(foo)\1", "foofoo", "foofoo"),
+        (r"(?=foo)foo", "foobar", "foobar"),
+        (r"(?a)\w+", "needle", "needle"),
+        (r"a{1000000000}|needle", "needle", "needle"),
+        (r"foo\nbar|needle", "foo\nbar\nneedle", "needle"),
+    ],
+)
+async def test_session_regex_uses_python_with_filters_and_context(
+    monkeypatch, pattern, content, matched_line
 ):
     viking_fs = VikingFS(agfs=_DummyAgfs())
     uri = "viking://user/alice/sessions/session-1"
     file_uri = f"{uri}/messages.jsonl"
-    native_grep = AsyncMock(side_effect=AGFSInvalidOperationError(native_error))
+    native_grep = AsyncMock()
     monkeypatch.setattr(viking_fs, "_session_native_grep_safe", AsyncMock(return_value=True))
     monkeypatch.setattr(viking_fs, "_grep_with_agfs", native_grep)
     monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
@@ -420,7 +519,7 @@ async def test_session_native_grep_falls_back_for_python_only_regex(
         "match_count": 1,
         "files_scanned": 1,
     }
-    native_grep.assert_awaited_once()
+    native_grep.assert_not_awaited()
     viking_fs.read.assert_awaited_once_with(file_uri, ctx=None)
 
 
