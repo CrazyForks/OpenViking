@@ -59,6 +59,11 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
+# Strong refs for fire-and-forget user directory initialization tasks. asyncio
+# only keeps weak references to tasks from create_task, so a task without an
+# external strong reference can be GC'd mid-flight and silently aborted.
+_USER_INIT_TASKS: set[asyncio.Task] = set()
+
 
 class CreateAccountRequest(BaseModel):
     account_id: str
@@ -310,6 +315,29 @@ async def _write_initial_user_config(
     if not _has_initial_user_config(user_config):
         return
     await write_user_config(service.viking_fs, user_ctx, user_config)
+
+
+def _spawn_user_directory_init(service, user_ctx: RequestContext) -> None:
+    """Initialize a new user's preset directories in the background.
+
+    Preset directories only make the user root discoverable; real writes lazily
+    create their own parents and session.create re-runs this idempotently, so a
+    failure here is self-healing and must not block or fail registration.
+    """
+
+    async def _init() -> None:
+        try:
+            await service.initialize_user_directories(user_ctx)
+        except Exception:
+            logger.exception(
+                "async user directory init failed, account=%s user=%s",
+                user_ctx.account_id,
+                user_ctx.user.user_id,
+            )
+
+    task = asyncio.create_task(_init())
+    _USER_INIT_TASKS.add(task)
+    task.add_done_callback(_USER_INIT_TASKS.discard)
 
 
 async def _rollback_account_creation(
@@ -827,7 +855,11 @@ async def register_user(
         str(resolved_role),
         seed=body.seed,
     )
-    await service.initialize_user_directories(user_ctx)
+    # Preset directory init is slow but only for discoverability, is idempotent,
+    # and self-heals on first write / session.create; run it off the request path.
+    _spawn_user_directory_init(service, user_ctx)
+    # Initial user_config writes lazily create their own parent dirs, so they do
+    # not depend on the preset init above and stay synchronous.
     await _write_initial_user_config(service, user_ctx, body.user_config)
     result = {
         "account_id": account_id,
