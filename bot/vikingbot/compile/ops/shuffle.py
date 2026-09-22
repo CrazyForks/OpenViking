@@ -12,7 +12,7 @@ from threading import Event
 
 from openviking.core.namespace import relative_uri_path
 from vikingbot.compile.pipeline_io import bounded_jobs
-from vikingbot.compile.plan import Group, Record, RouteBatchResponse, RouteDecision, digest
+from vikingbot.compile.plan import Group, Record, RouteBatchResponse, RouteDecision, Routing, digest
 
 
 def top_candidates(
@@ -253,6 +253,28 @@ class Shuffle:
         if not records:
             return []
         r = self.r
+        rule = getattr(r.contract, node.task)
+        if isinstance(rule, Routing) and rule.mode == "all":
+            history = []
+            if node.against_target:
+                history = await bounded_jobs(
+                    records,
+                    lambda record: self.candidates(
+                        record.routing_text, stable_uri=record.target_uri
+                    ),
+                    concurrency=r.limits.shuffle_concurrency,
+                    metrics=r.metrics,
+                )
+            ids = [record.record_id for record in records]
+            group = Group(
+                digest([node.name, ids])[:24],
+                records,
+                sorted({item["uri"] for items in history for item in items}),
+            )
+            await r.files.put(
+                f"groups/{group.group_id}", {"records": ids, "target_uris": group.target_uris}
+            )
+            return [group]
         vectors = await self.vectors(records)
         stop = Event()
         try:
@@ -274,7 +296,7 @@ class Shuffle:
         accepted, errors = {}, {}
         system = (
             "Routing rules:\n"
-            + getattr(r.contract, node.task)
+            + (rule.instructions if isinstance(rule, Routing) else rule)
             + "\nFor each record in `records`, use its `text` and `scope` and the routing rules "
             "to select candidates that need to be processed with it.\n"
             "Select `related` IDs only from that record's `candidates`, and `history` URIs only "

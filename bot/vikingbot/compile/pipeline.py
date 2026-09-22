@@ -29,12 +29,23 @@ from vikingbot.compile.plan import (
 from vikingbot.compile.renderer import RenderedBundle
 from vikingbot.compile.skill_resources import SkillResources
 
-_PLANNER = """Plan this collection using the full authoritative Skill, attachments and request.
-Return contract.extract (what to extract), routing (what needs joint processing), distinguish (scope field names and meanings),
-and reduce (how to synthesize). Keep instructions specific to each operator; reference Skill rules
+_PLANNER = """Plan this collection from the original Skill, attachments and request.instruction.
+Determine the required deliverables, their formats and their dependencies on inputs before choosing
+operators. Distinguish independent transformations, grouped synthesis and whole-collection synthesis;
+do not infer output count from input count. Resolve shared identities/references before generating
+dependent files. Choose the simplest typed flow satisfying the Skill and this request.
+Map transforms independent units into records or files. Set input_unit=file when a whole source
+file is the task boundary; range permits source-range batching. Intermediate records stay separate.
+Shuffle groups records: a routing string specifies semantic criteria; {"mode":"all"} explicitly
+groups the entire collection without similarity routing. This can produce one deliverable or a
+coordinated set of files. Reduce synthesizes each group into records or files. Finalize publishes files.
+Declare only transforms/routing used by the plan. Shuffle receives only routing rules, scope meanings
+and record evidence, not the original Skill or instruction; make its criteria self-contained.
+Keep instructions specific to each operator; reference Skill rules
 instead of copying them. Do not enumerate inputs or jobs. Samples are excerpts, not complete sources.
 Omit plan for the default map(extract) -> shuffle(routing, against=target) -> reduce -> finalize flow.
-Transforms default to direct execution; extract produces records and reduce produces final files.
+For independent file output use extract.output=files and an explicit map -> finalize plan.
+Transforms default to direct execution; extract defaults to records and reduce defaults to files.
 Choose agent for iterative work, Skill scripts or large/multiple files requiring scratch references.
 Declare only sufficient semantic payload fields for records; file transforms need no fields.
 Prefer fields as a mapping from each field name to one simple sentence describing it; descriptions are optional.
@@ -55,12 +66,15 @@ Skill, required_paths for prescribed outputs, output_format=wiki for OKF pages, 
 unmet capabilities. Unsupported requirements must be reported, never silently weakened.
 For necessary hierarchical aggregation, declare options.combine with sufficient records and
 options.overflow=structured. The default options.overflow=direct sends the complete group to Reduce
-without intermediate aggregation, even above the soft batching target.
+without intermediate aggregation. Oversized transforms use agents with scratch assignments and
+scoped reads rather than placing the entire input in the initial message. Prefer sufficient
+structured intermediate records for large syntheses; do not discard conditions needed downstream.
 For multiple synthesis levels, supply options.synthesize/final_routing and a custom plan. Options
 become direct contract attributes in the DSL. An intermediate reduce explicitly sets output=records;
-the final transform sets output=files. All Map transforms produce records.
+the final transform sets output=files. Both Map and Reduce can generate final files.
 Custom plans use the default plan's assignment syntax and bound sources, target, contract, p.
-Map accepts sources/records, shuffle accepts records, reduce accepts groups; omit against for
+Map accepts sources/records, shuffle accepts records, reduce accepts groups, finalize accepts files;
+omit against for
 intermediate grouping. Consume each dataset once and finish with one finalize; at most 12 nodes,
 no imports, loops or arbitrary calls. Overflow uses the contract.
 Runtime handles scoped history recall, source rereads, provenance, ownership and conditional writes.

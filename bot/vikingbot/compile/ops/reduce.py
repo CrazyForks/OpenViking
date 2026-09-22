@@ -13,7 +13,7 @@ from openviking.core.namespace import relative_uri_path
 from vikingbot.compile import file_ops
 from vikingbot.compile.ops import common
 from vikingbot.compile.ops.common import _FIDELITY, _RECORDS
-from vikingbot.compile.pipeline_io import ModelCallError, bounded_jobs
+from vikingbot.compile.pipeline_io import bounded_jobs
 from vikingbot.compile.plan import (
     FileDraft,
     FileResponse,
@@ -21,7 +21,7 @@ from vikingbot.compile.plan import (
     Node,
     Record,
     RecordResponse,
-    StrictModel,
+    Transform,
     content_hash,
     digest,
 )
@@ -56,28 +56,15 @@ not absent; never claim another group has not produced a page. When a target pat
 mention the relevant subject naturally without inventing a destination.
 related_subjects contains assigned topics, not accepted files; do not treat them as link targets.
 Set each file.inputs to supplied input IDs actually used by that file. Multiple inputs may support
-one file; do not create a separate file for every input. Do not claim unrelated sources.
+one file; output counts and independence follow the Skill and stage task. Do not claim unrelated sources.
 Wiki files require YAML type, title, single-line description and source citations. Generic files
 follow their declared format. Never fabricate requirements, source identities or existing paths.
 """
 )
 
 
-class MergedContent(StrictModel):
-    """Complete merged page text; runtime retains its path and publication revision."""
-
-    content: str
-
-
 async def run(runtime: Pipeline, node: Node, groups: list[Group]) -> list[Record] | list[str]:
-    """Run each group once, then consolidate candidate files sharing a final path.
-
-    Model call failures retain the candidate with the most distinct source URIs.
-    Failed groups leave other groups' files available for partial publication.
-    Distinct output paths consolidate concurrently under the merge worker limit;
-    results retain candidate order and each path has only one consolidation worker.
-    The selected transform determines whether results are records or artifact references.
-    """
+    """Transform groups concurrently; only resolved file candidates become publishable."""
     outputs = await bounded_jobs(
         groups,
         partial(reduce_job, runtime, node),
@@ -88,64 +75,96 @@ async def run(runtime: Pipeline, node: Node, groups: list[Group]) -> list[Record
     references = [item for output in outputs for item in output]
     if getattr(runtime.contract, node.task).output == "records":
         return references
+    return await resolve_files(runtime, references)
+
+
+async def resolve_files(runtime: Pipeline, references: list[str]) -> list[str]:
+    """Accept unique paths and resolve collisions using the Skill and request.
+
+    Concurrent decisions reserve renamed paths before saving; a competing reservation
+    permits one replan with the current path set. Failed decisions stay unpublished; successful
+    unrelated outputs remain available for partial recovery. Candidates stay on disk.
+    """
     candidates = {}
     for reference in references:
         artifact = await runtime.files.get(reference)
         candidates.setdefault(artifact["path"], []).append((reference, artifact))
-    return await bounded_jobs(
-        candidates.values(),
-        partial(merge_candidates, runtime),
+    reserved, result = {path: path for path in candidates}, []
+    for items in candidates.values():
+        if len(items) == 1:
+            result.append(items[0][0])
+    await file_ops.accept_files(runtime, result)
+
+    async def resolve(items):
+        """Resolve one collision, reserving every selected path before yielding to storage."""
+        path = items[0][1]["path"]
+        inputs = {i for _, artifact in items for i in artifact["inputs"]}
+        records = [runtime.records[i] for i in sorted(inputs)]
+        group = Group("merge-" + digest([ref for ref, _ in items]), records)
+
+        def validate(response):
+            file_ops.validate_files(runtime, response, group, records, {})
+            blocked = {d.path for d in response.files if reserved.get(d.path, path) != path}
+            if blocked:
+                raise ValueError(f"Output paths are reserved by other jobs: {sorted(blocked)}")
+            if {i for draft in response.files for i in draft.inputs} != inputs:
+                raise ValueError(
+                    "Resolved files must account for every candidate's supporting input"
+                )
+
+        try:
+            transform = Transform(
+                output="files",
+                instructions=(
+                    "Resolve candidate path collisions following the Skill and instruction. "
+                    "Combine compatible contributions, deduplicate equivalents, or rename independent "
+                    "files. Preserve required detail and input independence. Submit complete files "
+                    "with supporting inputs, without patches or base_hash; runtime binds revisions."
+                ),
+            )
+            for attempt in range(2):
+                unavailable = sorted(p for p, owner in reserved.items() if owner != path)
+                try:
+                    response = await common.ask_transform(
+                        runtime,
+                        "reduce_merge",
+                        transform,
+                        runtime.system + "\n" + transform.instructions,
+                        {
+                            "candidates": [a for _, a in items],
+                            "reserved_paths": unavailable,
+                            "inputs": [await common.payload(runtime, r) for r in records],
+                        },
+                        FileResponse,
+                        validate,
+                    )
+                    validate(response)
+                except ValueError:
+                    if attempt or unavailable == sorted(
+                        p for p, owner in reserved.items() if owner != path
+                    ):
+                        raise
+                else:
+                    reserved.update((draft.path, path) for draft in response.files)
+                    break
+            resolved = await file_ops.save_replacements(
+                runtime, response, group, records, origin=path
+            )
+            await file_ops.accept_files(runtime, resolved)
+            return resolved
+        except (OSError, ValueError) as exc:
+            runtime.failures.append(f"Unresolved output path {path}: {exc}")
+            for record in records:
+                runtime.status[record.record_id] = "failed"
+            return []
+
+    resolved = await bounded_jobs(
+        (items for items in candidates.values() if len(items) > 1),
+        resolve,
         concurrency=runtime.limits.merge_concurrency,
         metrics=runtime.metrics,
     )
-
-
-async def merge_candidates(runtime: Pipeline, candidates):
-    """Return one accepted reference for a path, retaining its main draft on call failure.
-
-    Candidates contain saved references and artifacts. Only successful consolidation
-    combines lineage; normal file validation and storage errors propagate.
-    """
-    candidates.sort(
-        key=lambda item: len({runtime.evidence[r]["uri"] for r in item[1]["source_refs"]}),
-        reverse=True,
-    )
-    reference, main = candidates[0]
-    if len(candidates) > 1:
-        try:
-            result = await runtime.model.ask(
-                "reduce_merge",
-                runtime.system + "\nUse the main draft as the basis; integrate the other drafts, "
-                "remove repetition, preserve applicability and sources. Return complete content.",
-                {"main": main, "others": [item[1] for item in candidates[1:]]},
-                MergedContent,
-                None,
-            )
-        except ModelCallError:
-            runtime.metrics["reduce_merge_fallbacks"] += 1
-        else:
-            inputs = sorted({i for _, a in candidates for i in a["inputs"]})
-            response = FileResponse(
-                files=[
-                    FileDraft(
-                        path=main["path"],
-                        content=result.content,
-                        base_hash=main["base_hash"],
-                        inputs=inputs,
-                    )
-                ],
-            )
-            old = {main["path"]: runtime.old[main["path"]]} if main["base_hash"] else {}
-            records = [runtime.records[i] for i in inputs]
-            group = Group("merge-" + digest([ref for ref, _ in candidates]), records)
-            file_ops.validate_files(runtime, response, group, records, old)
-            return (
-                await file_ops.save_files(
-                    runtime, response, group, records, old, origin=main["origin"]
-                )
-            )[0]
-    await file_ops.accept_files(runtime, [reference])
-    return reference
+    return result + [reference for batch in resolved for reference in batch]
 
 
 async def reduce_job(runtime: Pipeline, node, group: Group):
@@ -165,8 +184,8 @@ async def ready_file(runtime: Pipeline, group):
     return await runtime.files.get(group.records[0].ready_ref)
 
 
-async def reduce_group(runtime: Pipeline, node, group: Group):
-    """Synthesize a candidate work set, preserving evidence and historical revisions."""
+async def reduce_group(runtime: Pipeline, node, group: Group, *, stage="reduce"):
+    """Transform a work set into records or file candidates; Map binds full replacements."""
     transform = getattr(runtime.contract, node.task)
     records, old = group.records, {}
     if transform.output == "files":
@@ -178,7 +197,11 @@ async def reduce_group(runtime: Pipeline, node, group: Group):
             if content is None:
                 raise ValueError(f"Recalled historical file no longer exists: {uri}")
             old[path] = content
-    ready = await ready_file(runtime, group) if transform.output == "files" else None
+    ready = (
+        await ready_file(runtime, group)
+        if stage == "reduce" and transform.output == "files"
+        else None
+    )
     if ready is not None:
         previous = await file_ops.load_old(runtime, ready["path"])
         if previous is not None:
@@ -238,6 +261,7 @@ async def reduce_group(runtime: Pipeline, node, group: Group):
         if (
             runtime.model.fits(system, data, schema)
             or depth == 3
+            or stage == "map"
             or runtime.contract.overflow != "structured"
         ):
             break
@@ -259,12 +283,15 @@ async def reduce_group(runtime: Pipeline, node, group: Group):
         records = reduced
     if transform.output == "records":
         return await common.transform(runtime, "reduce", transform, records, extra)
-    response = await runtime.model.ask(
-        "reduce",
+    response = await common.ask_transform(
+        runtime,
+        stage,
+        transform,
         system,
         data,
         FileResponse,
         lambda value: file_ops.validate_files(runtime, value, group, records, old),
-        agent=transform.execution == "agent",
     )
+    if stage == "map":
+        return await file_ops.save_replacements(runtime, response, group, records)
     return await file_ops.save_files(runtime, response, group, records, old)

@@ -139,7 +139,7 @@ async def test_map_numbers_view_and_validates_supporting_locations(files, locati
         evidence={"S": source},
         system="",
         contract=SimpleNamespace(distinguish={}),
-        model=SimpleNamespace(ask=ask, identity={}),
+        model=SimpleNamespace(ask=ask, identity={}, fits=lambda *args: True),
         register=registered.append,
         status={},
     )

@@ -59,6 +59,39 @@ async def complete_tool_result(result, session_key):
     return result
 
 
+async def prepare_assignment(data, sandbox, root):
+    """Store an oversized assignment in private scratch, replacing source bodies with read handles.
+
+    The caller retains the full data for lineage validation and enables evidence reads.
+    Candidate bodies use text files so line-based reads do not expand an entire JSON string.
+    """
+    assignment = {k: v for k, v in data.items() if k != "original_evidence"}
+    assignment["inputs"] = []
+    for item in data.get("inputs", []):
+        payload = item.get("payload", {})
+        if "text" in payload and "uri" in payload:
+            payload = {k: v for k, v in payload.items() if k != "text"}
+            payload["source_ranges"] = [item["id"]]
+        assignment["inputs"].append({**item, "payload": payload})
+    if "candidates" in data:
+        assignment["candidates"] = []
+        for index, candidate in enumerate(data["candidates"]):
+            path = f"candidate-{index}.txt"
+            await sandbox.write_file(f"{root}/{path}", candidate["content"])
+            assignment["candidates"].append(
+                {**{k: v for k, v in candidate.items() if k != "content"}, "content_file": path}
+            )
+    await sandbox.write_file(
+        f"{root}/assignment.json", json.dumps(assignment, ensure_ascii=False, indent=2)
+    )
+    return {
+        "assignment_file": "assignment.json",
+        "instructions": "Read assignment.json with read_file offset/limit. Read source_ranges with read_evidence; "
+        "source text is not included. Read candidate content_file paths in ranges. "
+        "Process all assigned inputs before submitting the complete result.",
+    }
+
+
 class EmitResult(Tool):
     """Validate one child's typed result; two failed submissions exhaust its repair budget."""
 
@@ -207,6 +240,10 @@ def agent_runner(loop, session_key, connection, limits):
         root = f"{COMPILE_DRAFT_ROOT}/{child_id}"
         evidence = EvidenceReader(model.files, data)
         submit = EmitResult(schema, validate, model.files.sandbox, root, data, model.metrics)
+        assignment = data
+        if not model.fits(system, data, schema):
+            assignment = await prepare_assignment(data, model.files.sandbox, root)
+            evidence.delivered.clear()
         registry = ToolRegistry(config=loop.config)
         registry.register(submit)
         if model.resources:
@@ -242,7 +279,7 @@ def agent_runner(loop, session_key, connection, limits):
                     "Scratch files are data; writing a script does not execute it. "
                     "Use edit_file to repair existing JSON.",
                 },
-                {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps(assignment, ensure_ascii=False)},
             ],
             session_key=session_key,
             publish_events=False,

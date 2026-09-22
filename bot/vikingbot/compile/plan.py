@@ -6,11 +6,11 @@ import ast
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-PROCESSING_VERSION = "compile-pipeline-29"
+PROCESSING_VERSION = "compile-pipeline-30"
 # Explicit output-token fallback when the configured VLM provides no value.
 DEFAULT_MAX_TOKENS = 32_000
 
@@ -50,6 +50,10 @@ class Transform(StrictModel):
     instructions: str = Field(min_length=1, max_length=6000)
     output: Literal["records", "files"] = "records"
     execution: Literal["direct", "agent"] = "direct"
+    input_unit: Literal["range", "file"] = Field(
+        default="range",
+        description="Source Map assignment boundary; intermediate records stay separate.",
+    )
     fields: dict[str, str] = Field(
         default_factory=lambda: {"text": "Facts extracted from the source."},
         description="Payload field names mapped to optional simple descriptions; empty descriptions "
@@ -83,6 +87,20 @@ class Transform(StrictModel):
         return {name: description for name, description in value.items() if name not in reserved}
 
 
+class Routing(StrictModel):
+    """Group records by semantic instructions or preserve the entire collection as one group."""
+
+    mode: Literal["semantic", "all"] = "semantic"
+    instructions: str = Field(default="", max_length=4000)
+
+    @model_validator(mode="after")
+    def check_instructions(self) -> Routing:
+        """Semantic grouping needs criteria; global grouping needs no model decision."""
+        if self.mode == "semantic" and not self.instructions.strip():
+            raise ValueError("Semantic routing requires instructions")
+        return self
+
+
 class Contract(StrictModel):
     """Task-local interpretation of the original Skill, which remains authoritative.
 
@@ -94,11 +112,11 @@ class Contract(StrictModel):
 
     version: Literal[1] = 1
     extract: Transform
-    reduce: Transform
+    reduce: Transform | None = None
     synthesize: Transform | None = None
     combine: Transform | None = None
-    routing: str = Field(min_length=1, max_length=4000)
-    final_routing: str = Field(default="", max_length=4000)
+    routing: Annotated[str, Field(max_length=4000)] | Routing = ""
+    final_routing: Annotated[str, Field(max_length=4000)] | Routing = ""
     distinguish: dict[str, str] = Field(
         default_factory=dict,
         description="Scope field names mapped to their meanings. Prefer short names such as "
@@ -152,8 +170,6 @@ class Contract(StrictModel):
         """Reject unusable contracts before any source transformation begins."""
         if self.unsupported:
             raise ValueError(f"Unrepresentable Skill requirements: {self.unsupported}")
-        if self.extract.output != "records":
-            raise ValueError("extract must produce records")
         if self.overflow == "structured" and (
             self.combine is None or self.combine.output != "records"
         ):
@@ -287,7 +303,7 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
                 reference(kwargs["overflow"], "contract", {"overflow"})
                 valid = handles[source] == "groups"
             else:
-                valid = handles[source] in {"sources", "records"} and transform.output == "records"
+                valid = handles[source] in {"sources", "records"}
             output_type = transform.output
         elif op == "shuffle":
             if set(kwargs) not in ({"by"}, {"by", "against"}):

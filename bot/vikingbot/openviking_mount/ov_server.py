@@ -643,7 +643,7 @@ class VikingClient:
     ) -> Dict[str, Any]:
         return await self.client.add_skill(
             path,
-            target_uri=target_uri,
+            options={"target_uri": target_uri},
             wait=wait,
             timeout=timeout,
         )
@@ -660,7 +660,7 @@ class VikingClient:
         return await self.client.update_skill(
             skill_name,
             path,
-            target_uri=target_uri,
+            options={"target_uri": target_uri},
             wait=wait,
             timeout=timeout,
         )

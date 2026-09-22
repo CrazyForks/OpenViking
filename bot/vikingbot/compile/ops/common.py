@@ -120,6 +120,18 @@ def validate_input_refs(inputs, included) -> None:
         )
 
 
+async def ask_transform(runtime: Pipeline, label, transform, system, data, schema, validate):
+    """Execute a typed transform, using scratch-capable agents when its input exceeds budget."""
+    return await runtime.model.ask(
+        label,
+        system,
+        data,
+        schema,
+        validate,
+        agent=transform.execution == "agent" or not runtime.model.fits(system, data, schema),
+    )
+
+
 async def transform(runtime: Pipeline, label, transform, records, extra=None) -> list[Record]:
     """Produce typed records with deterministic IDs and runtime-propagated evidence sets."""
     system = runtime.system + _RECORDS + "\nTask: " + transform.instructions
@@ -187,8 +199,8 @@ async def transform(runtime: Pipeline, label, transform, records, extra=None) ->
                     "A stable target candidate must occur explicitly in supplied evidence inside to"
                 )
 
-    response = await runtime.model.ask(
-        label, system, data, RecordResponse, validate, agent=transform.execution == "agent"
+    response = await ask_transform(
+        runtime, label, transform, system, data, RecordResponse, validate
     )
     outputs = []
     by_id = {r.record_id: r for r in records}

@@ -7,12 +7,10 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from loguru import logger
-
 from vikingbot.compile import file_ops
 from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.ops import reduce as reduce_op
-from vikingbot.compile.pipeline_io import ROOT, bounded_jobs
+from vikingbot.compile.pipeline_io import ROOT
 from vikingbot.compile.plan import Contract, Record, content_hash
 
 
@@ -20,7 +18,7 @@ def read_checkpoint(workspace: Path) -> dict:
     """Validate local shards without writes or model calls; reject incomplete Reduce.
 
     Recovery supports the four-stage resource pipeline before publication. Returned
-    candidates exclude merged artifacts; completed merges must retain all inputs.
+    candidates exclude resolved artifacts; resolution is replayed through the validated model cache.
     """
     root = workspace / ROOT
 
@@ -48,7 +46,7 @@ def read_checkpoint(workspace: Path) -> dict:
     for key, source in sources.items():
         if content_hash(source["text"]) != source["hash"]:
             raise ValueError(f"Source hash mismatch: {key}")
-    candidates, completed = defaultdict(list), {}
+    candidates, completed = defaultdict(list), set()
     artifact_counts = Counter()
     for key, artifact in shards("artifacts").items():
         if content_hash(artifact["content"]) != artifact["sha256"]:
@@ -61,30 +59,24 @@ def read_checkpoint(workspace: Path) -> dict:
             raise ValueError(f"Artifact evidence is unavailable: {key}")
         reference = f"artifacts/{key}"
         if artifact["owner"].startswith("merge-"):
-            if artifact["path"] in completed:
-                raise ValueError("Ambiguous completed merge")
-            completed[artifact["path"]] = (reference, artifact)
-        else:
-            group = groups.get(artifact["owner"])
-            if group is None or not set(artifact["inputs"]) <= set(group["records"]):
-                raise ValueError(f"Artifact does not belong to a completed group: {key}")
-            candidates[artifact["path"]].append((reference, artifact))
-            artifact_counts[artifact["owner"]] += 1
+            completed.add(artifact["owner"])
+            continue  # Re-resolve original candidates together so renamed paths stay unique.
+        group = groups.get(artifact["owner"])
+        if group is None or not set(artifact["inputs"]) <= set(group["records"]):
+            raise ValueError(f"Artifact does not belong to a completed group: {key}")
+        candidates[artifact["path"]].append((reference, artifact))
+        artifact_counts[artifact["owner"]] += 1
     if any(artifact_counts[key] != count for key, count in output_counts.items()):
         raise ValueError("Reduce artifact count does not match completed jobs")
     if not candidates:
         raise ValueError("No Reduce candidates")
-    for path, (_, artifact) in completed.items():
-        expected = {i for _, a in candidates[path] for i in a["inputs"]}
-        if set(artifact["inputs"]) != expected:
-            raise ValueError(f"Completed merge has incomplete lineage: {path}")
     return {
         "contract": read("contract"),
         "runtime": read("runtime"),
         "sources": sources,
         "records": records,
         "candidates": dict(candidates),
-        "completed": completed,
+        "completed": sorted(completed),
         "summary": read("summary") if (root / "summary.json").exists() else None,
     }
 
@@ -147,46 +139,17 @@ async def run(pipeline):
     pipeline.model.usage["total_tokens"] = (
         pipeline.model.usage["prompt_tokens"] + pipeline.model.usage["completion_tokens"]
     )
-    candidates, completed = checkpoint["candidates"], checkpoint["completed"]
+    candidates = checkpoint["candidates"]
     for items in candidates.values():
         for _, artifact in items:
             if artifact["base_hash"]:
                 old = await file_ops.load_old(pipeline, artifact["path"])
                 if old is None or content_hash(old) != artifact["base_hash"]:
                     raise ValueError(f"Historical revision changed: {artifact['path']}")
-    total = sum(len(items) > 1 for items in candidates.values())
-    done, active = len(completed), 0
-    logger.info(
-        "RESUME ready: merged={}/{} concurrency={}", done, total, pipeline.limits.merge_concurrency
-    )
-
-    async def consolidate(items):
-        nonlocal done, active
-        path = items[0][1]["path"]
-        if path in completed:
-            ref = completed[path][0]
-            await file_ops.accept_files(pipeline, [ref])
-            return ref
-        merging = len(items) > 1
-        active += int(merging)
-        if merging:
-            logger.info("RESUME merge start: active={} path={}", active, path)
-        try:
-            ref = await reduce_op.merge_candidates(pipeline, items)
-            if merging:
-                done += 1
-                logger.info("RESUME merge finished: {}/{}", done, total)
-            return ref
-        finally:
-            active -= int(merging)
-
     prepared = False
     try:
-        refs = await bounded_jobs(
-            candidates.values(),
-            consolidate,
-            concurrency=pipeline.limits.merge_concurrency,
-            metrics=pipeline.metrics,
+        refs = await reduce_op.resolve_files(
+            pipeline, [reference for items in candidates.values() for reference, _ in items]
         )
         if pipeline.failures:
             pipeline.warnings.append(
