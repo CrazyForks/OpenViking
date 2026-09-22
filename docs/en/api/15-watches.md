@@ -10,7 +10,7 @@ List, inspect, update, and trigger watch tasks created via [`add_resource`](02-r
 
 #### 1. API Implementation Overview
 
-This control plane wraps the `WatchManager` primitives without changing any server-side behavior. Every endpoint and CLI command resolves the target task by either its `task_id` (path) or its `to_uri` (query). The two keys are interchangeable; if both are supplied they must refer to the same task, otherwise the request is rejected with 400.
+Locate a task by `task_id`, or use `to_uri` when exactly one accessible task matches. Multiple Connector Watches can share a target; URI lookup then returns `409 Conflict` and requires a `task_id`. If both keys are supplied, they must identify the same task or the request returns `400`.
 
 **Operations**:
 - **List** (`GET /api/v1/watches`) — returns `{tasks, total}`; pass `?active_only=true` to filter; pass `?to_uri=...` to collapse to a single-task lookup
@@ -211,7 +211,7 @@ list_watches()                                            # one line per task; U
 cancel_watch(to_uri="viking://resources/guide.md")        # idempotent removal by URI
 ```
 
-Pause / resume / trigger / update are intentionally not exposed via MCP — those power-user operations live on the CLI/REST surface to keep the agent system prompt compact. Creating a watch or changing its cadence from the agent side still goes through [`add_resource`](02-resources.md#add-resource) with `watch_interval`; pass `to` explicitly or let the system bind to the `root_uri` returned by this import.
+MCP exposes listing and removal. To create a Watch, use [`add_resource`](02-resources.md#add-resource) with `watch_interval`. Use the CLI or REST API to pause, resume, trigger, or change the cadence of an existing Watch. Re-importing does not update an existing Watch.
 
 ---
 

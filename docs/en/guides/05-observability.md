@@ -109,7 +109,7 @@ curl http://localhost:1933/api/v1/debug/health \
 
 ### Response time
 
-Every API response includes an `X-Process-Time` header with the server-side processing time in seconds:
+Every API response includes an `X-Process-Time` response header with the server-side processing time in seconds:
 
 ```bash
 curl -v http://localhost:1933/api/v1/fs/ls?uri=viking:// \

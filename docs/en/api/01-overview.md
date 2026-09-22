@@ -102,14 +102,12 @@ When `url` is not explicitly provided, the HTTP client automatically reads conne
 export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 ```
 
-Configuration file example:
+Configuration file example using a user/admin key:
 
 ```json
 {
   "url": "http://localhost:1933",
-  "api_key": "your-key",
-  "account": "acme",
-  "user": "alice"
+  "api_key": "your-user-or-admin-key"
 }
 ```
 
@@ -119,8 +117,8 @@ Configuration field description:
 |-------|-------------|---------|
 | `url` | Server address | (required) |
 | `api_key` | API Key | `null` (no auth) |
-| `account` | Default account header for tenant-scoped requests | `null` |
-| `user` | Default user header for tenant-scoped requests | `null` |
+| `account` | Account header for trusted mode only | `null` |
+| `user` | User header for trusted mode only | `null` |
 | `timeout` | HTTP request timeout in seconds | `60.0` |
 | `output` | Default output format: `"table"` or `"json"` | `"table"` |
 
@@ -166,7 +164,7 @@ curl http://localhost:1933/api/v1/fs/ls?uri=viking:// \
 
 #### CLI Mode
 
-The OpenViking CLI command is `ov` (installed with `npm install -g @openviking/cli`). It connects to an OpenViking server and exposes all operations as shell commands. The CLI also reads connection information from `ovcli.conf` (shared with the HTTP client).
+The OpenViking CLI command is `ov` (installed with `npm install -g @openviking/cli`). It connects to an OpenViking server and provides shell commands for common operations. The CLI also reads connection information from `ovcli.conf` (shared with the HTTP client).
 
 Basic usage:
 
@@ -214,12 +212,12 @@ See the [Authentication Guide](../guides/04-authentication.md) for full details.
 
 - **Authorization Bearer** header: `Authorization: Bearer your-key` (recommended)
 - **X-API-Key** header: `X-API-Key: your-key`
-- If the server doesn't have an API Key configured, authentication is skipped.
+- Only dev mode skips authentication; OIDC, LDAP, and Trusted modes resolve identity according to their configuration.
 - The `/health` and `/ready` endpoints never require authentication.
 
 ## Response Format
 
-All HTTP API responses follow a unified format:
+Regular JSON API responses use the following envelope. File downloads, SSE, Metrics, and WebDAV use the formats documented for those endpoints:
 
 ### Success Response
 
@@ -241,8 +239,7 @@ The top-level `status` describes whether the HTTP API request succeeded. Some su
   "error": {
     "code": "NOT_FOUND",
     "message": "Resource not found: viking://resources/nonexistent/"
-  },
-  "time": 0.01
+  }
 }
 ```
 
@@ -561,9 +558,11 @@ This catalog follows the routes actually mounted by the server. Each group headi
 
 ---
 
-## Documentation Reading Plan
+<a id="documentation-reading-plan"></a>
 
-The sidebar is organized by responsibility rather than historical file size:
+## Find an API by Task
+
+Choose a reference page by operation type:
 
 | Group | What to look for |
 |-------|------------------|

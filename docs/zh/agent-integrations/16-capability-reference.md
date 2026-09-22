@@ -253,7 +253,7 @@ openclaw 的 peer 由 `peer_role`/`peer_prefix` 推导（`peer_role=sender` 时�
 
 - `OPENVIKING_COMMIT_TURN_THRESHOLD`：仅 cursor（trae×2/zcode 每 Stop 必 commit，不走该阈值）。
 - `OPENVIKING_WRITE_PATH_ASYNC`：claude-code / codex / zcode。
-- 召回再摘要相关（`OPENVIKING_RECALL_COMPRESS` / `OPENVIKING_RECALL_REWRITE` 及配套项）：claude-code / codex（服务端 `rewrite` 参数本身对所有调用方可用，[§3.2.5](#_3-2-5-召回再摘要)）。
+- 召回再摘要：`OPENVIKING_RECALL_COMPRESS` 的 `server` 模式适用于各记忆集成，本地 `client` 模式仅 Claude Code / Codex 支持。默认值和模式见 [§3.2.5](#_3-2-5-召回再摘要)。
 - `OPENVIKING_RECALL_DEDUP_TURNS`、`OPENVIKING_RECALL_QUERY_EXPANSION`、`OPENVIKING_PEER_SOURCE`、`OPENVIKING_SKILL_CATALOG`、`OPENVIKING_SKILL_CATALOG_TOKEN_BUDGET`、workspace 配置文件与 ovcli.conf `plugin` 段：经共享加载器解析配置的每个 harness——claude-code / codex / cursor / trae / trae-cn / zcode / opencode / dsh / pi；openclaw 与 hermes 各有自己的配置体系。
 
 ## 3.2 自动召回与注入
@@ -275,9 +275,11 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 
 ### 3.2.2 判定矩阵
 
+下表描述默认召回路径。显式开启服务端压缩后，请求路径按 §3.2.5 调整。
+
 | harness | 触发点 | query 构造 | session_id | 服务端路径 | 注入格式 / 位置 | 再摘要（客户端）* |
 |---|---|---|---|---|---|---|
-| claude-code | 每轮 `UserPromptSubmit` | prompt 原文 trim | ✅ `cc-` | A（context face） | `<openviking-context>` → `hookSpecificOutput.additionalContext` | ✅ 本地/服务端（默认 auto，[§3.2.5](#_3-2-5-召回再摘要)） |
+| claude-code | 每轮 `UserPromptSubmit` | prompt 原文 trim | ✅ `cc-` | A（context face） | `<openviking-context>` → `hookSpecificOutput.additionalContext` | ✅ 本地（默认 auto，[§3.2.5](#_3-2-5-召回再摘要)） |
 | codex / trae-cli | 每轮 `UserPromptSubmit`（整 hook 120s 硬截止） | prompt 原文 | ✅ `cx-`（确定性推导，不读 state） | A；二级降级 searchScope 落入 B | `<openviking-context source="auto-recall" format="digest">` | ✅ 本地 `codex exec`（[§3.2.5](#_3-2-5-召回再摘要)） |
 | cursor | `beforeSubmitPrompt` | prompt 原文；基于事件 id 与 500ms 窗口去重，同 promptHash 复用缓存块 | ✅ `cu-` | A | `additional_context` | ❌ |
 | trae / trae-cn | `UserPromptSubmit` | 剥离历史注入块后的 prompt（只认 `input.prompt`） | ✅ `tr-`/`trcn-` | A | `additionalContext` | ❌ |
@@ -288,7 +290,7 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 | openclaw | context-engine transformContext assemble（设有 7 道 passthrough 门） | 最后一条 user 消息纯 text，清洗后截 4000 字符 | ❌（`/find` 无该字段） | `/find` | 以 `<relevant-memories>` + `Source: openviking-auto-recall` 格式前置进最后一条 user 消息 | ❌ |
 | hermes | 每轮 API 调用前同步执行 `prefetch` | 原始用户输入，双层剥 skill 脚手架；<5 字符跳过 | 部分携带（仅 `search/search` 首选路径，落 B；降级 `/find` 时不带） | B / find | `<memory-context>` fenced 块追加到当轮 user 消息（只进 API 请求体，不写回持久化） | ❌ |
 
-\* 同 [§1.2](#_1-2-自动-hook-面-通过-harness-自动实现)：此列的"再摘要"特指客户端本地压缩，而服务端 digest 对所有调用方均可用（[§3.2.5](#_3-2-5-召回再摘要)）。ov CLI 无自动召回，不在本表。
+\* 本表的再摘要列描述本地压缩能力。各集成都可显式开启服务端压缩；开启后会使用 context-search rewrite，见 [§3.2.5](#_3-2-5-召回再摘要)。`ov` CLI 不提供自动召回。
 
 ### 3.2.3 profile / 开场注入
 
@@ -325,11 +327,18 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 
 **服务端实现（对所有调用方可用）**：context 检索面（涵盖 REST 的 `mode="context"` 与 legacy 的 `/recall`）支持传入 `rewrite` 参数——可选值为 `false | true | "auto"`，默认为 `false`；并配套提供 `rewrite_max_bullets`（默认 6，1-20）。开启后，服务端会用 `query_planner` 模型（`rewrite=true` 时未配置则回落主 `vlm`；`"auto"` 仅在显式配置了 `query_planner` 时生效）把召回结果改写成带引用的 digest：`OpenViking memory digest:` 头 + `- ` bullets，每条 ≤500 字符且必须引用一条本次命中的 `viking://` URI（无引用或引用越界的 bullet 被丢弃）；判定无相关记忆时输出哨兵并清空注入块（该轮不记入去重台账）。模型调用受 `retrieval.recall_rewrite_timeout_s=30s` 熔断，超时回落未改写的 rendered 块（`rewrite.py:78-141`、`pipeline.py:122-130`、`search.py:195-196`）。
 
-**客户端侧现状**：
+**客户端配置**：自动召回统一使用 `OPENVIKING_RECALL_COMPRESS`，共享配置文件中对应 `recallCompress`（`recallRewrite` 为兼容别名）。
 
-- **claude-code**：`recallRewrite` 四态 `off|client|server|auto`，默认 **auto**——先探测本地压缩器是否可用（`claude --version` 探测，缓存 7 天），若可用则在本地起 `claude -p --model sonnet --effort low --strict-mcp-config` 子进程压缩（30s 超时，输入 <1500 字不压缩，digest 单条缓存；子进程环境强制降级防递归；失败回落未压缩块；URI 编辑距离吸附回真实 URI，修不回的整条丢弃）。若本地不可用，则下发 `rewrite:"auto"` 交服务端。这是唯一接入服务端 rewrite 的 harness。
-- **codex**：布尔 `recallCompress` 默认 **true**，完全依赖本地压缩（不使用服务端 rewrite）：模型 profile 从 `~/.codex/models_cache.json` 读，候选 `gpt-5.3-codex-spark` → `gpt-5.6-luna`，缓存 7 天；命令 `codex --sandbox read-only --ask-for-approval never exec --ephemeral --ignore-user-config --skip-git-repo-check --output-last-message <tmp> -`，超时 110s；运行期失败后同一会话内跳过压缩、下次 SessionStart 自愈重测；输出规范化截 4000 字符；压缩关闭或失败时用确定性 `fallbackDigest` 兜底。
-- **其余 harness**：均不发送 `rewrite`、无本地压缩，而是直接注入服务端返回的原始召回块。直连 API 的第三方可自行传 `rewrite` 获得服务端 digest。
+| 模式 | 行为 |
+| --- | --- |
+| `off` | 不请求再摘要。 |
+| `server` | 发送 `rewrite: true`，优先使用服务端 digest。 |
+| `client` | 仅 Claude Code 和 Codex 支持，使用本地压缩器。 |
+| `auto` | Claude Code 和 Codex 优先使用可用的本地压缩器，否则发送 `rewrite: "auto"`；没有本地压缩器的集成直接请求服务端自动判断。 |
+
+Claude Code 和 Codex 默认 `auto`，其他集成默认 `off`。Claude Code、Codex、OpenCode、DSH、Pi、Cursor、TRAE、TRAE CN、ZCode、OpenClaw 和 Hermes 均可显式启用服务端压缩；旧布尔值 `1` / `0` 分别对应 `auto` / `off`。`stats.rewrite="no_relevant"` 表示本轮不注入，不能再回退到原始块。
+
+这些设置只控制自动召回，显式 MCP 调用使用调用方传入的参数。服务端需支持 context-search rewrite；旧服务回退行为、压缩器探测和宿主时间预算见 [共享插件说明](https://github.com/volcengine/OpenViking/blob/main/examples/memory-plugin-shared/README.md#cloud-recall-compression)及各集成页。
 
 ### 3.2.6 注入回流防护
 

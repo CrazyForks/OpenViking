@@ -6,9 +6,9 @@ OpenViking 提供多种检索方法，包括简单的向量相似度搜索、带
 
 | 方面 | find | search |
 |------|------|--------|
-| 意图分析 | 否 | 是 |
-| 会话上下文 | 否 | 是 |
-| 查询扩展 | 否 | 是 |
+| 意图分析 | 否 | 有会话内容且 `retrieval.enable_intent=true` 时执行 |
+| 会话上下文 | 不使用 | 可选 |
+| 查询扩展 | 否 | 意图分析启用且有会话内容时执行 |
 | 默认结果数 | 10 | 10 |
 | 使用场景 | 简单查询 | 对话式搜索 |
 
@@ -369,7 +369,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 
 #### 1. API 实现介绍
 
-`search()` 方法在 `find()` 的基础上增加了会话上下文理解和意图分析能力。它可以根据历史对话更好地理解用户查询意图，执行查询扩展，提供更相关的搜索结果。
+`search()` 在 `find()` 的分层检索流程上增加可选的会话查询规划。仅当 `retrieval.enable_intent=true` 且会话有摘要或消息时，才调用 LLM 分析意图；未传会话、会话为空或关闭意图分析时，使用原始查询。图片查询跳过会话规划。
 
 **处理流程**：
 1. 加载会话上下文（如果提供了 session_id）
@@ -433,7 +433,7 @@ curl -X POST http://localhost:1933/api/v1/search/search \
     }'
 ```
 
-**不带会话的搜索（仍会进行意图分析）**
+**不带会话的搜索（使用原始查询）**
 
 ```bash
 curl -X POST http://localhost:1933/api/v1/search/search \
@@ -496,7 +496,7 @@ for context in results.get("resources", []):
 
 ```python
 # search 也可以在没有会话的情况下使用
-# 它仍然会对查询进行意图分析
+# 没有会话内容时使用原始查询，不调用意图分析
 results = client.search(
     query="how to implement OAuth 2.0 authorization code flow"
 )
@@ -546,7 +546,7 @@ openviking search "best practices" --context-type skill
 # 带时间过滤的搜索
 openviking search "watch vs scheduled" --after 2026-03-15 --before 2026-03-20
 
-# 不带会话的搜索（仍进行意图分析）
+# 不带会话的搜索（使用原始查询）
 openviking search "how to implement OAuth 2.0 authorization code flow"
 
 # 限定层级范围（仅 L0）

@@ -6,7 +6,7 @@
 
 ## 安装
 
-Claude Code 和 Codex 共用同一个安装脚本。它会依次询问界面语言（English/中文）、要安装的 harness、下载源和 OpenViking 凭据；所有步骤幂等，重复运行安全。
+Claude Code 和 Codex 共用同一个安装脚本。它会依次询问界面语言（English/中文）、要安装的 harness、下载源和 OpenViking 凭据；安装步骤支持重复执行。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)
@@ -22,12 +22,12 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 现在不再需要任何 shell wrapper：插件自带的 stdio MCP 代理会在运行时读取 `~/.openviking/ovcli.conf`（或 `OPENVIKING_*` 环境变量），与 hooks 使用同一套配置链。
 
-使用一段时间后，即便在全新的对话中提及过往的话题，Claude Code 也能准确回忆起来。
+可以在新会话中询问已保存的信息，验证跨会话召回是否生效。
 
 <details>
 <summary><b>手动安装</b></summary>
 
-如果您倾向于手动安装：
+如果你倾向于手动安装：
 
 1. **配置连接** — 手写 `~/.openviking/ovcli.conf`（`url`、`api_key`，可选 `account`/`user`），或装完后运行插件自带向导 `node <插件目录>/scripts/setup.mjs`。
 
@@ -44,7 +44,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 > 尚未创建 `ovcli.conf`？请先按照 [部署指南 → CLI](../guides/03-deployment.md#cli) 的说明进行配置。
 >
-> 使用纯本地模式（`http://127.0.0.1:1933`，无鉴权）？您可以跳过第 1 步，插件将直接使用本地默认值。
+> 使用默认本地服务（`http://127.0.0.1:1933`，无鉴权）且没有其他连接配置时，可以跳过第 1 步。
 >
 > 使用 Claude Code < 2.0 版本？安装脚本会自动识别并回退到 `claude mcp add` + hooks 合并；详见 [插件 README 的兼容模式章节](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README_CN.md#兼容模式claude-code--20)。
 
@@ -55,7 +55,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 启动 `claude`，随后：
 
 - 输入 `/plugins` → 在 Installed 列表中应能找到 **openviking-memory**（其子项 **openviking** MCP 应显示为已连接状态）。
-- 输入 `/mcp` → OpenViking 对应的条目应显示您的服务器 URL 及有效的认证信息。
+- 输入 `/mcp` → OpenViking 对应的条目应显示你的服务器 URL 及有效的认证信息。
 - 输入 `/openviking-memory:ov` → 查看服务器状态、身份信息、召回/注入的统计数据以及功能开关状态。
 
 若插件未正常工作，可设置环境变量 `OPENVIKING_DEBUG=1`，并查看日志文件 `~/.openviking/logs/cc-hooks.log` 以排查问题。
@@ -98,11 +98,11 @@ skill 清单就是 `<available-skills>` 块，列出存放在 OpenViking 中的 
 | `OPENVIKING_MEMORY_ENABLED` | (auto) | 强制开启或关闭插件 |
 | `OPENVIKING_DEBUG` | `false` | 将调试日志输出至 `~/.openviking/logs/cc-hooks.log` |
 
-这些旋钮大多也可以写在 `ovcli.conf` 的 `plugin` 段下——见[插件配置](../configuration/02-client.md#插件配置)。两个过滤器 knob 尤其建议写在那里，用 JSON 数组，因为环境变量形式会按逗号切分。
+这些配置大多也可以写在 `ovcli.conf` 的 `plugin` 段下——见[插件配置](../configuration/02-client.md#插件配置)。两个过滤器 尤其建议写在那里，用 JSON 数组，因为环境变量形式会按逗号切分。
 
 如果更看重召回响应速度，请参阅[低延迟召回](./01-overview.md#低延迟召回)，其中说明了如何通过环境变量或 `ovcli.conf` 关闭查询扩展与结果压缩。
 
-在多租户场景下，请额外配置 `OPENVIKING_ACCOUNT` 和 `OPENVIKING_USER`。完整的环境变量列表请参阅 [插件 README](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README.md#configuration)。
+使用 user/admin key 时，服务端从密钥解析身份；仅在 trusted 模式下按管理员提供的信息设置 `OPENVIKING_ACCOUNT` 和 `OPENVIKING_USER`。完整的环境变量列表请参阅 [插件 README](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README.md#configuration)。
 
 </details>
 

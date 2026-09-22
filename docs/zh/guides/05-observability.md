@@ -109,7 +109,7 @@ curl http://localhost:1933/api/v1/debug/health \
 
 ### 响应时间
 
-每个 API 响应都包含一个 `X-Process-Time` 请求头，表示服务端处理时间（单位为秒）：
+每个 API 响应都包含一个 `X-Process-Time` 响应头，表示服务端处理时间（单位为秒）：
 
 ```bash
 curl -v http://localhost:1933/api/v1/fs/ls?uri=viking:// \

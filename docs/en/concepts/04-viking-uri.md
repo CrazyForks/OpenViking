@@ -18,7 +18,7 @@ viking://{scope}/{path}
 |-------|-------------|-----------|------------|
 | **resources** | Independent resources / objective knowledge | Long-term | Account global |
 | **user** | User-level data, including sessions | Long-term / session lifetime | Current user |
-| **agent** | Agent capabilities and configuration (skills, endpoints, tools, payments, etc.) | Long-term | Account global |
+| **agent** | Account-shared skills and Agent configuration; endpoint, tool, and payment directories are planned | Long-term | Account global |
 | **queue** | Processing queue | Temporary | Internal |
 | **temp** | Temporary files | During parsing | Internal |
 | **upload** | Temporary upload files | Temporary | Internal |
@@ -56,7 +56,7 @@ each caller.
 
 ## Initial Directory Structure
 
-Moving away from traditional flat database thinking, all context is organized as a filesystem. Agents no longer just find data through vector search, but can locate and browse data through deterministic paths and standard filesystem commands. Each context or directory is assigned a unique URI identifier string in the format viking://{scope}/{path}, allowing the system to precisely locate and access resources stored in different locations.
+Context is organized into directories. With a known URI, an agent can list a directory or read a file directly. Otherwise, it can search first and read the returned paths.
 
 ## File IDs
 
@@ -371,9 +371,8 @@ Each directory may contain special files:
 
 | File | Purpose |
 |------|---------|
-| `.abstract.md` | L0 abstract (~100 tokens) |
-| `.overview.md` | L1 overview (~2k tokens) |
-| `` | Related resources |
+| `.abstract.md` | L0 directory abstract (default body limit: 256 characters) |
+| `.overview.md` | L1 directory overview (default body limit: 4,000 characters) |
 | `.meta.json` | Metadata |
 
 ## Best Practices
@@ -406,10 +405,7 @@ ov skills add xxx -p viking://agent/skills/
 
 ### Resources Scope Constraint
 
-The `resources` scope is for objective knowledge only (documents, code, specifications, papers, etc.).
-Storing non-knowledge data in `viking://resources/` is prohibited, including but not limited to:
-tool configurations, communication endpoint definitions, payment configurations, skill definitions, etc.
-Such data should use the `viking://agent/` scope.
+Store reference documents, code, and specifications under `resources`. To make content discoverable and loadable as a Skill, install it through the skill API under `viking://~/skills/` or the shared `viking://agent/skills/`. Uploading `SKILL.md` as an ordinary resource does not install a skill.
 
 ## Related Documents
 

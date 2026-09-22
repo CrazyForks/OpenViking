@@ -13,7 +13,7 @@ OpenViking 是上下文数据库，FS 是源数据，VectorDB 是派生索引。
 1. **写互斥**：参与锁协议的不同 owner 不能同时取得冲突路径的锁
 2. **默认生效**：受保护的写操作默认加锁；普通读取和底层 mkdir 不自动加锁
 3. **锁即保护**：进入 LockContext 时加锁，退出时释放，没有 undo/journal/commit 语义
-4. **仅 session_memory 需要崩溃恢复**：通过持久化 `session_commit` 队列在进程崩溃后恢复 Phase 2
+4. **持久化任务恢复**：`session_commit` 队列恢复会话 Phase 2；资源派生处理由相应的持久化队列恢复
 5. **Queue 操作在锁外执行**：SemanticQueue/EmbeddingQueue 的 enqueue 是幂等的，失败可重试
 
 ## 架构
@@ -74,7 +74,7 @@ async with LockContext(lock_manager, [path], lock_mode="exact") as handle:
 `SessionCommitMsg` 写入持久化队列；进程重启后，QueueManager 会继续消费遗留的 `session_commit`
 任务并恢复 Phase 2。
 
-Memory 提取是幂等的，从同一个 archive 重新提取会得到相同结果。
+恢复使用已保存的 archive 和处理状态。记忆提取包含模型调用，不能假设重新执行会生成逐字相同的内容。
 
 ## 一致性问题与解决方案
 
@@ -502,7 +502,7 @@ Redis 配置：
 
 ### QueueFS 持久化
 
-路径锁机制依赖 QueueFS 使用 SQLite 后端，确保 enqueue 的任务在进程重启后可恢复。这是默认配置，无需手动设置。
+重启恢复要求队列内容已持久化。QueueFS 默认使用 SQLite；使用 cache 后端时，持久性取决于所配置的 Provider。memory 后端不保留进程退出后的任务。
 
 ## 相关文档
 

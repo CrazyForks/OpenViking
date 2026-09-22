@@ -18,7 +18,7 @@ viking://{scope}/{path}
 |--------|------|----------|--------|
 | **resources** | 独立资源/客观知识 | 长期 | account 全局 |
 | **user** | 用户级数据，包括 session | 长期 / 会话生命周期 | 当前用户 |
-| **agent** | agent 能力与配置（技能、端点、工具、支付等） | 长期 | account 全局 |
+| **agent** | 账户共享技能与 Agent 配置；端点、工具和支付目录为规划用途 | 长期 | account 全局 |
 | **queue** | 处理队列 | 临时 | 内部 |
 | **temp** | 临时文件 | 解析期间 | 内部 |
 | **upload** | 临时上传文件 | 临时 | 内部 |
@@ -48,7 +48,7 @@ viking://{scope}/{path}
 
 ## 初始目录
 
-摒弃传统的扁平化数据库思维，将所有上下文组织为一套文件系统。Agent 不再仅是通过向量搜索来找数据，而是可以通过确定性的路径和标准文件系统指令来定位和浏览数据。每个上下文或目录分配唯一的 URI 标识字符串，格式为 viking://{scope}/{path}，让系统能精准定位并访问存储在不同位置的资源。
+上下文按目录组织。已知 URI 时，Agent 可以直接列目录、读取文件；未知路径时，可先检索再读取。
 
 ## 文件 ID
 
@@ -352,9 +352,8 @@ overview = await client.overview(uri="viking://resources/docs/")
 
 | 文件 | 用途 |
 |------|------|
-| `.abstract.md` | L0 摘要（~100 tokens） |
-| `.overview.md` | L1 概览（~2k tokens） |
-| `` | 相关资源 |
+| `.abstract.md` | L0 目录摘要（默认正文上限 256 字符） |
+| `.overview.md` | L1 目录概览（默认正文上限 4,000 字符） |
 | `.meta.json` | 元数据 |
 
 ## 最佳实践
@@ -387,10 +386,7 @@ ov skills add xxx -p viking://agent/skills/
 
 ### resources 作用域约束
 
-`resources` 作用域仅用于存储客观知识类数据（文档、代码、规范、论文等）。
-禁止在 `viking://resources/` 下存储非知识类数据，包括但不限于：
-工具配置、通信端点定义、支付配置、技能定义等。
-此类数据应使用 `viking://agent/` 作用域。
+将参考文档、代码、规范等资料放在 `resources`。需要作为 Skill 发现和加载的内容，应通过技能接口安装到 `viking://~/skills/` 或共享的 `viking://agent/skills/`；仅把 `SKILL.md` 当作普通资源上传，不等于安装技能。
 
 ## 相关文档
 

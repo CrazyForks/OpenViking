@@ -11,6 +11,15 @@
 - 外部工具和服务引用官方文档，只介绍当前任务需要的配置，不复制整套手册。
 - 提交前在 `docs/` 运行 `npm run check:docs`、`npm run check:api` 和 `npm run docs:build`。自动检查覆盖结构与示例，不能替代事实核验和翻译 review。
 
+## 文案标准
+
+- 先说明接口做什么、适用条件和调用结果，再解释实现。读者应能据此决定下一步。
+- 用具体动作和对象代替“赋能”“闭环”“智能升级”等空泛表述。术语保留准确含义，不为缩短句子省掉前提。
+- 不写无依据的效果、性能、费用或安全承诺。默认值、支持范围和失败行为以当前实现为准；示例值明确标注。
+- 区分已提交与已完成、可选与必需、当前能力与规划。总览、参数表、示例和排障说明应一致。
+- 中文按自然语序写，英文按英文习惯写；两者保持相同的事实和限制，不逐词硬译。
+- 保留有用的章节链接；改标题时检查旧锚点，必要时添加兼容锚点。
+
 ## 目录结构
 
 API 文档按模块组织，每个模块一个文件，使用两位数字序号前缀。
@@ -244,7 +253,7 @@ print(client.get_task(result["task_id"]))
 **CLI**
 
 ```bash
-openviking add-resource ./documents/guide.md --reason "User guide documentation"
+ov add-resource ./documents/guide.md --reason "User guide documentation"
 ```
 
 **响应示例**
@@ -253,12 +262,10 @@ openviking add-resource ./documents/guide.md --reason "User guide documentation"
 {
   "status": "ok",
   "result": {
-    "status": "success",
-    "root_uri": "viking://resources/documents/guide.md",
-    "task_id": "uuid-xxx",
-    "errors": []
-  },
-  "time": 0.123
+    "status": "accepted",
+    "root_uri": "viking://resources/guide",
+    "task_id": "uuid-xxx"
+  }
 }
 ```
 

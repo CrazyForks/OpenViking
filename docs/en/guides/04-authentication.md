@@ -2,17 +2,17 @@
 
 OpenViking Server supports multiple built-in authentication modes with role-based access control. The mode is auto-detected if not explicitly configured. In addition, custom authentication plugins can be registered to support arbitrary identity sources.
 
-> **Recommended:** API Key mode is the most common and secure default choice, suitable for most deployment scenarios.
+Use API Key mode when OpenViking should manage credentials, OIDC or LDAP for an existing identity service, and Trusted mode behind a gateway that validates callers.
 
 ## Authentication Modes Overview
 
-| Mode | `server.auth_mode` | Identity Source | Typical Use | Recommendation |
-|------|--------------------|-----------------|-------------|----------------|
-| **API Key Mode** ⭐ | `api_key` | API key. Data ownership is resolved from the user/admin key. | Standard multi-tenant deployment | ⭐⭐⭐⭐⭐ |
-| **OIDC Mode** | `oidc` | JWT tokens from external identity providers | Enterprise SSO integration with Okta/Auth0/Keycloak | ⭐⭐⭐⭐ |
-| **LDAP Mode** | `ldap` | Enterprise LDAP/AD directory services | Integrate with existing enterprise user directory | ⭐⭐⭐⭐ |
-| **Trusted Mode** | `trusted` | `X-OpenViking-Account` / `X-OpenViking-User`, plus `root_api_key` on non-localhost deployments. Role is looked up from APIKeyManager if the user exists. | Behind a trusted gateway or internal network boundary | ⭐⭐⭐ |
-| **Dev Mode** | `dev` | No authentication, always ROOT | Local development only | ⭐⭐ |
+| Mode | `server.auth_mode` | Identity Source | Typical Use |
+|------|--------------------|-----------------|-------------|
+| **API Key Mode** | `api_key` | API key. Data ownership is resolved from the user/admin key. | Standard multi-tenant deployment |
+| **OIDC Mode** | `oidc` | JWT tokens from external identity providers | Enterprise SSO integration with Okta/Auth0/Keycloak |
+| **LDAP Mode** | `ldap` | Enterprise LDAP/AD directory services | Integrate with existing enterprise user directory |
+| **Trusted Mode** | `trusted` | `X-OpenViking-Account` / `X-OpenViking-User`, plus `root_api_key` on non-localhost deployments. Role is looked up from APIKeyManager if the user exists. | Behind a trusted gateway or internal network boundary |
+| **Dev Mode** | `dev` | No authentication, always ROOT | Local development only |
 
 If `auth_mode` is not explicitly configured:
 - If `root_api_key` is set (non-empty): auto-selects `api_key` mode
@@ -22,7 +22,7 @@ If `auth_mode` is not explicitly configured:
 
 ## Quick Start: API Key Mode (Recommended)
 
-API Key mode is the most secure and easiest default choice.
+API Key mode uses a root key for account administration and user/admin keys for tenant data access.
 
 ### Configuration
 
@@ -745,8 +745,7 @@ Edit `~/.openviking/ovcli.conf` to add LDAP authentication settings:
     "url": "http://localhost:1933",
     "auth_mode": "ldap",
     "ldap_username": "alice",
-    "ldap_password": "password123",
-    "account": "default"
+    "ldap_password": "your-ldap-password"
 }
 ```
 
@@ -757,12 +756,11 @@ Edit `~/.openviking/ovcli.conf` to add LDAP authentication settings:
 | `url` | Yes | OpenViking server URL |
 | `auth_mode` | Yes | Authentication mode, set to `"ldap"` to enable LDAP |
 | `ldap_username` | Yes | LDAP username (UID) |
-| `ldap_password` | No | LDAP password (omit to skip password in CLI) |
-| `account` | No | OpenViking account ID (defaults to `"default"`) |
+| `ldap_password` | Yes | LDAP password; without it the CLI does not send Basic Auth |
 
 #### 2. Mixed Configuration
 
-You can configure some settings in the file and override others with environment variables (e.g. `OPENVIKING_URL`, `OPENVIKING_ACCOUNT`).
+Use `OPENVIKING_CLI_CONFIG_FILE` to select another complete configuration file. The `ov` CLI does not use `OPENVIKING_URL` or `OPENVIKING_ACCOUNT` as connection overrides; those variables configure Agent plugins.
 
 ### Using the CLI
 
@@ -795,7 +793,7 @@ You can switch between LDAP and API Key authentication by editing `~/.openviking
 
 ### Security Recommendations
 
-1. **Avoid storing plaintext passwords**: Prefer environment variables or secret managers over hardcoding in config files
+1. **Restrict config-file access**: The current CLI reads the LDAP password from its config file. Limit read access to the current user and keep the file out of repositories and shared logs
 2. **Use HTTPS**: Always use HTTPS in production environments
 3. **Least privilege**: Use regular user accounts for daily operations, admin accounts only for management tasks
 4. **Rotate passwords regularly**: Follow your organization's password security policy
@@ -804,7 +802,7 @@ You can switch between LDAP and API Key authentication by editing `~/.openviking
 
 **"Missing LDAP credentials" error:**
 - Check that `auth_mode` is set to `"ldap"`
-- Verify `username` and `password` are configured correctly
+- Verify `ldap_username` and `ldap_password` are configured correctly
 
 **"LDAP authentication failed" error:**
 - Verify LDAP username and password are correct
@@ -822,7 +820,7 @@ You can switch between LDAP and API Key authentication by editing `~/.openviking
 RUST_LOG=debug ov ls viking://
 
 # Check configuration
-ov doctor
+ov config validate
 ```
 
 ---

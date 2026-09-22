@@ -83,7 +83,7 @@ Source Input -> Parse -> Resource Tree Build -> Persistence -> Semantic Processi
 - Uses `UnifiedResourceProcessor` to parse content based on resource type
 - Supports multiple formats: documents (PDF/Markdown/Word), spreadsheets (Excel/PPT), code, media files, etc.
 - Parsed results are written to a temporary VikingFS directory
-- Media files have descriptions generated via VLM (Vision Language Model)
+- Media parsers validate and store original files; VLM descriptions are generated later during semantic processing when the corresponding configuration is enabled
 
 #### Stage 2: Resource Tree Build (TreeBuilder)
 - `TreeBuilder.finalize_from_temp()` scans the temporary directory structure

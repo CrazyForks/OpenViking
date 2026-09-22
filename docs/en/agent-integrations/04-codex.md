@@ -1,12 +1,12 @@
 # Codex Memory Plugin
 
-Equip [Codex](https://developers.openai.com/codex) with persistent memory across sessions. Install it once, and your OpenViking profile, memory index, and skill catalog are loaded at session start, relevant memories are recalled with every prompt, new turns are captured after each response, and sessions are committed before compaction. The plugin also connects Codex to OpenViking's `/mcp` endpoint, enabling the model to call tools such as `find`, `search`, `read`, and `remember` directly.
+Give [Codex](https://developers.openai.com/codex) cross-session memory. Hooks handle automatic recall, capture, and session commits; MCP tools let the model search, read, and manage memories.
 
 Source: [examples/codex-memory-plugin](https://github.com/volcengine/OpenViking/tree/main/examples/codex-memory-plugin) | [Blog: Motivation & demo](https://blog.openviking.ai/post/openviking-coding-agent/)
 
 ## Install
 
-Claude Code and Codex share one installer. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; every step is idempotent.
+Claude Code and Codex share one installer. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; the installation steps support repeated runs.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)
@@ -80,7 +80,18 @@ For TraeCode CLI 2.0, launch `trae-cli` and use `trae-cli plugin list` to confir
 
 ## How it works
 
-The plugin integrates with Codex's lifecycle by hooking into key events. On `SessionStart` (`startup`, `clear`, or `resume`), it injects `profile.md`, URI and abstract indexes for `preferences/` and `entities/`, and an `<available-skills>` catalog of your OpenViking skills, all through the same shared, CJK-aware profile builder used by the other coding-agent integrations. It then searches OpenViking and injects relevant memories before every prompt (`UserPromptSubmit`), appends new turns to the session after each response (`Stop`), commits the full transcript before compaction (`PreCompact`), and commits the session when the thread shuts down (`SessionEnd`) so memory extraction processes the entire conversation. Before a shell command runs (`PreToolUse` on `Bash`), it looks for a `viking://` URI in the command: the command still runs, and the model gets a notice suggesting the OpenViking MCP tools, which it can ignore when the URI is intentional data such as an `ov` argument. Upon starting a fresh session, it also sweeps any orphaned sessions left by previous runs. A resumed session may combine the fixed profile block with its latest archive digest.
+The plugin handles memory at these Codex lifecycle events:
+
+| Codex event | Plugin behavior |
+| --- | --- |
+| `SessionStart` (`startup`, `clear`, `resume`) | Inject `profile.md`, URI and abstract indexes for `preferences/` and `entities/`, and the `<available-skills>` catalog. It uses the shared CJK-aware profile builder; resumed sessions may also receive the latest archive digest. |
+| `UserPromptSubmit` | Retrieve and inject memories relevant to the current prompt. |
+| `Stop` | Append new conversation turns to the OpenViking session. |
+| `PreCompact` | Capture remaining turns and commit the complete transcript before compaction. |
+| `SessionEnd` | Commit the session on graceful exit for subsequent memory extraction. |
+| `PreToolUse` (`Bash`) | Detect `viking://` URIs in shell commands and suggest the OpenViking MCP tools. The command still runs; the model can ignore the notice when the URI is intentional data, such as an `ov` argument. |
+
+Starting a new session also sweeps orphaned sessions from earlier runs once their idle TTL has expired.
 
 > **Known limitation**: `SessionEnd` requires Codex 0.145 or newer, and it only fires on a graceful exit (`/quit`, `/exit`, double `Ctrl-C`, EOF, end of a `codex exec` run). It does not fire on `SIGTERM`, a closed terminal, `kill -9`, or a crash, and it is deferred when the TUI runs against a `codex app-server` daemon. Those sessions — and every session on Codex older than 0.145, and any TraeCode CLI build without it — are recovered by the idle-TTL sweep (30 minutes) at the next `SessionStart`.
 

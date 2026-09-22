@@ -11,6 +11,15 @@ This document defines the unified structure and writing conventions for API modu
 - Link to official documentation for external tools and services. Describe only the setup needed here instead of duplicating their manuals.
 - Before submitting, run `npm run check:docs`, `npm run check:api`, and `npm run docs:build` from `docs/`. Automated checks cover structure and examples, not factual correctness or translation quality.
 
+## Editorial Standards
+
+- Start with what the API does, its prerequisites, and the result. Explain implementation details after the reader can decide what to do next.
+- Use concrete actions and objects. Avoid vague claims about intelligence, transformation, or seamless workflows, and preserve conditions when shortening prose.
+- Do not promise unmeasured quality, performance, costs, or security. Verify defaults, supported behavior, and failures against the implementation; label illustrative values.
+- Distinguish accepted from completed, optional from required, and implemented from planned. Keep the overview, parameter tables, examples, and troubleshooting consistent.
+- Write natural prose in each language while preserving the same facts and limits; avoid word-for-word translation.
+- Preserve useful section links. Check old anchors when changing headings and add compatibility anchors where needed.
+
 ## Directory Structure
 
 API documentation is organized by module, with one file per module, using a two-digit numerical prefix.
@@ -250,7 +259,7 @@ print(client.get_task(result["task_id"]))
 **CLI**
 
 ```bash
-openviking add-resource ./documents/guide.md --reason "User guide documentation"
+ov add-resource ./documents/guide.md --reason "User guide documentation"
 ```
 
 **Response Example**
@@ -259,12 +268,10 @@ openviking add-resource ./documents/guide.md --reason "User guide documentation"
 {
   "status": "ok",
   "result": {
-    "status": "success",
-    "root_uri": "viking://resources/documents/guide.md",
-    "task_id": "uuid-xxx",
-    "errors": []
-  },
-  "time": 0.123
+    "status": "accepted",
+    "root_uri": "viking://resources/guide",
+    "task_id": "uuid-xxx"
+  }
 }
 ```
 

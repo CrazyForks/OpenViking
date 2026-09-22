@@ -97,14 +97,12 @@ const results = await client.search("部署文档", {
 export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 ```
 
-配置文件示例：
+使用 user/admin key 的配置文件示例：
 
 ```json
 {
   "url": "http://localhost:1933",
-  "api_key": "your-key",
-  "account": "acme",
-  "user": "alice"
+  "api_key": "your-user-or-admin-key"
 }
 ```
 
@@ -114,8 +112,8 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 |------|------|--------|
 | `url` | 服务端地址 | （必填） |
 | `api_key` | API Key | `null`（无认证） |
-| `account` | 租户级请求的默认账户请求头 | `null` |
-| `user` | 租户级请求的默认用户请求头 | `null` |
+| `account` | 仅 trusted 模式使用的账户请求头 | `null` |
+| `user` | 仅 trusted 模式使用的用户请求头 | `null` |
 | `timeout` | HTTP 请求超时时间（秒） | `60.0` |
 | `output` | 默认输出格式：`"table"` 或 `"json"` | `"table"` |
 
@@ -161,7 +159,7 @@ curl http://localhost:1933/api/v1/fs/ls?uri=viking:// \
 
 #### CLI 模式
 
-OpenViking CLI 的命令是 `ov`（通过 `npm install -g @openviking/cli` 安装），连接到 OpenViking 服务端，将所有操作暴露为 Shell 命令。CLI 同样从 `ovcli.conf` 读取连接信息（与 HTTP 客户端共享）。
+OpenViking CLI 的命令是 `ov`（通过 `npm install -g @openviking/cli` 安装），连接到 OpenViking 服务端，提供常用操作的 Shell 命令。CLI 同样从 `ovcli.conf` 读取连接信息（与 HTTP 客户端共享）。
 
 基本用法：
 
@@ -209,12 +207,12 @@ ov -o json ls viking://resources/
 
 - **Authorization Bearer** 请求头：`Authorization: Bearer your-key` （建议的方式）
 - **X-API-Key** 请求头：`X-API-Key: your-key`
-- 如果服务端未配置 API Key，则跳过认证。
+- 只有开发模式跳过认证；OIDC、LDAP 和 Trusted 等模式按各自配置解析身份。
 - `/health` 和 `/ready` 端点始终不需要认证。
 
 ## 响应格式
 
-所有 HTTP API 响应遵循统一格式：
+常规 JSON API 响应遵循以下格式；文件下载、SSE、Metrics 和 WebDAV 使用各接口说明的格式：
 
 ### 成功响应
 
@@ -236,8 +234,7 @@ ov -o json ls viking://resources/
   "error": {
     "code": "NOT_FOUND",
     "message": "Resource not found: viking://resources/nonexistent/"
-  },
-  "time": 0.01
+  }
 }
 ```
 
@@ -556,9 +553,11 @@ JSON 输出 - 错误：
 
 ---
 
-## 文档阅读计划
+<a id="文档阅读计划"></a>
 
-左侧导航按职责而不是按历史文件体积组织：
+## 按任务查找接口
+
+按操作类型选择对应文档：
 
 | 分组 | 适合查找的内容 |
 |------|----------------|

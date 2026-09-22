@@ -29,7 +29,7 @@ curl http://localhost:1933/health
 
 ### One-line installer (recommended)
 
-OpenCode shares the unified installer with Claude Code and Codex. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; every step is idempotent—re-running it is entirely safe.
+OpenCode shares the unified installer with Claude Code and Codex. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; the installation supports repeated runs.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh) --harness opencode

@@ -1,6 +1,6 @@
 # Snapshots (Multi-Version Management)
 
-On top of VikingFS, OpenViking provides Git-based multi-version management, called **Snapshots**. It saves an account's entire resource tree as a series of immutable commits, letting you walk history, compare versions, and restore the workspace to any past state.
+Snapshots save immutable versions of a selected file tree. Use `commit` to save a version, `log` to browse history, `show` to read an older file, and `restore` to recover saved content. Uncommitted or excluded files are outside the recovery scope; ACLs and vector indexes are not versioned.
 
 Snapshots are powered by [gitoxide](https://github.com/Byron/gitoxide) embedded in the Rust RAGFS layer, maintaining one logical Git repository per `account_id`. This is fully transparent to callers — you never touch a `.ovgit` directory, the object store, or ref internals.
 

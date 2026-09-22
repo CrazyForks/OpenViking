@@ -6,7 +6,7 @@ Source: [examples/claude-code-memory-plugin](https://github.com/volcengine/OpenV
 
 ## Install
 
-Claude Code and Codex share one installer. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; every step is idempotent—re-running it is entirely safe.
+Claude Code and Codex share one installer. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; the installation supports repeated runs.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)
@@ -22,7 +22,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 No shell wrapper is needed anymore: the plugin ships a stdio MCP proxy that reads `~/.openviking/ovcli.conf` (or `OPENVIKING_*` env vars) at runtime, same as the hooks.
 
-After using it for a while, try starting a new conversation and asking about something you mentioned earlier—it will remember.
+After a session has been captured and processed, start a new conversation and ask about a specific fact from it to check cross-session recall.
 
 <details>
 <summary><b>Manual setup</b></summary>
@@ -102,7 +102,7 @@ Most of these knobs can also live in `ovcli.conf` under `plugin` — see [Plugin
 
 If recall latency matters most, see [Low-latency recall](./01-overview.md#low-latency-recall) for the environment-variable and `ovcli.conf` settings that disable query expansion and result compression.
 
-For multi-tenant deployments, configure `OPENVIKING_ACCOUNT` and `OPENVIKING_USER`. The complete list of environment variables is available in the [plugin README](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README.md#configuration).
+With a user/admin key, the server derives identity from the key. Set `OPENVIKING_ACCOUNT` and `OPENVIKING_USER` only for trusted mode, using values supplied by your administrator. The complete list of environment variables is available in the [plugin README](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README.md#configuration).
 
 </details>
 

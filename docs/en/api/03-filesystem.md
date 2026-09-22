@@ -146,8 +146,7 @@ openviking glob "**/*.md" [--uri viking://resources/] [--simple] [--tags team=se
       "isDir": true,
       "uri": "viking://resources/docs/"
     }
-  ],
-  "time": 0.1
+  ]
 }
 ```
 
@@ -241,8 +240,7 @@ openviking tree viking://resources/my-project/
       "rel_path": "docs/api.md",
       "uri": "viking://resources/docs/api.md"
     }
-  ],
-  "time": 0.1
+  ]
 }
 ```
 
@@ -322,8 +320,7 @@ openviking stat viking://resources/my-project/docs
     "isLocked": false,
     "id": "a1b2c3d4e5f678901234567890abcdef",
     "uri": "viking://resources/docs/api.md"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -341,12 +338,11 @@ openviking stat viking://resources/my-project/docs
     "isLocked": false,
     "uri": "viking://resources/docs",
     "count": 42
-  },
-  "time": 0.1
+  }
 }
 ```
 
-The `isLocked` field reports whether the path is currently held by a path lock: the path itself has a valid lock (including an exact-path lock for the target), or any ancestor directory holds a TreeLock. Returns `false` when the LockManager is unavailable or the lookup fails, so callers can avoid attempting a write only to observe `ResourceBusyError`.
+The `isLocked` field reports whether the path is currently held by a path lock: the path itself has a valid lock (including an exact-path lock for the target), or any ancestor directory holds a TreeLock. It returns `false` when the LockManager is unavailable or the lookup fails. This is an advisory check, not a lock reservation: another writer may acquire a lock after the check, so writes must still handle `ResourceBusyError`.
 
 The `id` field (files only) is the deterministic vector record primary key in VikingDB, computed as `md5(f"{account_id}:{uri}")` for level 2 (regular file) records. This value matches the `id` field in the vector collection schema and can be used to cross-reference vector records without an additional lookup. The field is omitted for directories because a directory may have multiple vector records across semantic levels (L0 abstract, L1 overview). Because indexing is asynchronous, a newly returned ID might not be resolvable immediately; lookup by ID can also fail after its vector record is deleted. In either case, `stat(id)` returns `NOT_FOUND` with a reason indicating that the data may not have been indexed yet or may have been deleted.
 
@@ -524,8 +520,7 @@ openviking mkdir viking://resources/new-project/ --description "API docs directo
   "status": "ok",
   "result": {
     "uri": "viking://resources/new-project/"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -603,8 +598,7 @@ openviking rm viking://resources/old.md [--recursive]
   "status": "ok",
   "result": {
     "uri": "viking://resources/docs/old.md"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -616,8 +610,7 @@ openviking rm viking://resources/old.md [--recursive]
   "result": {
     "uri": "viking://resources/old-project/",
     "estimated_deleted_count": 42
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -784,8 +777,7 @@ openviking mv viking://resources/old-name/ viking://resources/new-name/
   "result": {
     "from": "viking://resources/old-name/",
     "to": "viking://resources/new-name/"
-  },
-  "time": 0.1
+  }
 }
 ```
 

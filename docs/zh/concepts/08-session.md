@@ -100,11 +100,11 @@ class Message:
 
 commit() 分两阶段执行：
 
-**Phase 1（同步，立即完成）**：
-1. 递增 compression_index
-2. 写入消息到归档目录（`messages.jsonl`）
-3. 清空当前消息列表
-4. 返回 `task_id`
+**Phase 1（请求内完成归档准备）**：
+1. 在路径锁保护下分配归档编号，划分归档消息和保留消息
+2. 写入归档消息（`messages.jsonl`），将后续处理加入持久化队列
+3. 更新当前消息列表；默认归档全部消息，也可通过提交参数保留最近的消息或轮次
+4. 返回 `task_id`，用于跟踪后台处理
 
 **Phase 2（异步后台）**：
 5. 生成结构化摘要（LLM）→ 写入 `.abstract.md` 和 `.overview.md`
@@ -166,7 +166,7 @@ LLM 去重决策 → candidate(skip/create/none) + item(merge/delete)
 
 ## 记忆变更记录
 
-每次 `session.commit()` 会在归档目录写入 `memory_diff.json`，记录本次提交的所有记忆变更，便于审计和回溯。
+提交后的后台处理会在归档目录写入 `memory_diff.json`，记录本次提交的记忆变更，便于审计和回溯。收到 `task_id` 时文件可能尚未生成，先按[会话 API](../api/05-sessions.md)查询任务完成状态。
 
 ```json
 {

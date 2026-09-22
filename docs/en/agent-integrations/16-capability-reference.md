@@ -251,7 +251,7 @@ For `openclaw`, the peer is derived from `peer_role`/`peer_prefix` (note that if
 
 - `OPENVIKING_COMMIT_TURN_THRESHOLD`: cursor only (`trae`, `trae-cn`, and `zcode` commit on every Stop and ignore this threshold).
 - `OPENVIKING_WRITE_PATH_ASYNC`: claude-code / codex / zcode.
-- Recall digest settings (`OPENVIKING_RECALL_COMPRESS`, `OPENVIKING_RECALL_REWRITE`, and their companions): claude-code / codex (note that the server-side `rewrite` parameter is available to all callers, see [§3.2.5](#_3-2-5-recall-digest)).
+- Recall digest: `OPENVIKING_RECALL_COMPRESS=server` is supported across memory integrations; local `client` mode is limited to Claude Code / Codex. See [§3.2.5](#_3-2-5-recall-digest) for modes and defaults.
 - `OPENVIKING_RECALL_DEDUP_TURNS`, `OPENVIKING_RECALL_QUERY_EXPANSION`, `OPENVIKING_PEER_SOURCE`, `OPENVIKING_SKILL_CATALOG`, `OPENVIKING_SKILL_CATALOG_TOKEN_BUDGET`, the workspace config files and the ovcli.conf `plugin` section: every harness that resolves through the shared loader — claude-code / codex / cursor / trae / trae-cn / zcode / opencode / dsh / pi. openclaw and hermes have configuration systems of their own.
 ## 3.2 Automatic recall and injection
 
@@ -275,9 +275,11 @@ On the server side, `session_id` handling diverges into two distinct execution p
 
 ### 3.2.2 Decision matrix
 
+The table shows default recall paths. Enabling server compression changes the request path as described in §3.2.5.
+
 | harness | trigger | query construction | session_id | server path | injection format / location | digest (client)* |
 |---|---|---|---|---|---|---|
-| claude-code | every `UserPromptSubmit` | prompt verbatim, trimmed | ✅ `cc-` | A (context face) | `<openviking-context>` → `hookSpecificOutput.additionalContext` | ✅ local/server (default auto, [§3.2.5](#_3-2-5-recall-digest)) |
+| claude-code | every `UserPromptSubmit` | prompt verbatim, trimmed | ✅ `cc-` | A (context face) | `<openviking-context>` → `hookSpecificOutput.additionalContext` | ✅ local (default auto, [§3.2.5](#_3-2-5-recall-digest)) |
 | codex / trae-cli | every `UserPromptSubmit` (hard 120s deadline for the whole hook) | prompt verbatim | ✅ `cx-` (derived deterministically, no state read) | A; second-level degradation searchScope lands in B | `<openviking-context source="auto-recall" format="digest">` | ✅ local `codex exec` ([§3.2.5](#_3-2-5-recall-digest)) |
 | cursor | `beforeSubmitPrompt` | prompt verbatim; deduped by event id and a 500ms window, reusing the cached block for the same promptHash | ✅ `cu-` | A | `additional_context` | ❌ |
 | trae / trae-cn | `UserPromptSubmit` | prompt with prior injection blocks stripped (reads `input.prompt` only) | ✅ `tr-`/`trcn-` | A | `additionalContext` | ❌ |
@@ -288,7 +290,7 @@ On the server side, `session_id` handling diverges into two distinct execution p
 | openclaw | context-engine transformContext assemble (7 passthrough gates) | plain text of the last user message, cleaned and cut to 4000 characters | ❌ (`/find` has no such field) | `/find` | prepended into the last user message as `<relevant-memories>` + `Source: openviking-auto-recall` | ❌ |
 | hermes | `prefetch` runs synchronously before every API call | raw user input, with two layers of skill scaffolding stripped; skipped under 5 characters | partial (only on the preferred `search/search` path, which lands in B; omitted when degrading to `/find`) | B / find | `<memory-context>` fenced block appended to the current user message (request body only, never written back to storage) | ❌ |
 
-\* As in [§1.2](#_1-2-automatic-hook-surface-driven-by-the-harness), "digest" in this column refers to client-side local compression, while the server digest is available to every caller ([§3.2.5](#_3-2-5-recall-digest)). The `ov` CLI has no automatic recall and is not included in this table.
+\* The digest column describes local compression. All memory integrations can opt into server compression through context-search rewrite; see [§3.2.5](#_3-2-5-recall-digest). The `ov` CLI does not provide automatic recall.
 
 ### 3.2.3 Profile / opening injection
 
@@ -342,11 +344,18 @@ On the server side, `session_id` handling diverges into two distinct execution p
 
 **Server implementation (available to all callers)**: The context retrieval face (covering REST `mode="context"` and legacy `/recall`) accepts a `rewrite` parameter—which can be `false`, `true`, or `"auto"` (defaulting to `false`)—alongside `rewrite_max_bullets` (defaulting to 6, with a range of 1-20). When enabled, the server leverages the `query_planner` model to rewrite recall results into a digest with citations. (If `rewrite=true` but `query_planner` is unconfigured, it falls back to the main `vlm`; `"auto"` only takes effect if `query_planner` is explicitly configured). The digest features an `OpenViking memory digest:` header followed by bullet points (`- `). Each bullet must be ≤500 characters and must cite a valid `viking://` URI from the hit set (bullets with missing or out-of-range citations are dropped). If the model determines there are no relevant memories, it emits a sentinel value and clears the injection block, ensuring that turn is not recorded in the deduplication ledger. This model call is protected by a fuse (`retrieval.recall_rewrite_timeout_s=30s`). On timeout, it falls back to providing the un-rewritten, rendered block (`rewrite.py:78-141`, `pipeline.py:122-130`, `search.py:195-196`).
 
-**Client-side status**:
+**Client configuration**: Automatic recall uses `OPENVIKING_RECALL_COMPRESS`, corresponding to `recallCompress` in shared configuration (`recallRewrite` remains a compatibility alias).
 
-- **claude-code**: `recallRewrite` supports four states: `off`, `client`, `server`, and `auto` (defaulting to **auto**). It initially probes for a local compressor via `claude --version` (caching the result for 7 days). If available, compression runs in a local subprocess: `claude -p --model sonnet --effort low --strict-mcp-config`. This subprocess has a 30s timeout, skips compression for inputs under 1500 characters, uses per-digest caching, and force-degrades its environment to prevent recursion. Subprocess failures fall back to the uncompressed block. URIs are snapped back to valid URIs using edit distance, and any irreparably broken bullets are dropped. If no local compressor is found, it sends `rewrite:"auto"`, deferring to the server. Notably, this is the *only* harness actively wired to the server-side rewrite.
-- **codex**: The boolean `recallCompress` defaults to **true** and relies entirely on local compression (it does not utilize the server rewrite). The model profile is read from `~/.codex/models_cache.json` (candidates range from `gpt-5.3-codex-spark` to `gpt-5.6-luna`, cached for 7 days). The execution command is `codex --sandbox read-only --ask-for-approval never exec --ephemeral --ignore-user-config --skip-git-repo-check --output-last-message <tmp> -`, with a 110s timeout. If a runtime failure occurs, compression is disabled for the remainder of the session and re-probed at the next `SessionStart`. Outputs are normalized and truncated to 4000 characters. When compression is turned off or fails, a deterministic `fallbackDigest` takes over.
-- **Other harnesses**: None of the other harnesses send the `rewrite` flag or compress locally; they simply inject the raw recall block returned by the server. Third-party applications directly calling the API can pass `rewrite` themselves to leverage the server digest.
+| Mode | Behavior |
+| --- | --- |
+| `off` | Do not request a digest. |
+| `server` | Send `rewrite: true` and prefer the server digest. |
+| `client` | Use a local compressor; supported by Claude Code and Codex. |
+| `auto` | Claude Code and Codex prefer an available local compressor, otherwise sending `rewrite: "auto"`. Integrations without a local compressor send `rewrite: "auto"` directly. |
+
+Claude Code and Codex default to `auto`; other integrations default to `off`. Claude Code, Codex, OpenCode, DSH, Pi, Cursor, TRAE, TRAE CN, ZCode, OpenClaw, and Hermes can all opt into server compression. Legacy boolean values `1` / `0` mean `auto` / `off`. A `stats.rewrite="no_relevant"` result suppresses injection; it must not fall back to the raw block.
+
+These settings affect automatic recall. Explicit MCP calls retain their caller-supplied arguments. Cloud compression requires context-search rewrite support on the server. See the [shared plugin documentation](https://github.com/volcengine/OpenViking/blob/main/examples/memory-plugin-shared/README.md#cloud-recall-compression) and individual integration pages for older-server fallbacks, compressor discovery, and host time budgets.
 
 ### 3.2.6 Injection backflow protection
 

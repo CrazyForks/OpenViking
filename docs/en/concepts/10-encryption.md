@@ -1,16 +1,16 @@
 # Data Encryption
 
-OpenViking provides transparent at-rest data encryption to ensure data security and isolation in multi-tenant environments.
+OpenViking supports at-rest encryption: it encrypts files before storage and decrypts them for authorized reads. Each account uses a separate account key.
 
 ## Overview
 
 ### Why Encryption
 
-In a multi-tenant architecture, resources, memories, and skills from different customers (accounts) are stored in a shared AGFS instance. Encryption ensures:
+Multiple accounts can share an AGFS instance. When encryption is enabled:
 
-- Even if an attacker gains AGFS disk access, they cannot read any customer's plaintext data
+- Encrypted files require the corresponding keys to decrypt; protect keys separately from data
 - Different accounts' data is encrypted with independent keys for tenant isolation
-- All encryption/decryption operations are centralized at the VikingFS layer; AGFS and external object stores only see ciphertext
+- VikingFS handles encryption and decryption during reads and writes; backend coverage depends on configuration
 
 ### Transparency
 
@@ -18,7 +18,7 @@ Encryption is completely transparent to users and developers:
 
 - **No client API changes**: Existing code works without modification
 - **Application layer unaware**: Read/write operations behave exactly like unencrypted
-- **Backward compatible**: Unencrypted old files can still be read normally
+- **Compatible with existing files**: Old plaintext files remain readable; enabling encryption does not encrypt them automatically
 
 ## Three-Layer Key Architecture
 
@@ -199,7 +199,7 @@ Encrypted files use a unified envelope format starting with the magic number `OV
 ```
 
 - If a file doesn't start with `OVE1`, it's treated as unencrypted and plaintext is returned directly
-- Backward compatible, old files don't need migration
+- Old files remain readable; protecting existing plaintext requires a separate migration or rewrite
 
 ## Multi-Tenant Isolation
 
@@ -207,7 +207,7 @@ Different accounts' data is encrypted with independent Account Keys:
 
 - Account A's key cannot decrypt Account B's files
 - Even with full AGFS access, data can't be read without the corresponding key
-- Tenant isolation is implemented at the key layer, not relying on storage permissions
+- Separate keys supplement tenant access controls; they do not replace authentication or storage permissions
 
 ## Configuration Example
 

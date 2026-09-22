@@ -1,14 +1,12 @@
 # MCP Integration Guide
 
-OpenViking server has a built-in [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint, allowing any MCP-compatible client to access its memory and resource capabilities over HTTP — no additional processes needed.
+OpenViking Server includes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint. Clients supporting Streamable HTTP can connect directly. Clients supporting only stdio can use the proxy in the [Agent Plugins package](../agent-integrations/15-agent-plugins.md).
 
 > **Quick setup?** See [MCP Clients](../agent-integrations/06-mcp-clients.md) for client configuration snippets and platform-specific notes. This page covers the full tool reference and advanced configuration.
 
 ## Prerequisites
 
-1. OpenViking installed (`pip install openviking` or from source)
-2. A valid configuration file (see [Configuration Guide](01-configuration.md))
-3. `openviking-server` running (see [Deployment Guide](03-deployment.md))
+Use a running OpenViking service and credentials for that service. For a new self-hosted deployment, follow the [Quick Start](../getting-started/02-quickstart.md) first. A managed or existing service does not require a local server installation.
 
 The MCP endpoint is at `http://<server>:1933/mcp`, sharing the same process and port as the REST API.
 
@@ -21,7 +19,8 @@ The following platforms have been successfully integrated with OpenViking MCP:
 | **Claude Code** | `type: http` |
 | **Trae** | Standard MCP config |
 | **Cursor** | Standard MCP config |
-| **ChatGPT & Codex** | Standard MCP config |
+| **ChatGPT** | Custom App with OAuth; see the [OAuth guide](11-oauth.md) |
+| **Codex** | MCP configuration in the [Codex integration](../agent-integrations/04-codex.md) |
 | **OpenCode** | Native OpenCode `mcp` config |
 | **Manus** | Standard MCP config |
 | **Claude.ai / Claude Desktop** | Native OAuth 2.1 (see [11-oauth](11-oauth.md)) |
@@ -39,7 +38,7 @@ No authentication is required in local dev mode (server bound to localhost).
 
 ### Generic MCP Clients
 
-Most MCP-compatible platforms (Trae, Manus, Cursor, etc.) use the standard `mcpServers` format:
+Clients accepting `mcpServers` and custom headers can use the following example. Check the client documentation for its field names and transport settings:
 
 ```json
 {
@@ -109,12 +108,11 @@ OpenViking ships a native OAuth 2.1 implementation (DCR + PKCE + opaque
 tokens, backed by SQLite, with a Studio consent screen for authorization) so
 no external proxy is needed.
 
-If you already have HTTPS configured, just connect to `https://your-server.com/mcp` — the client will walk you through the authorization flow automatically.
+Enable `oauth.enabled` on the server and configure HTTPS as described in the OAuth guide. Then connect the client to `https://your-server.com/mcp` and complete authorization in the browser.
 
 **See the [OAuth 2.1 Guide](11-oauth.md)** and **[Public Access Guide](12-public-access.md)** for:
 
-- End-to-end flow (device-flow style: page displays a 6-character code,
-  user confirms in the OpenViking console)
+- Studio consent flow and the optional 6-character-code fallback for cross-device authorization
 - HTTP (local) and HTTPS (production) deployment, including Caddy and nginx
   reverse-proxy templates plus a docker-compose example
 - Connecting Claude.ai / Claude Desktop step by step
@@ -129,7 +127,7 @@ If you already have HTTPS configured, just connect to `https://your-server.com/m
 
 ## Available MCP Tools
 
-Once connected, OpenViking exposes 16 tools:
+The built-in MCP tools are listed below. Use the connected server's `tools/list` response to determine which tools are available:
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
@@ -219,9 +217,9 @@ curl http://localhost:1933/health
 
 ### Authentication errors
 
-**Likely cause:** API key mismatch between client config and server config.
+**Likely cause:** The client key is invalid, expired, or not valid for tenant data access.
 
-**Fix:** Ensure the API key in your MCP client configuration matches the one in your OpenViking server configuration. See [Authentication Guide](04-authentication.md).
+**Fix:** Use a valid user/admin key for the target account. In `api_key` mode, root keys are reserved for administration. See [Authentication Guide](04-authentication.md).
 
 ## References
 

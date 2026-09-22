@@ -178,10 +178,11 @@ claude mcp add --transport http openviking https://my.ov/mcp \
 
 如果你想让 Claude Code 走 OAuth，体验和 Claude.ai 一致。
 
-### ChatGPT (Codex / Plus / Enterprise)
+<a id="chatgpt-codex-plus-enterprise"></a>
 
-Settings → Beta features → Custom Connectors。输入 MCP URL，ChatGPT 通过
-`/.well-known/...` 文档自动发现 OAuth 端点，走相同的 authorize → token 流程。
+### ChatGPT
+
+在 ChatGPT 中通过开发者模式创建自定义 App，填入服务的 MCP URL，并完成浏览器中的 OAuth 授权。可用入口和管理权限因套餐与工作区设置而异，按 [OpenAI 官方接入说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)操作。Codex 的插件与 MCP 配置见 [Codex 集成](../agent-integrations/04-codex.md)。
 
 ### Cursor
 

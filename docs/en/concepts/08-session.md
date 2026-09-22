@@ -100,11 +100,11 @@ class Message:
 
 commit() executes in two phases:
 
-**Phase 1 (synchronous, returns immediately)**:
-1. Increment compression_index
-2. Write messages to archive directory (`messages.jsonl`)
-3. Clear current messages list
-4. Return `task_id`
+**Phase 1 (archive preparation within the request)**:
+1. Allocate the archive number and split archived and retained messages under a path lock
+2. Persist archive messages (`messages.jsonl`) and enqueue processing in the durable queue
+3. Update the live message list; default commits archive all messages, while retention parameters can keep recent messages or turns
+4. Return `task_id` for tracking background processing
 
 **Phase 2 (asynchronous background)**:
 5. Generate structured summary (LLM) → write `.abstract.md` and `.overview.md`
@@ -166,7 +166,7 @@ Write to AGFS → Vectorize
 
 ## Memory Diff
 
-Each `session.commit()` writes a `memory_diff.json` to the archive directory, recording all memory changes from that commit for auditing and rollback.
+Background processing writes `memory_diff.json` to the archive directory, recording memory changes for auditing and review. It may not exist when `task_id` is returned; check task completion as described in the [Sessions API](../api/05-sessions.md).
 
 ```json
 {

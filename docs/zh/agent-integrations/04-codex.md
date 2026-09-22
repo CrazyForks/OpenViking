@@ -1,12 +1,12 @@
 # Codex 记忆插件
 
-本插件旨在为 [Codex](https://developers.openai.com/codex) 提供持久化的跨会话（session）记忆功能。只需安装一次，即可实现：在会话开始时加载 OpenViking profile、记忆索引和 skill 清单，在每次用户输入前自动召回相关记忆，在每轮对话结束后进行增量捕获，并在上下文压缩（compaction）前将完整记录提交给记忆抽取器。同时，该插件将 Codex 连接至 OpenViking 的 `/mcp` 端点，使模型能够直接调用 `find`、`search`、`read`、`remember` 等工具来主动管理记忆。
+为 [Codex](https://developers.openai.com/codex) 提供跨会话记忆。插件通过 hooks 自动召回、捕获和提交对话，通过 MCP 提供检索、读取和记忆管理工具。
 
 源码：[examples/codex-memory-plugin](https://github.com/volcengine/OpenViking/tree/main/examples/codex-memory-plugin) | [博客：动机与效果展示](https://blog.openviking.ai/post/openviking-coding-agent/)
 
 ## 安装
 
-Claude Code 和 Codex 共用同一个安装脚本。它会依次询问界面语言（English/中文）、要安装的 harness、下载源和 OpenViking 凭据；所有步骤幂等，可安全地重复执行。
+Claude Code 和 Codex 共用同一个安装脚本。它会依次询问界面语言（English/中文）、要安装的 harness、下载源和 OpenViking 凭据；安装步骤支持重复执行。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)
@@ -79,7 +79,18 @@ TraeCode CLI 2.0 用户启动 `trae-cli`，并可用 `trae-cli plugin list` 确�
 
 ## 工作原理
 
-本插件深度挂载于 Codex 的生命周期之中：在 `SessionStart`（`startup`、`clear` 或 `resume`）阶段，它会复用其他 coding-agent 集成共用的 CJK-aware profile 构建逻辑，注入 `profile.md`、`preferences/` 与 `entities/` 的 URI 和摘要索引，以及列出你的 OpenViking skill 的 `<available-skills>` 清单；在每次用户输入前，它会搜索 OpenViking 并注入相关的记忆（触发 `UserPromptSubmit`）；在每轮对话结束后，会将新的对话追加至当前会话（触发 `Stop`）；在上下文压缩前，补齐并提交（commit）完整的对话记录（触发 `PreCompact`）；在线程正常退出时提交整段会话（触发 `SessionEnd`），以确保记忆抽取器能够在完整的上下文环境中运行。shell 命令执行前（`Bash` 上的 `PreToolUse`），插件会检查命令里是否带 `viking://` URI：命令照常执行，模型会收到一条提示，建议改用 OpenViking MCP 工具；如果该 URI 是有意传入的数据（例如 `ov` 命令参数），模型可以忽略这条提示。此外，在启动新会话时，插件还会清扫前次运行遗留的孤儿会话（orphan session）。恢复已有会话时，固定 profile 背景还会与最新的 archive digest 合并注入。
+插件按以下事件处理记忆：
+
+| Codex 事件 | 插件行为 |
+| --- | --- |
+| `SessionStart`（`startup`、`clear`、`resume`） | 注入 `profile.md`、`preferences/` 和 `entities/` 的 URI 与摘要索引，以及 `<available-skills>` 清单。复用支持中日韩文本的公共 profile 构建逻辑；恢复会话时还可注入最新 archive digest。 |
+| `UserPromptSubmit` | 搜索并注入与当前输入相关的记忆。 |
+| `Stop` | 将新增对话追加到 OpenViking 会话。 |
+| `PreCompact` | 补齐并提交压缩前的完整对话记录。 |
+| `SessionEnd` | 正常退出时提交会话，触发后续记忆提取。 |
+| `PreToolUse`（`Bash`） | 检查命令中的 `viking://` URI，并提示模型使用 OpenViking MCP 工具。命令仍会执行；URI 是 `ov` 参数等有意传入的数据时，可以忽略提示。 |
+
+新会话启动时还会清理上次运行遗留、已超过闲置 TTL 的孤儿会话。
 
 > **已知局限**：`SessionEnd` 需要 Codex 0.145 及以上版本，且只在正常退出时触发（`/quit`、`/exit`、连按两次 `Ctrl-C`、EOF、`codex exec` 运行结束）。`SIGTERM`、直接关闭终端、`kill -9` 或崩溃都不会触发；当 TUI 挂在 `codex app-server` 守护进程上时，该事件会被延后。这些会话——以及 Codex 低于 0.145 的所有会话（以及没有该事件的 TraeCode CLI 版本）——由下一次 `SessionStart` 的闲置 TTL（生存时间，默认为 30 分钟）清扫回收。
 
@@ -110,7 +121,7 @@ TraeCode CLI 2.0 用户启动 `trae-cli`，并可用 `trae-cli plugin list` 确�
 | `OPENVIKING_CAPTURE_FILTERS` | `""` | CSV 格式的 sed 风格正则规则，作用于每个被捕获的回合（同一套语法） |
 | `OPENVIKING_DEBUG` | `false` | 是否将日志写入 `~/.openviking/logs/codex-hooks.log` |
 
-这些旋钮大多也可以写在 `ovcli.conf` 的 `plugin` 段下——见[插件配置](../configuration/02-client.md#插件配置)。两个过滤器 knob 尤其建议写在那里，用 JSON 数组，因为环境变量形式会按逗号切分。
+这些配置大多也可以写在 `ovcli.conf` 的 `plugin` 段下——见[插件配置](../configuration/02-client.md#插件配置)。两个过滤器 尤其建议写在那里，用 JSON 数组，因为环境变量形式会按逗号切分。
 
 如果更看重召回响应速度，请参阅[低延迟召回](./01-overview.md#低延迟召回)，其中说明了如何通过环境变量或 `ovcli.conf` 关闭查询扩展与 Codex 本地结果压缩。
 

@@ -133,7 +133,7 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 
 ## 插件配置
 
-记忆插件的行为旋钮写在 `plugin` 段下。直接挂在它下面的键对所有 harness 生效；以 harness 命名的嵌套对象（`claude_code` 或 `codex`）只覆盖那一个。
+记忆插件的配置写在 `plugin` 段下。直接挂在它下面的键对所有 harness 生效；以 harness 命名的嵌套对象（如 `claude_code`、`codex` 或 `opencode`）只覆盖那一个。
 
 ```json
 {
@@ -149,11 +149,11 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 }
 ```
 
-每个键都是某个 `OPENVIKING_*` 调优变量的 camelCase 对应写法——`OPENVIKING_RECALL_LIMIT` 对应 `recallLimit`，`OPENVIKING_CAPTURE_ASSISTANT_TURNS` 对应 `captureAssistantTurns`。反过来不成立：少数变量刻意只认环境变量，比如一次性的 `OPENVIKING_BYPASS_SESSION`。完整列表在插件 README 里：[Claude Code](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README.md#configuration)、[Codex](https://github.com/volcengine/OpenViking/blob/main/examples/codex-memory-plugin/README.md#tuning-the-plugin)。取列表值的旋钮（`bypassSessionPatterns`、`recallQueryFilters`、`captureFilters`）在这里是 JSON 数组，而它们的环境变量对应物是逗号分隔的字符串，所以值里带字面逗号的只能写进数组。
+每个键都是某个 `OPENVIKING_*` 调优变量的 camelCase 对应写法——`OPENVIKING_RECALL_LIMIT` 对应 `recallLimit`，`OPENVIKING_CAPTURE_ASSISTANT_TURNS` 对应 `captureAssistantTurns`。反过来不成立：少数变量刻意只认环境变量，比如一次性的 `OPENVIKING_BYPASS_SESSION`。完整列表在插件 README 里：[Claude Code](https://github.com/volcengine/OpenViking/blob/main/examples/claude-code-memory-plugin/README.md#configuration)、[Codex](https://github.com/volcengine/OpenViking/blob/main/examples/codex-memory-plugin/README.md#tuning-the-plugin)。取列表值的配置项（`bypassSessionPatterns`、`recallQueryFilters`、`captureFilters`）在这里是 JSON 数组，而它们的环境变量对应物是逗号分隔的字符串，所以值里带字面逗号的只能写进数组。
 
 优先级从高到低：环境变量 → [工作区各层](#工作区配置) → `plugin.<harness>` → `plugin` → `ov.conf` 里遗留的按 harness 分块 → 内置默认值。hook 每次触发都会重新读文件，所以改完下一轮就生效；改 `OPENVIKING_*` 变量则需要重启 agent，因为 hook 继承的是它的环境。
 
-目前只有 Claude Code 和 Codex 插件会读这一段，用其它 harness 名字建的条目不会生效。`ov-memory-doctor` 会打印它解析到的结果，并对不认识的键给出告警和最接近的正确键名。
+采用共享配置加载器的记忆插件会读取这一段；各宿主支持的字段和默认值见对应的 [集成文档](../agent-integrations/01-overview.md)。`ov-memory-doctor` 会打印它解析到的结果，并对不认识的键给出告警和最接近的正确键名。
 
 ## 工作区配置
 
@@ -165,7 +165,7 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 ~/.openviking/workspaces/<slot>.json        # 本机注册表，每个工作区一个文件
 ```
 
-工作区根目录是向上查找时最先遇到的、包含 `.git` 或包含 `.openviking/config.json`（或 `config.local.json`）的目录；`$HOME` 和文件系统根目录永远不会被当作工作区根。两者都没有的目录不是工作区：没有配置层，没有注册表条目，也没有属于自己的 peer。注册表的槽位名由根目录名加上完整路径的哈希组成，因此同一台机器上同一仓库的两个 clone 不会共用同一条记录。这些层由 Claude Code 和 Codex 插件读取，`ov` 命令不读取。
+工作区根目录是向上查找时最先遇到的、包含 `.git` 或包含 `.openviking/config.json`（或 `config.local.json`）的目录；`$HOME` 和文件系统根目录永远不会被当作工作区根。两者都没有的目录不是工作区：没有配置层，没有注册表条目，也没有属于自己的 peer。注册表的槽位名由根目录名加上完整路径的哈希组成，因此同一台机器上同一仓库的两个 clone 不会共用同一条记录。这些层由采用共享配置加载器的记忆插件读取，`ov` 命令不读取。
 
 ### 优先级
 
@@ -218,7 +218,7 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 
 ### 工作区 peer
 
-peer 是用户空间下的一段路径前缀——`viking://user/<you>/peers/<peer>/memories`——把一个项目的记忆归拢在一起。默认只有 git 仓库会有 peer：优先用归一化后的 `origin` URL，其次是仓库根路径。不在 git 仓库中的目录不发送任何 peer，在那里记下的内容进入用户级空间 `viking://user/<you>/memories`。这是有意为之：每个任务新建一个目录的应用，否则会为每个任务铸造一个全新的空 peer。
+peer 是用户空间下的一段路径前缀——`viking://user/<you>/peers/<peer>/memories`——把一个项目的记忆归拢在一起。默认只有 git 仓库会有 peer：优先用归一化后的 `origin` URL，其次是仓库根路径。不在 git 仓库中的目录不发送任何 peer，在那里记下的内容进入用户级空间 `viking://user/<you>/memories`。这是有意为之：每个任务新建一个目录的应用，否则会为每个任务创建一个新的 peer。
 
 规则由 `peer.source` 决定。同一项配置在环境变量中写作 `OPENVIKING_PEER_SOURCE`，在 `ovcli.conf` 中写作 `plugin.peerSource` 或 `plugin.<harness>.peerSource`。
 
@@ -230,7 +230,7 @@ peer 是用户空间下的一段路径前缀——`viking://user/<you>/peers/<pe
 {"version": 1, "peer": {"id": "my-project"}}
 ```
 
-这个目录及其下的一切从此写入 peer `my-project`，是不是仓库都一样。这个 id 不含路径，因此目录移动、改名、换一台机器都不会变；两个目录写同一个 id 就共享同一份记忆，这正是合并它们的方式。
+插件在这个目录及其子目录中捕获的记忆会写入 peer `my-project`，无论它是否为 Git 仓库。这个 id 不含路径，因此目录移动、改名、换一台机器都不会变；两个目录写同一个 id 就共享同一份记忆，这正是合并它们的方式。
 
 其余写法，优先级从高到低：
 

@@ -136,7 +136,7 @@ Local directory uploads also honor `.gitignore`. Command-line `--include` and `-
 
 ## Plugin Settings
 
-Behaviour knobs for the memory plugins live under `plugin`. Keys directly under it apply to every harness; a nested object named after a harness — `claude_code` or `codex` — overrides them for that one.
+Behaviour knobs for the memory plugins live under `plugin`. Keys directly under it apply to every harness; a nested object named after a harness, such as `claude_code`, `codex`, or `opencode`, overrides them for that one.
 
 ```json
 {
@@ -156,7 +156,7 @@ Each key is the camelCase counterpart of an `OPENVIKING_*` tuning variable — `
 
 Resolution order, highest first: environment variables → the [workspace layers](#workspace-configuration) → `plugin.<harness>` → `plugin` → the legacy per-harness block in `ov.conf` → built-in defaults. Hook processes read the file on every invocation, so an edit takes effect on the next turn; changing an `OPENVIKING_*` variable instead needs the agent restarted, since hooks inherit its environment.
 
-Only the Claude Code and Codex plugins read this section today, so an entry named after any other harness is inert. `ov-memory-doctor` prints what it resolved and warns about keys it does not recognise, naming the closest real one.
+Memory plugins using the shared configuration loader read this section. See the corresponding [integration guide](../agent-integrations/01-overview.md) for supported fields and defaults. `ov-memory-doctor` prints what it resolved and warns about keys it does not recognise, naming the closest real one.
 
 ## Workspace Configuration
 
@@ -168,7 +168,7 @@ A repository can carry its own plugin settings, so the memory behavior of a proj
 ~/.openviking/workspaces/<slot>.json        # per-machine registry, one file per workspace
 ```
 
-The workspace root is the nearest ancestor directory holding a `.git`, or one holding `.openviking/config.json` (or `config.local.json`) — whichever the walk upward reaches first; `$HOME` and the filesystem root are never workspace roots. A directory that is neither is not a workspace at all: no configuration layer, no registry entry, and no peer of its own. The registry slot name combines the root's directory name with a hash of its full path, so two clones of one repository on one machine never share an entry. These layers are read by the Claude Code and Codex plugins, not by `ov` commands.
+The workspace root is the nearest ancestor directory holding a `.git`, or one holding `.openviking/config.json` (or `config.local.json`) — whichever the walk upward reaches first; `$HOME` and the filesystem root are never workspace roots. A directory that is neither is not a workspace at all: no configuration layer, no registry entry, and no peer of its own. The registry slot name combines the root's directory name with a hash of its full path, so two clones of one repository on one machine never share an entry. Memory plugins using the shared configuration loader read these layers; `ov` commands do not.
 
 ### Precedence
 
@@ -233,7 +233,7 @@ Create `.openviking/config.json` in the directory:
 {"version": 1, "peer": {"id": "my-project"}}
 ```
 
-That directory and everything below it now writes to the peer `my-project`, repository or not. The id names no path, so it survives a move, a rename and a second machine — and two directories carrying the same id share one memory, which is how you merge them on purpose.
+Memories captured by the plugin in that directory and its subdirectories are written under the peer `my-project`, whether or not it is a Git repository. The id names no path, so it survives a move, a rename and a second machine — and two directories carrying the same id share one memory, which is how you merge them on purpose.
 
 The other ways to set it, highest precedence first:
 

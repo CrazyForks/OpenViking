@@ -1,14 +1,14 @@
 # Context Types
 
-Based on a simplified mapping of human cognitive patterns and engineering considerations, OpenViking abstracts context into **three basic types: Resource, Memory, and Skill**, each serving different purposes in Agent applications.
+OpenViking manages three types of context: resources provide reference material, memories retain information from interactions, and skills describe how to carry out tasks.
 
 ## Overview
 
 | Type | Purpose | Lifecycle | Initiative |
 |------|---------|-----------|------------|
 | **Resource** | Knowledge and rules | Long-term, relatively static | User adds |
-| **Memory** | Agent's cognition | Long-term, dynamically updated | Agent records |
-| **Skill** | Declarable agent capability configuration (AgentDefinedContextType) | Long-term, static | User or system adds |
+| **Memory** | Preferences, facts, and task experience | Long-term, dynamically updated | Extracted from sessions or recorded explicitly |
+| **Skill** | Task instructions and supporting resources | Long-term, updatable | User or system adds |
 
 ## Resource
 
@@ -94,13 +94,13 @@ results = await client.find(
 
 ## Skill (Capabilities / AgentDefinedContextType)
 
-Skills are capabilities that Agents can invoke, belonging to the **AgentDefinedContextType** category. This includes traditional workflow definitions, communication endpoints, tool configurations, and payment capabilities. Their common characteristic is that they **define how an agent interacts with external systems**, with relatively static runtime definitions, but invocation experiences are updated in Memory.
+A Skill uses `SKILL.md` and supporting files to describe a task’s steps, constraints, and resources. An agent reads the Skill and carries out the task using its own tools. Execution experience can be stored separately as memory.
 
 ### Characteristics
 
-- **Defined capabilities**: Tool definitions for completing specific tasks
-- **Relatively static**: Skill definitions don't change at runtime, but usage memories related to tools are updated in memory
-- **Callable**: Agent decides when to use which skill
+- **Task instructions**: Steps and constraints for completing a type of work
+- **Maintainable**: Skill content can be updated; execution experience is stored separately
+- **Read on demand**: The agent selects skills for its current task
 
 ### Storage Location
 
@@ -120,7 +120,7 @@ viking://agent/skills/{skill-name}/    # Override via --uri, public/shared (acco
 
 ### AgentDefinedContextType Subtypes
 
-AgentDefinedContextType includes the following subtypes, all stored under the `viking://agent/` scope:
+The table below lists the design categories for shared capabilities. Skills are supported and installed in the user-private directory by default, with an option to use `viking://agent/skills/`. The other categories are planned and do not imply available APIs:
 
 | Subtype | Location | Description |
 |---------|----------|-------------|
@@ -159,7 +159,7 @@ results = await client.find(
 
 ## Unified Search
 
-Based on Agent's needs, supports unified search across all three context types, providing comprehensive information:
+A single retrieval can find resources, memories, and skills:
 
 ```python
 # Search across all context types

@@ -71,9 +71,9 @@ Agent Plugins 1.0 只覆盖 skills 和 MCP servers；hooks、commands、agents �
 
 内置的 `openviking-skills` 技能覆盖存放在 OpenViking 里的 skill 本身：用 `find(context_type="skill")` 查找、读取并按 `SKILL.md` 执行、用 `add_skill` 新建或替换、从 Git 或本地文件夹安装、共享给整个账号，以及把本地 skill 目录迁入 OpenViking。这里没有会话启动 hook，也就没有 `<available-skills>` 清单，所以该技能让模型自己检索 skill，而不是从清单里读。
 
-**如果你的 harness 支持 hooks 机制，推荐使用专属插件。** hook 驱动的召回与捕获不需要模型花费工具调用、也不依赖模型「想起来要记」，比技能驱动的闭环更省 token、也更可靠。本 Agent Plugins 包适用于没有 hooks 的 harness，或你希望用同一个包覆盖多个客户端的场景。
+**如果你的 harness 支持 hooks 机制，推荐使用专属插件。** hook 驱动的召回与捕获不需要模型花费工具调用、也不依赖模型「想起来要记」，适合需要自动捕获与召回的场景。本 Agent Plugins 包适用于没有 hooks 的 harness，或你希望用同一个包覆盖多个客户端的场景。
 
-Claude Code、Codex、Cursor、TRAE / TRAE CN、ZCode、OpenCode、pi 共用同一个安装脚本。它会依次询问界面语言、要安装的 harness、下载源和 OpenViking 凭据，所有步骤幂等，重复运行安全：
+Claude Code、Codex、Cursor、TRAE / TRAE CN、ZCode、OpenCode、pi 共用同一个安装脚本。它会依次询问界面语言、要安装的 harness、下载源和 OpenViking 凭据，安装步骤支持重复执行：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)

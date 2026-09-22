@@ -99,12 +99,12 @@ Input → Parser → TreeBuilder → AGFS → SemanticQueue → Vector Index
 ### Retrieving Context
 
 ```
-Query → Intent Analysis → Hierarchical Retrieval → Rerank → Results
+Query → Query Preparation (optional intent analysis) → Hierarchical Retrieval (optional rerank) → Results
 ```
 
-1. **Intent Analysis**: Analyze query intent, generate 0-5 typed queries
+1. **Query Preparation**: `find()` uses the query directly; `search()` generates typed queries when intent analysis is enabled and session content exists
 2. **Hierarchical Retrieval**: Directory-level recursive search using priority queue
-3. **Rerank**: Scalar filtering + model reranking
+3. **Rerank**: Rerank candidates when a reranking model is configured
 4. **Results**: Return contexts sorted by relevance
 
 ### Session Commit
@@ -114,7 +114,7 @@ Messages → Compress → Archive → Memory Extraction → Storage
 ```
 
 1. **Messages**: Accumulate conversation messages and usage records
-2. **Compress**: Keep recent N rounds, archive older messages
+2. **Archive Boundary**: Split archived and retained messages according to the commit parameters; by default, archive all current messages
 3. **Archive**: Generate L0/L1 for history segments
 4. **Memory Extraction**: Extract memories from messages according to the memory policy and MemoryType schemas
 5. **Storage**: Write to AGFS + vector index

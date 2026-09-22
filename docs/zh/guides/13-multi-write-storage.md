@@ -130,7 +130,7 @@
 在 Docker 中运行 OpenViking 并配置同主机的 S3 备份时，需要注意：
 
 - **Linux Docker**：使用 `--network host` 或宿主机局域网 IP。Docker bridge 网络可通过网关 IP（如 `172.17.0.1:9000`）访问宿主机局域网。
-- **macOS/Windows Docker Desktop**：`--network host` **不支持**。S3 端点使用 `host.docker.internal`（映射为宿主机的 localhost），或使用宿主机局域网 IP。
+- **macOS/Windows Docker Desktop**：从容器访问宿主机时可使用 `host.docker.internal`。Docker Desktop 4.34 及之后的版本也提供可选的 host networking，启用方式见 [Docker 官方说明](https://docs.docker.com/engine/network/drivers/host/)。
 
 如果启用 S3 备份后服务静默崩溃，请优先排查 Docker 网络。RAGFS Rust binding 在容器内无法访问 S3 端点时会报 `dispatch failure` 错误。
 

@@ -130,7 +130,7 @@ When using S3-compatible services (MinIO, RustFS, Ceph, etc.), the `s3` section 
 When running OpenViking in Docker with an S3 backup on the same host:
 
 - **Linux Docker**: Use `--network host` or the host's LAN IP. Docker bridge network can reach the host's LAN via gateway IP (e.g. `172.17.0.1:9000`).
-- **macOS/Windows Docker Desktop**: `--network host` is **not supported** on Docker Desktop. Use `host.docker.internal` as the S3 endpoint (maps to the host's localhost). Alternatively, use the host's LAN IP.
+- **macOS/Windows Docker Desktop**: Use `host.docker.internal` to reach the host from the container. Host networking is available as an opt-in feature in Docker Desktop 4.34 and later; see [Docker host networking](https://docs.docker.com/engine/network/drivers/host/).
 
 If the server crashes silently on startup with S3 backup enabled, check the Docker networking first. The RAGFS Rust binding will produce `dispatch failure` if the S3 endpoint is unreachable from inside the container.
 

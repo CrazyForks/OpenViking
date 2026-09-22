@@ -324,11 +324,11 @@ Initial bootstrap can be completed entirely within the browser:
 #### Configuration Management
 
 - **Initial Configuration**: The template pre-populates `OPENVIKING_CONF_CONTENT` with a complete configuration referencing `${OPENAI_API_KEY}`. This variable is used only on the first startup, when `ov.conf` does not yet exist.
-- **Later Changes**: After the first startup, edit the volume-backed `ov.conf` directly using `railway ssh` or `railway service files upload --overwrite`. Alternatively, delete `ov.conf` and redeploy to regenerate it from the current `OPENVIKING_CONF_CONTENT` value.
+- **Later Changes**: After the first startup, edit the volume-backed `ov.conf` directly using `railway ssh` or `railway volume files`. Alternatively, delete `ov.conf` and redeploy to regenerate it from the current `OPENVIKING_CONF_CONTENT` value.
 
 #### Pricing & Resource Sizing
 
-- **Recommended Plan**: For continuous hosting, the **Hobby** plan ($5/mo, which includes $5 of usage credits) is recommended. At ~0.5 GB resident memory, typical monthly cost is around $5–$7.
+- **Estimate costs**: Railway charges for the selected plan and actual CPU, memory, storage, and network usage. Test with your own document volume and request rate, then estimate ongoing costs from the usage dashboard. See [Railway pricing](https://docs.railway.com/pricing) for current plans and billing rules.
 - **Free/Trial Limitations**: Railway Free plan ($1/mo credit) is insufficient for continuous service. Trial credits ($5 one-time) are suitable for short-term evaluation; note that volumes are purged 30 days after trial expiration.
 
 > **Security Note**: The service is publicly accessible by default. Keep `OPENVIKING_ROOT_API_KEY` confidential and consult the [public access guide](12-public-access.md) before production rollout.

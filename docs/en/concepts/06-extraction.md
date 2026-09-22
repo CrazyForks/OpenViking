@@ -115,7 +115,7 @@ Leaf directories → Parent directories → Root
 
 ### Single Directory Processing Steps
 
-1. **Concurrent file summary generation**: Limited to 10 concurrent
+1. **Concurrent file summary generation**: Concurrency is limited by `vlm.max_concurrent`
 2. **Collect child directory abstracts**: Read generated .abstract.md
 3. **Generate .overview.md**: LLM generates L1 overview
 4. **Extract .abstract.md**: Extract L0 from overview
@@ -132,10 +132,10 @@ Each generation records direct-child coverage and uses stable sampling above `se
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `max_concurrent_llm` | 10 | Concurrent LLM calls |
-| `max_images_per_call` | 10 | Max images per VLM call |
-| `max_sections_per_call` | 20 | Max sections per VLM call |
-| `overview_sample_limit` | 32 | Maximum direct-child sample used for one directory summary |
+| `vlm.max_concurrent` | 32 | Semantic-processing concurrency, passed to `SemanticProcessor.max_concurrent_llm` |
+| `max_images_per_call` | 10 | `VLMProcessor` constructor parameter: images per call; not an `ov.conf` field |
+| `max_sections_per_call` | 20 | `VLMProcessor` constructor parameter: sections per call; not an `ov.conf` field |
+| `semantic.overview_sample_limit` | 32 | Maximum direct-child sample used for one directory summary |
 
 ## Code Skeleton Extraction
 

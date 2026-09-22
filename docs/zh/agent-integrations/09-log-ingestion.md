@@ -1,8 +1,8 @@
 # 导入本地 Agent 日志（openviking-server ingest）
 
-`openviking-server ingest` 把你本地已有的 AI 编码 / agent harness 的对话日志（Claude Code、Codex、WorkBuddy、OpenCode、MiMo、Hermes、OpenClaw）解析成标准消息，再通过 OpenViking 既有的会话管线“重放”进去（`创建会话 → 批量追加消息 → 提交`，提交时触发记忆抽取），从而把这些历史与新增对话沉淀为长期记忆。它与各 harness 的“记忆插件”互补：插件在对话**进行时**实时挂载捕获，而本工具用于**导入既有日志**与**离线监听新增日志**，无需插件、也无需改动对应 harness。
+`openviking-server ingest` 读取本地 Agent 对话日志，将消息导入 OpenViking 会话并提交，触发记忆提取。它支持一次性导入历史日志，也支持持续监听新增日志，无需修改对应 Agent 或安装记忆插件。
 
-与插件方案的关键区别：本工具是 OpenViking 的**客户端**，跑在日志所在的机器上，通过 SDK 指向本地或远端 server；它默认**完全关闭**，不会“装上就扫你本地文件”。
+命令运行在日志所在机器，通过 SDK 连接本地或远程 OpenViking 服务。导入默认关闭，需要显式启用总开关和指定 Agent 的配置。
 
 源码：[openviking/ingest](https://github.com/volcengine/OpenViking/tree/main/openviking/ingest)
 

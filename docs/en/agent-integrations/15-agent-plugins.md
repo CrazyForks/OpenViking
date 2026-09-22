@@ -71,9 +71,9 @@ The bundled `ov-experience-memory` skill has the model search `viking://~/memori
 
 The bundled `openviking-skills` skill covers the skills stored in OpenViking itself: finding one with `find(context_type="skill")`, reading and following its `SKILL.md`, creating or replacing one with `add_skill`, installing one from Git or a local folder, sharing one with the account, and moving local skill folders into OpenViking. Without a session-start hook there is no `<available-skills>` catalog here, so the skill has the model search for a skill rather than read it off a list.
 
-**If your harness has its own hook system, prefer the dedicated plugin.** Hook-driven recall and capture happen without the model spending tool calls or deciding to remember, which is both cheaper and more reliable than the skill-driven loop. Use this Agent Plugins package for harnesses that have no hooks, or when you want one package that works across many clients.
+**If your harness has its own hook system, prefer the dedicated plugin.** Hook-driven recall and capture happen without the model spending tool calls or deciding to remember, making them suitable for automatic capture and recall. Use this Agent Plugins package for harnesses that have no hooks, or when you want one package that works across many clients.
 
-One installer covers Claude Code, Codex, Cursor, TRAE / TRAE CN, ZCode, OpenCode, and pi. It asks for your language, which harnesses to install, the download source, and your OpenViking credentials, and every step is idempotent:
+One installer covers Claude Code, Codex, Cursor, TRAE / TRAE CN, ZCode, OpenCode, and pi. It asks for your language, which harnesses to install, the download source, and your OpenViking credentials, and the installation steps support repeated runs:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)

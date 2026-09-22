@@ -1,14 +1,12 @@
 # MCP 集成指南
 
-OpenViking 服务器内置 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 端点，任何兼容 MCP 的客户端都可以通过 HTTP 直接访问其记忆和资源能力，无需部署额外进程。
+OpenViking Server 内置 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 端点。支持 Streamable HTTP 的客户端可直接连接；只支持 stdio 的客户端可使用 [Agent Plugins 包](../agent-integrations/15-agent-plugins.md)提供的代理。
 
 > **快速接入？** 见 [MCP 客户端](../agent-integrations/06-mcp-clients.md) 获取各平台配置片段和注意事项。本页面覆盖完整的工具参考和高级配置。
 
 ## 前提条件
 
-1. 已安装 OpenViking（`pip install openviking` 或从源码安装）
-2. 有效的配置文件（参见[配置指南](01-configuration.md)）
-3. `openviking-server` 正在运行（参见[部署指南](03-deployment.md)）
+准备可访问的 OpenViking 服务地址和对应凭证。需要自行部署时，先完成[快速开始](../getting-started/02-quickstart.md)；使用托管服务或已有部署时，无需在本地安装服务端。
 
 MCP 端点位于 `http://<server>:1933/mcp`，与 REST API 同进程、同端口。
 
@@ -21,7 +19,8 @@ MCP 端点位于 `http://<server>:1933/mcp`，与 REST API 同进程、同端口
 | **Claude Code** | `type: http` 接入 |
 | **Trae** | 标准 MCP 配置 |
 | **Cursor** | 标准 MCP 配置 |
-| **ChatGPT & Codex** | 标准 MCP 配置 |
+| **ChatGPT** | 通过自定义 App 接入 OAuth，见 [OAuth 指南](11-oauth.md) |
+| **Codex** | 使用 [Codex 集成](../agent-integrations/04-codex.md)中的 MCP 配置 |
 | **OpenCode** | OpenCode 原生 `mcp` 配置 |
 | **Manus** | 标准 MCP 配置 |
 | **Claude.ai / Claude Desktop** | 原生 OAuth 2.1（见 [11-oauth](11-oauth.md)） |
@@ -39,7 +38,7 @@ MCP 端点的鉴权与 OpenViking REST API 完全一致，复用同一套 API-Ke
 
 ### 通用 MCP 客户端
 
-大多数支持 MCP 的平台（如 Trae、Manus、Cursor 等）使用标准的 `mcpServers` 配置格式：
+支持 `mcpServers` 配置且允许自定义请求头的客户端，可参考以下示例。字段名和传输类型以客户端文档为准：
 
 ```json
 {
@@ -106,11 +105,11 @@ claude mcp add --transport http openviking \
 
 这些客户端只接受 OAuth 2.1，不接受 API Key。OpenViking 已经原生实现 OAuth 2.1（DCR + PKCE + opaque token，SQLite 后端，配合 Studio consent 授权页），不再需要外部代理。
 
-如果你已经为 OpenViking 服务配好了 HTTPS，直接连接 `https://your-server.com/mcp` 端点即可——客户端会自动引导完成 OAuth 授权流程。
+按 OAuth 指南在服务端启用 `oauth.enabled` 并配置 HTTPS，再让客户端连接 `https://your-server.com/mcp`，在浏览器中完成授权。
 
 **详见 [OAuth 2.1 接入指南](11-oauth.md)** 和 **[公网访问指南](12-public-access.md)**：
 
-- 端到端流程（device-flow 风格：authorize 页显示 6 字符码，用户在 console 确认）
+- Studio 授权确认流程，以及可选的 6 字符码跨设备授权
 - HTTP（本地）与 HTTPS（生产）两阶段部署，包含 Caddy / nginx 反代模板和 docker-compose 示例
 - Claude.ai / Claude Desktop 接入步骤
 - `OPENVIKING_PUBLIC_BASE_URL` 与 `oauth` 配置项
@@ -121,7 +120,7 @@ claude mcp add --transport http openviking \
 
 ## 可用的 MCP 工具
 
-连接后，OpenViking MCP 端点暴露 16 个工具：
+以下列出内置 MCP 工具。实际可用工具以所连接服务的 `tools/list` 响应为准：
 
 | 工具 | 说明 | 主要参数 |
 |------|------|----------|
@@ -209,9 +208,9 @@ curl http://localhost:1933/health
 
 ### 认证错误
 
-**可能原因：** 客户端配置与服务器配置中的 API 密钥不匹配。
+**可能原因：** 客户端的 API Key 无效、已过期，或不适用于租户数据访问。
 
-**解决方案：** 确保 MCP 客户端配置中的 API 密钥与 OpenViking 服务器配置中的一致。参见[认证指南](04-authentication.md)。
+**解决方案：** 确认客户端使用目标 account 的有效 user/admin key；`api_key` 模式下，root key 只用于管理接口。参见[认证指南](04-authentication.md)。
 
 ## 参考
 

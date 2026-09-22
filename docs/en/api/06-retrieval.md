@@ -6,9 +6,9 @@ OpenViking provides multiple retrieval methods, including simple vector similari
 
 | Aspect | find | search |
 |--------|------|--------|
-| Intent Analysis | No | Yes |
-| Session Context | No | Yes |
-| Query Expansion | No | Yes |
+| Intent Analysis | No | Requires session content and `retrieval.enable_intent=true` |
+| Session Context | No | Optional |
+| Query Expansion | No | When session content exists and intent analysis is enabled |
 | Default Limit | 10 | 10 |
 | Use Case | Simple queries | Conversational search |
 
@@ -368,7 +368,7 @@ Intelligent retrieval with session context and intent analysis.
 
 #### 1. API Implementation Introduction
 
-The `search()` method adds session context understanding and intent analysis capability on top of `find()`. It better understands user query intent based on conversation history, performs query expansion, and provides more relevant search results.
+`search()` adds optional session-aware query planning to the hierarchical retrieval used by `find()`. It calls the LLM only when `retrieval.enable_intent=true` and the session has a summary or messages. Without a session, with an empty session, or with intent analysis disabled, it uses the original query. Image queries skip session planning.
 
 **Processing Pipeline**:
 1. Load session context (if session_id is provided)
@@ -431,7 +431,7 @@ curl -X POST http://localhost:1933/api/v1/search/search \
     }'
 ```
 
-**Search without Session (Still Performs Intent Analysis)**
+**Search without Session (Uses the Original Query)**
 
 ```bash
 curl -X POST http://localhost:1933/api/v1/search/search \
@@ -494,7 +494,7 @@ for context in results.get("resources", []):
 
 ```python
 # search can also be used without session
-# It still performs intent analysis on the query
+# Without session content, it uses the original query without intent analysis
 results = client.search(
     query="how to implement OAuth 2.0 authorization code flow"
 )
@@ -544,7 +544,7 @@ openviking search "best practices" --context-type skill
 # Search with time filter
 openviking search "watch vs scheduled" --after 2026-03-15 --before 2026-03-20
 
-# Search without session (still performs intent analysis)
+# Search without session (uses the original query)
 openviking search "how to implement OAuth 2.0 authorization code flow"
 
 # Limit to specific level(s) (L0 only)

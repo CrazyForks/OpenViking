@@ -678,8 +678,8 @@ provider，并设置 `storage.vectordb.sparse_weight > 0`。自托管模型的�
 
 添加资源时，VLM 生成：
 
-1. **L0（摘要）**：~100 token 摘要
-2. **L1（概览）**：~2k token 概览，包含导航信息
+1. **L0（摘要）**：目录摘要，默认字符上限为 256
+2. **L1（概览）**：目录概览，包含导航信息，默认字符上限为 4000
 
 如果未配置 VLM，L0/L1 将直接从内容生成（语义性较弱），多模态资源的描述可能有限。
 
@@ -820,7 +820,7 @@ ollama pull guoxuter/ov_intent_analysis_sft:v7_q8
 
 对于 `ollama/guoxuter/ov_intent_analysis_sft:v7_q8`（以及 `v4_q8`），OpenViking 会在 search 阶段自动使用对应的内置 prompt（分别为 `retrieval.ov_intent_analysis_sft_v7` 和 `retrieval.ov_intent_analysis_sft_v4`），不需要替换 prompt 文件，也不需要设置 `prompts.templates_dir`。如果使用未映射的模型，OpenViking 会继续使用默认的 `retrieval.intent_analysis` prompt。
 
-这样可以用小模型承担检索规划，降低延迟，同时保留更强的 `vlm` 处理语义提取、记忆提取和多模态内容。
+这样可单独选择检索规划模型，让 `vlm` 继续处理语义提取、记忆提取和多模态内容。实际延迟取决于模型、硬件和请求负载。
 
 
 ### feishu
@@ -1045,7 +1045,7 @@ Jev 适配器将 query 和候选文档作为结构化 System One `state`，并�
 | `recall_intent_timeout_s` | float | 会话感知查询扩展的超时；超时后回退为用户原查询 | `5.0` |
 | `recall_rewrite_timeout_s` | float | digest 重写的超时；超时后 `digest` 为空并照常返回 `rendered` | `30.0` |
 
-两个 LLM 环节都是纯 opt-in：查询扩展需要传 `session_id`，重写需要传 `rewrite`。任一环节失败都优雅降级，不会阻塞召回。
+查询扩展需要传入有内容的 `session_id` 并启用意图分析，重写需要传入 `rewrite`。这些模型调用受各自超时限制；失败后回退到未扩展的查询或未重写的结果。
 
 ### grep
 
@@ -1812,7 +1812,7 @@ ov add-resource ./docs --exclude "*.tmp"
 
 ## encryption 段
 
-启用静态数据加密，确保多租户环境下的数据安全与隔离。加密功能对用户完全透明，API 无变化。
+启用静态数据加密后，存储层按账户加密新写入的文件，客户端沿用现有 API。已有明文文件不会自动加密，需单独迁移或重写。
 
 ```json
 {
@@ -1944,7 +1944,7 @@ ov add-resource ./docs --exclude "*.tmp"
 
 ## Task Tracker 持久化
 
-任务跟踪器记录异步任务状态，适用于返回 `task_id` 的接口（任务类型包括 `session_commit`、`add_resource`、`add_skill`、`admin_reindex`）。Task 记录始终持久化到 AGFS，因此一个实例返回的 `task_id` 可以在另一个实例上查询，任务历史也能在重启后继续访问。
+任务跟踪器记录异步任务状态，适用于返回 `task_id` 的接口（任务类型包括 `session_commit`、`add_resource`、`add_skill`、`admin_reindex`）。Task 记录始终持久化到 AGFS，共享同一持久化存储的实例可以查询同一个 `task_id`，任务历史也能在重启后继续访问。
 
 无需配置 `storage.task_tracker`。如果旧配置里仍包含 `storage.task_tracker`，OpenViking 会记录 warning 并忽略它。
 

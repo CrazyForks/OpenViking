@@ -4,7 +4,7 @@ This guide describes how to enable and use at-rest data encryption in OpenViking
 
 ## Overview
 
-OpenViking provides transparent at-rest data encryption to ensure data security and isolation in multi-tenant environments:
+OpenViking can encrypt newly written files with account-specific keys. The storage layer handles encryption and decryption through the existing APIs:
 
 - ✅ **Transparent encryption**: No API changes, application layer unaware
 - ✅ **Multi-tenant isolation**: Different accounts use independent keys
@@ -130,7 +130,7 @@ OpenViking provides two layers of encryption protection:
 
 ### Enabling Argon2id Hashing
 
-For maximum API key protection, you can enable Argon2id one-way hashing:
+Enable Argon2id one-way hashing to stop storing recoverable API key values:
 
 ```json
 {

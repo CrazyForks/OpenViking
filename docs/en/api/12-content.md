@@ -6,7 +6,7 @@ The Content API reads L0/L1/L2 content, writes text, and maintains semantic and 
 
 ### abstract()
 
-Read the L0 abstract (an approximately 100-token summary), excluding the OKF header.
+Read the L0 abstract, excluding the OKF header. Directory abstracts have a default limit of 256 characters; this is not a token count.
 
 **Parameters**
 
@@ -63,8 +63,7 @@ openviking abstract viking://resources/docs/
 ```json
 {
   "status": "ok",
-  "result": "Documentation for the project API, covering authentication, endpoints...",
-  "time": 0.1
+  "result": "Documentation for the project API, covering authentication, endpoints..."
 }
 ```
 
@@ -128,8 +127,7 @@ openviking overview viking://resources/docs/
 ```json
 {
   "status": "ok",
-  "result": "## docs/\n\nContains API documentation and guides...",
-  "time": 0.1
+  "result": "## docs/\n\nContains API documentation and guides..."
 }
 ```
 
@@ -152,7 +150,7 @@ Read the complete text of an L0, L1, or L2 file.
 
 - `read()` accepts file URIs only. Passing an existing directory URI returns `INVALID_ARGUMENT` (`400`), not `NOT_FOUND`. This error carries a structured `details` payload — `details.expected` is `"file"`, `details.actual` is `"directory"`, and `details.resource` is the offending URI (present on the HTTP path) — so clients can detect a file-vs-directory mismatch programmatically (for example, fall back to `list`) instead of string-matching the message.
 - Instead of a Viking URI, you may pass the 32-character hex `id` returned by `stat()` for a file. The server looks up the URI via the vector index and applies the same permission checks. Because indexing is asynchronous, a newly returned ID might not be resolvable immediately; lookup also fails if the corresponding vector record has been deleted. In both cases, the server returns `NOT_FOUND` and indicates that the data may not have been indexed yet or may have been deleted.
-- Public URI parameters accept `resources` and `user` scopes. For session files, use `viking://user/{user_id}/sessions/{session_id}` or the backward-compatible `viking://session/{session_id}` alias. Internal scopes such as `temp` and `queue` return `INVALID_URI`.
+- Public URI parameters accept `resources`, `user`, and `agent` scopes. For session files, use `viking://user/{user_id}/sessions/{session_id}` or the backward-compatible `viking://session/{session_id}` alias. Internal scopes such as `temp` and `queue` return `INVALID_URI`.
 
 
 **Python SDK**
@@ -202,8 +200,7 @@ openviking read viking://resources/docs/api.md
 ```json
 {
   "status": "ok",
-  "result": "# API Documentation\n\nFull content of the file...",
-  "time": 0.1
+  "result": "# API Documentation\n\nFull content of the file..."
 }
 ```
 
@@ -759,8 +756,7 @@ openviking reindex viking://resources --mode prune_orphans --dry-run
     "object_type": "resource",
     "status": "accepted",
     "task_id": "task_xxx"
-  },
-  "time": 0.1
+  }
 }
 ```
 

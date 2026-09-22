@@ -161,7 +161,7 @@ This tool wraps the MCP tool `search-web`. Call this when the user needs functio
 
 #### 1. API 实现介绍
 
-技能是一种特殊的资源，用于定义智能体可以执行的操作或工具。
+此接口存储 Skill 指令和配套文件，并生成供检索使用的摘要与索引。它不会执行 Skill 或注册工具。
 
 **处理流程**：
 1. 接收技能数据或上传的临时文件

@@ -13,7 +13,7 @@ OpenViking is a context database where FS is the source of truth and VectorDB is
 1. **Write-exclusive**: Different owners participating in the protocol cannot hold conflicting path locks simultaneously
 2. **On by default**: Protected writes acquire locks by default; ordinary reads and low-level mkdir do not automatically acquire locks
 3. **Lock as protection**: LockContext acquires locks on entry, releases on exit — no undo/journal/commit semantics
-4. **Only session_memory needs crash recovery**: a persistent `session_commit` queue resumes Phase 2 after a process crash
+4. **Persistent task recovery**: the `session_commit` queue resumes session Phase 2; the corresponding persistent queues recover derived resource processing
 5. **Queue operations run outside locks**: SemanticQueue/EmbeddingQueue enqueue operations are idempotent and retriable
 
 ## Architecture
@@ -75,7 +75,7 @@ async with LockContext(lock_manager, [path], lock_mode="exact") as handle:
 then enqueues a durable `SessionCommitMsg`; after restart, QueueManager resumes any leftover
 `session_commit` jobs and continues Phase 2.
 
-Memory extraction is idempotent — re-extracting from the same archive produces the same result.
+Recovery uses the saved archive and processing state. Memory extraction includes model calls; repeating it does not guarantee identical generated text.
 
 ## Consistency Issues and Solutions
 
@@ -495,7 +495,7 @@ Legacy compatibility form:
 
 ### QueueFS Persistence
 
-The lock mechanism relies on QueueFS using the SQLite backend to ensure enqueued tasks survive process restarts. This is the default configuration and requires no manual setup.
+Restart recovery requires persisted queue data. QueueFS uses SQLite by default. With the cache backend, durability depends on the configured Provider; the memory backend loses queued work when the process exits.
 
 ## Related Documentation
 

@@ -1,8 +1,8 @@
 # Import Local Agent Logs (openviking-server ingest)
 
-`openviking-server ingest` parses the conversation logs that AI coding / agent harnesses (Claude Code, Codex, WorkBuddy, OpenCode, MiMo, Hermes, OpenClaw) already leave on your machine, then "replays" them through OpenViking's existing session pipeline (`create session → batch add messages → commit`, where commit triggers memory extraction). This turns both your historical and newly written conversations into long-term memory. It complements the per-harness memory plugins: a plugin captures **while a conversation is happening**, whereas this tool is for **importing existing logs** and **watching for new logs offline** — no plugin required and no change to the harness itself.
+`openviking-server ingest` reads local agent conversation logs, imports the messages into OpenViking sessions, and commits them for memory extraction. It supports one-time historical imports and ongoing log monitoring without changing the agent or installing a memory plugin.
 
-Key difference from the plugins: this tool is an OpenViking **client**. It runs where the logs live and points at a local or remote server via the SDK, and it is **off by default** — installing OpenViking does not silently scan your local files.
+Run it on the machine that holds the logs. It connects to a local or remote OpenViking server through the SDK. Ingestion is disabled by default; enable both the main switch and the configuration for each chosen agent.
 
 Source: [openviking/ingest](https://github.com/volcengine/OpenViking/tree/main/openviking/ingest)
 

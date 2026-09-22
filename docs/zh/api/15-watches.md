@@ -10,7 +10,7 @@ Watch API 管理资源的周期检查、暂停、恢复和手动触发。
 
 #### 1. API 实现介绍
 
-此控制面封装了 `WatchManager` 原语，未改动任何服务端行为。每个端点和 CLI 命令都支持通过 `task_id`（路径）或 `to_uri`（查询参数）定位目标任务，两种键可以互换；如果同时提供，二者必须指向同一任务，否则返回 400。
+通过 `task_id` 定位任务，或通过 `to_uri` 查找唯一可访问的任务。多个 Connector Watch 可以共享目标；此时按 URI 操作会返回 `409 Conflict`，需要改用 `task_id`。同时提供两个参数时，它们必须指向同一任务，否则返回 `400`。
 
 **操作**：
 - **列出**（`GET /api/v1/watches`）— 返回 `{tasks, total}`；可传 `?active_only=true` 过滤；传 `?to_uri=...` 时降级为单任务查找
@@ -209,7 +209,7 @@ list_watches()                                            # 每个任务一行�
 cancel_watch(to_uri="viking://resources/guide.md")        # 按 URI 幂等删除
 ```
 
-暂停 / 恢复 / 触发 / 更新故意不通过 MCP 暴露——这些 power-user 操作放在 CLI/REST 一侧，以保持 Agent 系统提示词的紧凑。Agent 侧若需创建监控任务或调整周期，仍走 [`add_resource`](02-resources.md#add-resource) 配合 `watch_interval`；可显式传 `to`，也可让系统绑定本次导入返回的 `root_uri`。
+MCP 只提供列出和删除 Watch。创建 Watch 时，使用 [`add_resource`](02-resources.md#add-resource) 并设置 `watch_interval`；暂停、恢复、触发和调整已有 Watch 的周期使用 CLI 或 REST。重复导入不会更新已有 Watch。
 
 ---
 

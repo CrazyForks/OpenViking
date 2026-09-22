@@ -1,6 +1,6 @@
 # Multi-Tenant
 
-OpenViking multi-tenancy does not mean "deploy one isolated server per team." Instead, a single OpenViking Server uses `account` and `user` identity boundaries to control sharing and isolation.
+A single OpenViking Server uses `account` and `user` identity boundaries to control data sharing and isolation.
 
 This model fits two common scenarios:
 
@@ -40,7 +40,7 @@ With multi-tenancy enabled, you can:
 
 | Role | Scope | Typical capabilities |
 |------|-------|----------------------|
-| ROOT | Global | Create/delete accounts, cross-tenant access, user management |
+| ROOT | Global | Create/delete accounts and manage users; not used for tenant data access in API key mode |
 | ADMIN | Single account | Manage users in the same account, regenerate user keys |
 | USER | Single account | Access its own user/peer/session data and shared resources in the same account |
 
@@ -79,7 +79,8 @@ If `auth_mode = "api_key"` and `root_api_key` is not configured, the server runs
 | User resources (`viking://user/{user_id}/resources`) | No | No | user |
 | Peer resources (`viking://user/{user_id}/peers/{peer_id}/resources`) | No | No | user / peer |
 | Memories | No | No | user / peer |
-| Skills | No | No | user |
+| Private skills (`viking://user/{user_id}/skills`) | No | No | user |
+| Shared skills (`viking://agent/skills`) | No | Yes, subject to access permissions | account |
 | Sessions | No | No | user / session |
 
 ### Storage Layer
@@ -111,7 +112,7 @@ Filesystem operations and semantic retrieval are tenant-aware:
 - Non-ROOT requests are automatically filtered by `account_id`
 - `resources` includes account-shared resources by default and uses effective ACLs when configured
 - User resources remain isolated to the current user space; move them to `viking://resources` to share them
-- `memory` and `skill` remain filtered by the current user space
+- Memories and private skills remain filtered by the current user space; shared skills live at `viking://agent/skills` inside the account
 - An actor peer filters `viking://user/{user}/peers` to one peer for filesystem and retrieval operations
 
 This keeps "what you can search" aligned with "what you can read."

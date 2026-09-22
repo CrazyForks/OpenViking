@@ -319,11 +319,11 @@ docker compose up -d
 #### 配置管理
 
 - **首次生成配置**：模板在 `OPENVIKING_CONF_CONTENT` 中预置了完整配置并引用 `${OPENAI_API_KEY}`。该变量仅在首次启动且 `ov.conf` 尚不存在时生效。
-- **后续修改配置**：首次启动后，请通过 `railway ssh` 或 `railway service files upload --overwrite` 直接修改持久卷上的 `ov.conf`；也可以删除 `ov.conf` 后重新部署，让服务按当前 `OPENVIKING_CONF_CONTENT` 重新生成配置文件。
+- **后续修改配置**：首次启动后，请通过 `railway ssh` 或 `railway volume files` 直接修改持久卷上的 `ov.conf`；也可以删除 `ov.conf` 后重新部署，让服务按当前 `OPENVIKING_CONF_CONTENT` 重新生成配置文件。
 
 #### 资源与费用参考
 
-- **推荐配置**：长期运行建议选择 **Hobby** 计划（$5/月，包含 $5 用量抵扣）。以 ~0.5 GB 常驻内存估算，月均成本通常在 $5–$7 左右。
+- **费用估算**：Railway 按套餐和 CPU、内存、存储、网络等实际用量计费。先用自己的文档规模和请求量试跑，再根据用量面板估算持续运行成本。套餐和计费规则见 [Railway 官方说明](https://docs.railway.com/pricing)。
 - **免费额度说明**：Railway Free 计划（$1/月额度）不足以支持服务常驻运行；Trial 赠金适合短期体验评估，额度到期 30 天后持久卷将被清理，请注意按需备份数据。
 
 > **安全提示**：服务部署后默认监听并暴露于公网。请妥善保管 `OPENVIKING_ROOT_API_KEY`，在对外开放前请阅读[公网访问安全指南](12-public-access.md)。

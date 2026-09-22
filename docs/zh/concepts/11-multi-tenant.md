@@ -1,6 +1,6 @@
 # 多租户
 
-OpenViking 的多租户不是“为每个团队部署一套独立服务”，而是在同一个 OpenViking Server 内，用 `account` 和 `user` 两层身份边界来隔离和共享数据。
+OpenViking 在同一个 Server 内，通过 `account` 和 `user` 两层身份边界隔离和共享数据。
 
 它适合两类典型场景：
 
@@ -40,7 +40,7 @@ OpenViking 的多租户不是“为每个团队部署一套独立服务”，而
 
 | 角色 | 作用域 | 典型能力 |
 |------|--------|----------|
-| ROOT | 全局 | 创建/删除 account、跨租户访问、管理用户 |
+| ROOT | 全局 | 创建/删除 account、管理用户；API Key 模式下不用于租户数据读写 |
 | ADMIN | 单个 account | 管理本 account 的用户、重置 user key |
 | USER | 单个 account | 访问自己的 user/peer/session 数据和 account 内共享资源 |
 
@@ -79,7 +79,8 @@ OpenViking Server 支持两种多租户相关认证模式：
 | 用户资源 (`viking://user/{user_id}/resources`) | 否 | 否 | user |
 | Peer 资源 (`viking://user/{user_id}/peers/{peer_id}/resources`) | 否 | 否 | user / peer |
 | 记忆 | 否 | 否 | user / peer |
-| 技能 | 否 | 否 | user |
+| 私有技能 (`viking://user/{user_id}/skills`) | 否 | 否 | user |
+| 共享技能 (`viking://agent/skills`) | 否 | 是，受访问权限约束 | account |
 | 会话 | 否 | 否 | user / session |
 
 ### 存储层
@@ -111,7 +112,7 @@ viking://user/alice/peers/web-visitor-alice/resources/
 - 非 ROOT 请求会自动按 `account_id` 过滤
 - `resources` 默认允许检索 account 内共享资源；设置 ACL 后按有效 ACL 过滤
 - 用户资源始终按当前 `user space` 隔离；需要共享时移动到 `viking://resources`
-- `memory` 和 `skill` 继续按当前 `user space` 过滤
+- 记忆和私有技能按当前 `user space` 过滤；共享技能位于 account 内的 `viking://agent/skills`
 - Actor peer 会把 `viking://user/{user}/peers` 过滤到一个 peer，并作用于文件系统和检索操作
 
 这意味着“能搜到什么”与“能读到什么”保持一致，不会因为向量召回而越权。

@@ -2,7 +2,7 @@
 
 隐私配置用于按 `category + target_key` 管理敏感字段版本（如 skill 的 `api_key`、`base_url`）。
 
-每次更新都会生成版本快照，可查询历史版本并切换生效版本。
+配置值变化时会生成版本快照，可查询历史版本并切换生效版本。提交与当前版本相同的值不会创建新版本。
 
 ## 典型场景
 
@@ -92,8 +92,7 @@ curl -X GET http://localhost:1933/api/v1/privacy-configs \
 ```json
 {
   "status": "ok",
-  "result": ["skill"],
-  "time": 0.01
+  "result": ["skill"]
 }
 ```
 
@@ -121,8 +120,7 @@ curl -X GET http://localhost:1933/api/v1/privacy-configs/skill \
 ```json
 {
   "status": "ok",
-  "result": ["byted-viking-search-knowledgebase"],
-  "time": 0.01
+  "result": ["byted-viking-search-knowledgebase"]
 }
 ```
 
@@ -166,8 +164,7 @@ curl -X GET "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-sea
         "base_url": "https://example.com"
       }
     }
-  },
-  "time": 0.01
+  }
 }
 ```
 
@@ -233,8 +230,7 @@ curl -X POST "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-se
       "region": "cn"
     },
     "change_reason": "rotate key"
-  },
-  "time": 0.02
+  }
 }
 ```
 
@@ -262,8 +258,7 @@ curl -X GET "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-sea
 ```json
 {
   "status": "ok",
-  "result": [1, 2, 3, 4],
-  "time": 0.01
+  "result": [1, 2, 3, 4]
 }
 ```
 
@@ -301,8 +296,7 @@ curl -X GET "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-sea
       "api_key": "secret-1",
       "base_url": "https://example.com"
     }
-  },
-  "time": 0.01
+  }
 }
 ```
 
@@ -348,8 +342,7 @@ curl -X POST "http://localhost:1933/api/v1/privacy-configs/skill/byted-viking-se
       "api_key": "secret-1",
       "base_url": "https://example.com"
     }
-  },
-  "time": 0.01
+  }
 }
 ```
 

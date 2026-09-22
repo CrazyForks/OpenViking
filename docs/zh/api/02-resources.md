@@ -76,7 +76,7 @@ URL/文件  Parser  TreeBuilder  AGFS    Summarizer/Vector
 - 使用 `UnifiedResourceProcessor` 根据资源类型解析内容
 - 支持多种格式：文档（PDF/Markdown/Word）、表格（Excel/PPT）、代码、媒体文件等
 - 解析结果写入临时 VikingFS 目录
-- 媒体文件通过 VLM（视觉语言模型）生成描述
+- 媒体解析器校验并保存原文件；启用相应配置后，在语义处理阶段调用 VLM 生成描述
 
 #### 阶段 2：资源树构建 (TreeBuilder)
 - `TreeBuilder.finalize_from_temp()` 扫描临时目录结构

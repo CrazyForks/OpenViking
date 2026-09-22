@@ -6,7 +6,7 @@ Source: [examples/dsh-memory-plugin](https://github.com/volcengine/OpenViking/tr
 
 ## Install
 
-DSH shares the installer with the other memory plugins. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; every step is idempotent—re-running it is entirely safe.
+DSH shares the installer with the other memory plugins. It asks for your language (English/中文), which harnesses to install, the download source, and your OpenViking credentials; the installation steps support repeated runs.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)
@@ -20,7 +20,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 When DSH is selected, the installer asks which profile to install into and defaults to `web`. Pass `--dsh-profile <name>` to answer it up front.
 
-After using it for a while, start a new conversation and ask about something you mentioned earlier—it will remember.
+After installation, use the verification steps below to check tool access and cross-session recall.
 
 <details>
 <summary><b>Manual setup</b></summary>

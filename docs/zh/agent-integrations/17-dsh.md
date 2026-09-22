@@ -6,7 +6,7 @@
 
 ## 安装
 
-DSH 与其他记忆插件共用同一个安装器。它会依次询问语言（English/中文）、要安装的 harness、下载源和 OpenViking 凭据；每一步都是幂等的，重复运行完全安全。
+DSH 与其他记忆插件共用同一个安装器。它会依次询问语言（English/中文）、要安装的 harness、下载源和 OpenViking 凭据；安装步骤支持重复执行。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/volcengine/OpenViking/main/examples/memory-plugin-shared/install.sh)
@@ -20,7 +20,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 选择 DSH 后，安装器会询问装到哪个 profile，默认 `web`。也可以用 `--dsh-profile <name>` 提前指定。
 
-用一段时间后，开一个新会话问问之前提过的事情——它会记得。
+安装后按下方“验证”步骤检查工具接入和跨会话召回。
 
 <details>
 <summary><b>手动安装</b></summary>
@@ -105,7 +105,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 同一个 `config` 块里的 `skillCatalog` 和 `skillCatalogTokenBudget` 控制会话开始时注入的技能清单。清单先列你自己的技能，再列账号内共享在 `viking://agent/skills` 下的技能，每条描述截到约 40 token；它有独立的预算（默认 `1200` token，不占用画像预算），描述放不下时只列名称。`skillCatalog: false` 或把预算设为 `0` 即可关闭；对应的环境变量是 `OPENVIKING_SKILL_CATALOG` 和 `OPENVIKING_SKILL_CATALOG_TOKEN_BUDGET`。
 
-patch 中写的凭证优先于环境变量。行为旋钮按优先级从高到低解析：`OPENVIKING_*` 环境变量、工作区的 `.openviking/config.json` 与 `config.local.json`、`ovcli.conf` 的 `plugin.dsh`、`ovcli.conf` 的 `plugin`，最后才是这个 patch 块。完整参数列表见[插件 README](https://github.com/volcengine/OpenViking/tree/main/examples/dsh-memory-plugin)。
+patch 中写的凭证优先于环境变量。行为配置按优先级从高到低解析：`OPENVIKING_*` 环境变量、工作区的 `.openviking/config.json` 与 `config.local.json`、`ovcli.conf` 的 `plugin.dsh`、`ovcli.conf` 的 `plugin`，最后才是这个 patch 块。完整参数列表见[插件 README](https://github.com/volcengine/OpenViking/tree/main/examples/dsh-memory-plugin)。
 
 </details>
 

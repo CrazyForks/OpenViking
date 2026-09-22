@@ -78,8 +78,7 @@ ov observer queue
     "is_healthy": true,
     "has_errors": false,
     "status": "Queue                 Pending  In Progress  Processed  Errors  Total\nEmbedding             0        0            10         0       10\nSemantic              0        0            10         0       10\nTOTAL                 0        0            20         0       20"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -161,8 +160,7 @@ ov observer vikingdb
     "is_healthy": true,
     "has_errors": false,
     "status": "Collection  Index Count  Vector Count  Status\ncontext     1            55            OK\nTOTAL       1            55"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -241,8 +239,7 @@ ov observer models
     "is_healthy": true,
     "has_errors": false,
     "status": "provider_model         healthy  detail\ndense_embedding        yes      ...\nrerank                 yes      ...\nvlm                    yes      ..."
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -289,8 +286,7 @@ The public SDKs and CLI do not currently expose a lock-specific observer method.
     "is_healthy": true,
     "has_errors": false,
     "status": "..."
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -341,8 +337,7 @@ ov observer retrieval
     "is_healthy": true,
     "has_errors": false,
     "status": "..."
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -393,8 +388,7 @@ ov observer filesystem
     "is_healthy": true,
     "has_errors": false,
     "status": "..."
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -507,8 +501,7 @@ ov observer system
         "status": "..."
       }
     }
-  },
-  "time": 0.1
+  }
 }
 ```
 

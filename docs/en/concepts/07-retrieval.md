@@ -1,6 +1,6 @@
 # Retrieval Mechanism
 
-OpenViking uses two-stage retrieval: intent analysis + hierarchical retrieval + rerank.
+OpenViking retrieves context through vector search and directory traversal. `search()` can analyze query intent first; a configured reranker can refine candidate ordering.
 
 ## Overview
 
@@ -14,9 +14,9 @@ Query → Intent Analysis → Hierarchical Retrieval → Rerank → Results
 
 | Feature | find() | search() |
 |---------|--------|----------|
-| Session context | Not needed | Required |
-| Intent analysis | Not used | LLM analysis |
-| Query count | Single query | 0-5 TypedQueries |
+| Session context | Not used | Optional; used when `session_id` is supplied |
+| Intent analysis | Not used | Uses an LLM when session content exists and intent analysis is enabled |
+| Query count | Single query | zero or more TypedQueries |
 | Latency | Low | Higher |
 | Use case | Simple queries | Complex tasks |
 
@@ -31,6 +31,10 @@ results = await client.find(
 
 # search(): Complex task (needs session context)
 session_info = await client.create_session()
+await client.add_message(
+    session_id=session_info["session_id"], role="user",
+    content="We are designing the OAuth login flow for this project.",
+)
 results = await client.search(
     query="Help me create an RFC document",
     session_id=session_info["session_id"],
@@ -39,7 +43,7 @@ results = await client.search(
 
 ## Intent Analysis
 
-IntentAnalyzer uses LLM to analyze query intent and generate 0-5 TypedQueries. The model used for this stage is separately configurable via the [`query_planner`](../guides/01-configuration.md#query-planner) config, falling back to `vlm` when unset.
+When `retrieval.enable_intent=true` and the session contains a summary or messages, IntentAnalyzer uses an LLM to analyze query intent and generate zero or more TypedQueries. The model used for this stage is separately configurable via the [`query_planner`](../guides/01-configuration.md#query-planner) config, falling back to `vlm` when unset.
 
 ### Input
 
@@ -135,7 +139,7 @@ Rerank refines candidate results in THINKING mode.
 
 ### Trigger Conditions
 
-- Rerank AK/SK configured
+- A reranking model and its credentials are configured
 - Using THINKING mode (default for search())
 - If rerank returns an invalid result or the API call fails, retrieval falls back to vector scores
 

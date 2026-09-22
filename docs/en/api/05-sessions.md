@@ -163,8 +163,7 @@ ov session new
       "user_id": "alice"
     },
     "auto_commit_policy": null
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -253,8 +252,7 @@ ov session list
       "uri": "viking://user/alice/sessions/e5f6g7h8",
       "is_dir": true
     }
-  ],
-  "time": 0.1
+  ]
 }
 ```
 
@@ -996,8 +994,7 @@ ov session delete a1b2c3d4
   "status": "ok",
   "result": {
     "session_id": "a1b2c3d4"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -1206,8 +1203,7 @@ ov session add-message a1b2c3d4 --role user --content "How do I authenticate use
   "result": {
     "session_id": "a1b2c3d4",
     "message_count": 2
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -1217,7 +1213,7 @@ ov session add-message a1b2c3d4 --role user --content "How do I authenticate use
 
 #### 1. API Implementation Introduction
 
-Add multiple messages to a session in a single request. Suitable for scenarios that require writing a large number of messages at once (e.g., importing conversation history, memory extraction), offering significantly better performance than calling `add_message()` repeatedly.
+Add multiple messages to a session in one request, for example when importing conversation history. Batching reduces the number of requests compared with calling `add_message()` for each message.
 
 **Difference from `add_message()`**:
 - `add_message()`: Add 1 message per request
@@ -1325,8 +1321,7 @@ ov add-memory '[{"role":"user","content":"Hello"},{"role":"assistant","content":
     "session_id": "a1b2c3d4",
     "message_count": 5,
     "added": 3
-  },
-  "time": 0.1
+  }
 }
 ```
 

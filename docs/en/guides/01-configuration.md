@@ -709,8 +709,8 @@ Vision Language Model for semantic extraction (L0/L1 generation).
 
 When resources are added, VLM generates:
 
-1. **L0 (Abstract)**: ~100 token summary
-2. **L1 (Overview)**: ~2k token overview with navigation
+1. **L0 (Abstract)**: directory summary, with a default limit of 256 characters
+2. **L1 (Overview)**: directory overview with navigation, with a default limit of 4000 characters
 
 If VLM is not configured, L0/L1 will be generated from content directly (less semantic), and multimodal resources may have limited descriptions.
 
@@ -852,7 +852,7 @@ Then add the following to your OpenViking configuration:
 
 For `ollama/guoxuter/ov_intent_analysis_sft:v7_q8` (and `v4_q8`), OpenViking automatically uses the matching bundled prompt during search (`retrieval.ov_intent_analysis_sft_v7` and `retrieval.ov_intent_analysis_sft_v4` respectively). No prompt file replacement or `prompts.templates_dir` override is required. If you use an unmapped model, OpenViking keeps the default `retrieval.intent_analysis` prompt.
 
-This lets a small model handle retrieval planning with lower latency, while keeping a stronger `vlm` for semantic extraction, memory extraction, and multimodal processing.
+This separates retrieval planning from the `vlm` used for semantic extraction, memory extraction, and multimodal processing. Actual latency depends on the model, hardware, and request load.
 
 ### feishu
 
@@ -1079,7 +1079,7 @@ The `mode="context"` assembly face on `/search` uses two timeout fuses:
 | `recall_intent_timeout_s` | float | Timeout for session-aware query expansion; on timeout the original user query is used | `5.0` |
 | `recall_rewrite_timeout_s` | float | Timeout for the digest rewrite; on timeout `digest` is empty and `rendered` is returned as usual | `30.0` |
 
-Both LLM steps are strictly opt-in: expansion needs a `session_id`, the rewrite needs `rewrite`. Either one failing degrades gracefully and never blocks recall.
+Query expansion requires a `session_id` with content and intent analysis enabled; rewriting requires `rewrite`. Each model call has its own timeout. On failure, retrieval falls back to the original query or the unrevised result.
 
 ### grep
 
@@ -1880,7 +1880,7 @@ For details on the lock mechanism, see [Path Locks and Crash Recovery](../concep
 
 ## Task Tracker Persistence
 
-The task tracker records async task state for endpoints that return a `task_id` (task types include `session_commit`, `add_resource`, `add_skill`, and `admin_reindex`). Task records are always persisted in AGFS, so a `task_id` returned by one instance can be looked up from another instance and task history survives a restart.
+The task tracker records async task state for endpoints that return a `task_id` (task types include `session_commit`, `add_resource`, `add_skill`, and `admin_reindex`). Task records are always persisted in AGFS, so instances sharing the same persistent storage can query the same `task_id`, and task history survives a restart.
 
 No `storage.task_tracker` configuration is required. If an older configuration still includes `storage.task_tracker`, OpenViking logs a warning and ignores it.
 
@@ -1894,7 +1894,7 @@ Task record files are stored under the owning account's system directory:
 
 ## encryption Section
 
-Enable at-rest data encryption to ensure data security and isolation in multi-tenant environments. Encryption is completely transparent to users with no API changes.
+At-rest encryption protects newly written files with account-specific keys through the existing APIs. Existing plaintext files are not encrypted automatically; migrate or rewrite them separately.
 
 ```json
 {

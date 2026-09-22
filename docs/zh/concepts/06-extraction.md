@@ -114,7 +114,7 @@ SemanticMsg(
 
 ### 单目录处理步骤
 
-1. **并发生成文件摘要**：限制并发数 10
+1. **并发生成文件摘要**：并发上限由 `vlm.max_concurrent` 控制
 2. **收集子目录摘要**：读取已生成的 .abstract.md
 3. **生成 .overview.md**：LLM 生成 L1 概览
 4. **提取 .abstract.md**：从 overview 提取 L0 摘要
@@ -131,10 +131,10 @@ L0/L1 是目录级 sidecar，不是 per-file sidecar。生成父目录摘要时�
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `max_concurrent_llm` | 10 | 并发 LLM 调用数 |
-| `max_images_per_call` | 10 | 单次 VLM 最大图片数 |
-| `max_sections_per_call` | 20 | 单次 VLM 最大章节数 |
-| `overview_sample_limit` | 32 | 单个目录摘要使用的直接子项样本上限 |
+| `vlm.max_concurrent` | 32 | 语义处理并发上限，传入 `SemanticProcessor.max_concurrent_llm` |
+| `max_images_per_call` | 10 | `VLMProcessor` 构造参数：单次最大图片数，非 `ov.conf` 字段 |
+| `max_sections_per_call` | 20 | `VLMProcessor` 构造参数：单次最大章节数，非 `ov.conf` 字段 |
+| `semantic.overview_sample_limit` | 32 | 单个目录摘要使用的直接子项样本上限 |
 
 ## 代码骨架提取
 

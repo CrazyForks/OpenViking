@@ -171,8 +171,7 @@ CLI 会按所选列请求 `extra_fields`（`locked`、`id`、`count`）；选择
       "uri": "viking://resources/docs/",
       "tags": ["team=search"]
     }
-  ],
-  "time": 0.1
+  ]
 }
 ```
 
@@ -288,8 +287,7 @@ openviking tree viking://resources/my-project/ --simple --fields path,tags
       "uri": "viking://resources/docs/api.md",
       "tags": ["team=search", "env=prod"]
     }
-  ],
-  "time": 0.1
+  ]
 }
 ```
 
@@ -369,8 +367,7 @@ openviking stat viking://resources/my-project/docs
     "isLocked": false,
     "id": "a1b2c3d4e5f678901234567890abcdef",
     "uri": "viking://resources/docs/api.md"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -388,12 +385,11 @@ openviking stat viking://resources/my-project/docs
     "isLocked": false,
     "uri": "viking://resources/docs",
     "count": 42
-  },
-  "time": 0.1
+  }
 }
 ```
 
-`isLocked` 字段反映路径当前是否被路径锁持有：路径自身存在有效锁（包括目标路径对应的 exact-path lock），或者任一祖先目录持有 TreeLock。当 LockManager 不可用或查询失败时返回 `false`，调用方可据此避免先写入再观察到 `ResourceBusyError`。
+`isLocked` 字段反映路径当前是否被路径锁持有：路径自身存在有效锁（包括目标路径对应的 exact-path lock），或者任一祖先目录持有 TreeLock。当 LockManager 不可用或查询失败时返回 `false`。这只是状态查询，不会预留锁；查询后仍可能有其他写入者取得锁，写入时仍需处理 `ResourceBusyError`。
 
 `id` 字段（仅文件）是 VikingDB 中向量记录的确定性主键，对 level 2（常规文件）记录按 `md5(f"{account_id}:{uri}")` 计算。该值与向量集合 schema 中的 `id` 字段一致，可用于直接交叉引用向量记录而无需额外查询。目录不返回此字段，因为一个目录在多个语义层（L0 abstract、L1 overview、L2）下可能对应多条向量记录，id 不唯一。由于索引是异步生成的，新返回的 ID 可能暂时无法解析；对应向量记录被删除后，按 ID 查询也会失败。这两种情况下，`stat(id)` 都会返回 `NOT_FOUND`，并在原因中提示数据可能尚未索引或已经删除。
 
@@ -571,8 +567,7 @@ openviking mkdir viking://resources/new-project/ --description "接口文档目�
   "status": "ok",
   "result": {
     "uri": "viking://resources/new-project/"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -650,8 +645,7 @@ openviking rm viking://resources/old.md [--recursive]
   "status": "ok",
   "result": {
     "uri": "viking://resources/docs/old.md"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -663,8 +657,7 @@ openviking rm viking://resources/old.md [--recursive]
   "result": {
     "uri": "viking://resources/old-project/",
     "estimated_deleted_count": 42
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -831,8 +824,7 @@ openviking mv viking://resources/old-name/ viking://resources/new-name/
   "result": {
     "from": "viking://resources/old-name/",
     "to": "viking://resources/new-name/"
-  },
-  "time": 0.1
+  }
 }
 ```
 

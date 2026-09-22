@@ -1,6 +1,6 @@
 # 多版本管理（快照）
 
-OpenViking 在 VikingFS 之上提供了一套基于 Git 的多版本管理能力，称为**快照（Snapshot）**。它把某个账号（account）下的整棵资源树保存成一系列不可变的提交（commit），让你能够回溯历史、对比版本，并把工作区恢复到任意一个历史状态。
+快照将指定范围内的文件树保存为不可变版本。使用 `commit` 保存、`log` 查看历史、`show` 读取旧版文件、`restore` 恢复已保存的内容。未提交或被排除的文件不在恢复范围内，ACL 和向量索引也不保存历史版本。
 
 快照能力底层由内嵌在 Rust RAGFS 层的 [gitoxide](https://github.com/Byron/gitoxide) 驱动，按 `account_id` 维护一个逻辑 Git 仓库（每个账号一个仓库），对调用方完全透明——你无需关心 `.ovgit` 目录、对象库或引用细节。
 

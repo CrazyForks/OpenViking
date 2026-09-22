@@ -161,7 +161,7 @@ Add a skill to the knowledge base.
 
 #### 1. API Implementation Overview
 
-Skills are a special type of resource that define actions or tools agents can perform.
+This endpoint stores Skill instructions and supporting files, then generates summaries and indexes for retrieval. It does not execute the Skill or register tools.
 
 **Processing Flow**:
 1. Receive skill data or uploaded temporary file

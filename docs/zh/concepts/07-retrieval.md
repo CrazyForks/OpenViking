@@ -1,6 +1,6 @@
 # 检索机制
 
-OpenViking 采用两阶段检索：意图分析 + 层级检索 + Rerank。
+OpenViking 结合向量搜索和目录遍历检索上下文。`search()` 可先分析查询意图；配置 Rerank 后，可进一步调整候选排序。
 
 ## 概览
 
@@ -14,9 +14,9 @@ OpenViking 采用两阶段检索：意图分析 + 层级检索 + Rerank。
 
 | 特性 | find() | search() |
 |------|--------|----------|
-| 会话上下文 | 不需要 | 需要 |
-| 意图分析 | 不使用 | 使用 LLM 分析 |
-| 查询数量 | 单一查询 | 0-5 个 TypedQuery |
+| 会话上下文 | 不使用 | 可选，传入 `session_id` 时使用 |
+| 意图分析 | 不使用 | 有会话内容且启用时使用 LLM |
+| 查询数量 | 单一查询 | 零个或多个 TypedQuery |
 | 延迟 | 低 | 较高 |
 | 适用场景 | 简单查询 | 复杂任务 |
 
@@ -31,6 +31,10 @@ results = await client.find(
 
 # search(): 复杂任务（需要会话上下文）
 session_info = await client.create_session()
+await client.add_message(
+    session_id=session_info["session_id"], role="user",
+    content="我们正在为项目设计 OAuth 登录流程。",
+)
 results = await client.search(
     query="帮我创建一个 RFC 文档",
     session_id=session_info["session_id"],
@@ -39,7 +43,7 @@ results = await client.search(
 
 ## 意图分析
 
-IntentAnalyzer 使用 LLM 分析查询意图，生成 0-5 个 TypedQuery。该阶段使用的模型可通过 [`query_planner`](../guides/01-configuration.md#query-planner) 配置项单独指定，未设置时回退到 `vlm`。
+当 `retrieval.enable_intent=true` 且会话包含摘要或消息时，IntentAnalyzer 使用 LLM 分析查询意图，生成零个或多个 TypedQuery。该阶段使用的模型可通过 [`query_planner`](../guides/01-configuration.md#query-planner) 配置项单独指定，未设置时回退到 `vlm`。
 
 ### 输入
 
@@ -135,7 +139,7 @@ Rerank 在 THINKING 模式下对候选结果精排。
 
 ### 触发条件
 
-- 配置了 Rerank AK/SK
+- 配置了可用的 Rerank 模型及其认证信息
 - 使用 THINKING 模式（search() 默认）
 - 如果 rerank 返回无效结果或 API 调用失败，会回退到向量分数
 

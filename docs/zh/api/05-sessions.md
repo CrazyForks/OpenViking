@@ -163,8 +163,7 @@ ov session new
       "user_id": "alice"
     },
     "auto_commit_policy": null
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -253,8 +252,7 @@ ov session list
       "uri": "viking://user/alice/sessions/e5f6g7h8",
       "is_dir": true
     }
-  ],
-  "time": 0.1
+  ]
 }
 ```
 
@@ -994,8 +992,7 @@ ov session delete a1b2c3d4
   "status": "ok",
   "result": {
     "session_id": "a1b2c3d4"
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -1177,8 +1174,7 @@ ov session add-message a1b2c3d4 --role user --content "How do I authenticate use
   "result": {
     "session_id": "a1b2c3d4",
     "message_count": 2
-  },
-  "time": 0.1
+  }
 }
 ```
 
@@ -1188,7 +1184,7 @@ ov session add-message a1b2c3d4 --role user --content "How do I authenticate use
 
 #### 1. API 实现介绍
 
-向会话中批量添加多条消息。适用于需要一次性写入大量消息的场景（如历史对话导入、记忆抽取），相比逐条调用 `add_message()` 可显著提升性能。
+在一次请求中向会话添加多条消息，适合导入历史对话。与逐条调用 `add_message()` 相比，批量提交可减少请求次数。
 
 **与 `add_message()` 的区别**：
 - `add_message()`：单次请求添加 1 条消息
@@ -1296,8 +1292,7 @@ ov add-memory '[{"role":"user","content":"Hello"},{"role":"assistant","content":
     "session_id": "a1b2c3d4",
     "message_count": 5,
     "added": 3
-  },
-  "time": 0.1
+  }
 }
 ```
 
