@@ -160,7 +160,7 @@ To retry creation safely, reuse the same `Idempotency-Key` and request parameter
 
 ### Get task status
 
-A task is visible only to the principal that created it. A missing task and a task owned by another principal both return `404`.
+For ordinary user requests, a task is visible only to its creator; missing tasks and tasks owned by another user return `404`. ROOT queries have separate administrative visibility and cannot cancel tasks.
 
 ```http
 GET /api/v1/tasks/{task_id}
