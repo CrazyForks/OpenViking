@@ -2,6 +2,8 @@
 
 The ACL API manages direct grants and restricted mode on shared `viking://resources/...` nodes and reports their inherited effective permissions. Private resources do not accept ACLs and must be moved into the shared scope to be shared.
 
+To enforce grants, first enable `acl.enabled` for the account through [Admin configuration](08-admin.md#runtime-configuration). Setting entries while enforcement is disabled does not restrict access.
+
 Read [Resource Access Control (ACL)](../concepts/15-acl.md) for the permission and inheritance model.
 
 ## Endpoint Summary
@@ -18,10 +20,10 @@ Every endpoint requires `manage` on the target node. Account `ADMIN`s implicitly
 
 `viking://resources` is a fixed shared scope and cannot carry a direct ACL. The
 account setting `acl.enabled` defaults to `false`. While disabled, shared
-resources use the original public behavior and ACL authorization is skipped.
+resources use the account-wide sharing behavior and ACL authorization is skipped.
 When enabled, newly created shared files, directories, and `add-resource` roots
 grant the creator direct `manage` and inherit the parent ACL. Existing content
-without an ACL remains public. Descendants within an `add-resource` import only
+without an ACL remains shared within the account. Descendants within an `add-resource` import only
 inherit the root grant.
 
 ## Data Structures

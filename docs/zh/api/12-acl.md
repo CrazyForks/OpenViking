@@ -2,6 +2,8 @@
 
 ACL API 管理 `viking://resources/...` 共享资源的直接授权和 restricted 模式，并返回节点继承后的有效权限。个人资源不接受 ACL，需要分享时应移动到共享区。
 
+要让授权限制生效，先通过 [Admin configuration](08-admin.md#runtime-configuration) 启用该 account 的 `acl.enabled`。关闭鉴权时，仅设置 ACL 条目不会限制访问。
+
 权限模型和继承规则请先阅读 [资源访问控制（ACL）](../concepts/15-acl.md)。
 
 ## 接口总览
@@ -17,9 +19,9 @@ ACL API 管理 `viking://resources/...` 共享资源的直接授权和 restricte
 所有接口都要求调用者对目标节点拥有 `manage`。共享资源由 account `ADMIN` 隐式管理。
 
 `viking://resources` 是固定共享 scope，不能设置直接 ACL。账号配置
-`acl.enabled` 默认为 `false`。关闭时，共享资源完全使用原有公开规则，不执行 ACL
+`acl.enabled` 默认为 `false`。关闭时，共享资源按原有规则在 account 内共享，不执行 ACL
 鉴权；开启后，新建共享文件、目录和 `add-resource` 根节点会给创建者直接
-`manage`，同时继承父目录 ACL。已有且未设置 ACL 的内容仍按公开规则访问；
+`manage`，同时继承父目录 ACL。已有且未设置 ACL 的内容仍在 account 内共享；
 `add-resource` 的内部节点只继承，不重复写直接权限。
 
 ## 数据结构
