@@ -38,8 +38,7 @@ Admin API 用于多租户环境下的账户、用户和用户组管理。包括�
 {
   "url": "http://localhost:1933",
   "api_key": "alice-user-key",
-  "root_api_key": "your-root-api-key",
-  ...
+  "root_api_key": "your-root-api-key"
 }
 ```
 
@@ -48,7 +47,7 @@ Admin API 用于多租户环境下的账户、用户和用户组管理。包括�
 - `ov --sudo admin` - 账户和用户管理
 - `ov --sudo system` - 系统工具命令
 - `ov --sudo reindex` - 重建索引
-- `ov --sudo admin migrate` - legacy agent/session 迁移和 cleanup
+- `ov --sudo admin migrate` - 旧 Session 迁移和清理
 - `ov --sudo task status/list` - 查询 root/system 后台任务，例如迁移任务
 
 ### 使用限制
@@ -166,6 +165,14 @@ ROOT 可管理任意 Account；ADMIN 仅可管理自己 Account 的模板；普�
 | PUT | `/api/v1/admin/accounts/{account_id}/memory-templates/{memory_type}` | 补齐并发布单个模板 |
 | DELETE | `/api/v1/admin/accounts/{account_id}/memory-templates/{memory_type}` | 删除该模板覆盖，恢复部署默认值 |
 
+保留已有自定义内容并更新模板时，按以下步骤操作：
+
+1. GET 目标模板，取出 `effective` 对象。
+2. 修改允许编辑的说明或 `content_template`，再 PUT 整个对象。省略的配置会恢复部署默认值。
+3. 核对返回的 `status` 和 `effective`。后续开始的抽取使用新模板，已有记忆不会立即重写。
+
+需要恢复该类型的部署默认值时，调用 DELETE。
+
 内核接收原有 Memory YAML 结构对应的 JSON 对象，并在接口层强制校验以下白名单。
 仅开放下列六类模板；Experience、Cases、Trajectories 等其他类型不开放查询或编辑，
 不支持通过接口新增、删除或重命名 Memory Type。DELETE 仅移除自定义覆盖，不删除模板类型。
@@ -220,6 +227,8 @@ DELETE 始终移除该类型的覆盖；重复 PUT 默认配置或 DELETE 都是
 对象使用 YAML 字段名，例如 `fields[].type`。列表接口返回 `result.account_id` 和
 `result.templates`；单模板操作返回 `result.account_id` 及上述模板结果。
 
+::: details 发布、存储与并发抽取的处理方式
+
 按 Account、按模板独立存储：
 
 ```text
@@ -259,15 +268,17 @@ Registry；无关类型变更不会触发拆批。不同 Schema 分开合并、�
 不同 Account 不串用，也不修改共享的部署 Registry。发布或恢复默认不会主动重写历史
 记忆，后续 Commit 可按生效规则更新已有记忆。
 
+:::
+
 白名单内提交的说明和正文模板必须是非空字符串；单文件序列化后不超过 1 MiB。
 `description`（类型说明及 `fields[].description`）统一支持受限 Jinja，不因来自部署默认值或账户覆盖而改变规则，不再记录或检查说明来源标志。
 仅开放已有上下文中的 `language`，不开放正文变量、`extract_context` 或任意对象。语法复用下节受限正文的条件、局部变量、有界字面量循环、安全字符串方法、白名单字符串过滤器及测试；不支持任意调用。
 例如已有 Schema 渲染上下文提供 `language=en` 时，<code v-pre>请使用 {{ language.upper() }}。</code> 会展开为 `请使用 EN。`，用户修改文字不会让变量停止展开。
-本次不新增语言传递链路，Python 协议原有的静态字段说明展示路径保持不变。缺失语言时保留原来的 undefined/空字符串行为，可用 `language or '中文'` 提供回退；上下文值中的 Jinja 不会被递归执行。
+渲染使用调用路径传入的语言，Python 协议还保留静态字段说明展示路径。缺失语言时保留原来的 undefined/空字符串行为，可用 `language or '中文'` 提供回退；上下文值中的 Jinja 不会被递归执行。
 越界的自定义表达式在保存前拒绝，已保存说明在抽取加载时重新校验；部署说明渲染也受同样限制，已有部署若使用白名单外语法，需要调整，不能凭来源绕过限制。
 每条说明最多 2048 个 AST 节点，渲染结果最多 1 MiB。正文 `content_template` 的变量、源码大小及默认正文兼容规则仍按下节处理。
 每个可编辑 `description` 最多 50,000 个 Unicode 码点，按提交的原文计数，包含空格、换行和模板样式的文字，不按 UTF-8 字节或渲染后的长度计数。各说明独立计数，不合并计算；整个配置仍受 1 MiB 上限约束。超过上限返回 400，不修改当前配置。
-发布不调用 LLM。存储错误或文件损坏明确报错，不伪装成系统默认。本次不增加公共文件浏览目录、SDK/CLI 命令、草稿或历史版本 UI。
+发布不调用 LLM。存储错误或文件损坏明确报错，不伪装成系统默认。这些接口暂无 SDK/CLI 封装，读取、发布和恢复模板均使用 HTTP API。
 
 #### content_template 的编辑与执行边界
 
@@ -438,7 +449,7 @@ User override 并重新继承上述默认值，请 PATCH `{"memory_policy": null
 **代码入口：**
 - `openviking/server/routers/admin.py:create_account` - HTTP 路由
 - `openviking/server/api_keys/new.py:APIKeyManager.create_account` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_create_account` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_create_account` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -450,10 +461,11 @@ User override 并重新继承上述默认值，请 PATCH `{"memory_policy": null
 | admin_user_id | str | 是 | - | 首个管理员用户 ID |
 | seed | str | 否 | `null` | 可选的确定性 API Key seed。传入后，key secret 为 `sha256(user_id + "\0" + seed)` |
 | user_config | object | 否 | `null` | 首个管理员用户的初始配置。支持 `add_targets.resource_uri`、`add_targets.skill_uri` 和 `memory_policy` |
+| settings | object | 否 | `null` | 仅 HTTP。初始 Account 运行时配置，允许的字段与下述 Account configuration 接口一致 |
 
 **说明：**
 - 在 `trusted` 模式下，响应中不会包含 `user_key` 字段
-- 省略 `seed` 时使用默认随机 API Key。seed 应视为密钥材料；过短的 seed 会让 key 更容易被猜测。
+- 省略 `seed` 时随机生成 API Key。运行确定性示例前，将 `OV_KEY_SEED` 设为安全生成的秘密值；Go 示例还需导入 `os`。不要使用短字符串或可预测内容作为 seed。
 - 不再支持 account 级 namespace 隔离配置。用户记忆使用 user-scoped namespace，一对多外部参与者通过 `peer_id` 表达。
 - `user_config.add_targets.resource_uri` 必须是可写资源目录 URI：`viking://resources` 或 `viking://resources/...`、`viking://~/resources` 或 `viking://~/resources/...`、`viking://user/{user_id}/resources` 或 `viking://user/{user_id}/resources/...`、`viking://user/{user_id}/peers/{peer_id}/resources` 或 `viking://user/{user_id}/peers/{peer_id}/resources/...`。
 - `user_config.add_targets.skill_uri` 只能是 `viking://~/skills` 或 `viking://agent/skills`。v1 不支持显式写成 `viking://user/{user_id}/skills`。
@@ -473,36 +485,13 @@ curl -X POST http://localhost:1933/api/v1/admin/accounts \
   -H "X-API-Key: <root-key>" \
   -d '{
     "account_id": "acme",
-    "admin_user_id": "alice",
-    "seed": "alice-seed"
-  }'
-```
-
-`trusted` 模式示例：
-
-```bash
-# 首先，在 api_key 模式下注册网关管理员用户
-curl -X POST http://localhost:1933/api/v1/admin/accounts \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <root-key>" \
-  -d '{
-    "account_id": "platform",
-    "admin_user_id": "gateway-admin"
-  }'
-
-# 然后在 trusted 模式下使用；管理权限来自 root_api_key
-curl -X POST http://localhost:1933/api/v1/admin/accounts \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <root-key>" \
-  -H "X-OpenViking-Account: platform" \
-  -H "X-OpenViking-User: gateway-admin" \
-  -d '{
-    "account_id": "acme",
     "admin_user_id": "alice"
   }'
 ```
 
-`trusted` 模式也支持"不带身份头"的 ROOT 回退写法：
+**trusted 模式**
+
+配置 `server.root_api_key` 后，直接用 root key 调用 Admin API；无需先注册网关用户，也无需切换到 `api_key` 模式。这类请求可以省略身份头，避免与 URL 中的目标 account/user 不匹配。
 
 ```bash
 curl -X POST http://localhost:1933/api/v1/admin/accounts \
@@ -525,7 +514,6 @@ client.initialize()
 result = client.admin_create_account(
     account_id="acme",
     admin_user_id="alice",
-    seed="alice-seed",
 )
 print(f"Account created: {result['account_id']}")
 print(f"Admin user: {result['admin_user_id']}")
@@ -558,7 +546,7 @@ if err != nil {
 }
 fmt.Println(result["account_id"])
 
-seed := "alice-seed"
+seed := os.Getenv("OV_KEY_SEED")
 result, err = client.AdminCreateAccountWithOptions(ctx, "acme-private", "alice", &openviking.AdminCreateAccountOptions{
     Seed: &seed,
     UserConfig: map[string]any{
@@ -575,7 +563,7 @@ result, err = client.AdminCreateAccountWithOptions(ctx, "acme-private", "alice",
 ```bash
 # 需要 ROOT 权限，使用 --sudo
 ov --sudo admin create-account acme --admin alice
-ov --sudo admin create-account acme --admin alice --seed alice-seed
+ov --sudo admin create-account acme --admin alice --seed "$OV_KEY_SEED"
 
 ov --sudo admin create-account acme-private --admin alice \
   --user-config-json '{"add_targets":{"resource_uri":"viking://~/resources","skill_uri":"viking://~/skills"}}'
@@ -612,7 +600,7 @@ ov --sudo admin create-account acme-private --admin alice \
 **代码入口：**
 - `openviking/server/routers/admin.py:list_accounts` - HTTP 路由
 - `openviking/server/api_keys/new.py:APIKeyManager.get_accounts` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_list_accounts` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_list_accounts` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -718,7 +706,7 @@ ov --sudo admin list-accounts --limit 50 --page 2
 **代码入口：**
 - `openviking/server/routers/admin.py:delete_account` - HTTP 路由
 - `openviking/service/deletion.py:DeletionService.delete` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_delete_account` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_delete_account` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -818,7 +806,7 @@ ov --sudo task status <task_id>
 **代码入口：**
 - `openviking/server/routers/admin.py:register_user` - HTTP 路由
 - `openviking/server/api_keys/new.py:APIKeyManager.register_user` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_register_user` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_register_user` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -834,7 +822,7 @@ ov --sudo task status <task_id>
 
 **说明：**
 - 在 `trusted` 模式下，响应中不会包含 `user_key` 字段
-- 省略 `seed` 时使用默认随机 API Key。seed 应视为密钥材料；过短的 seed 会让 key 更容易被猜测。
+- 省略 `seed` 时随机生成 API Key。运行确定性示例前，将 `OV_KEY_SEED` 设为安全生成的秘密值；Go 示例还需导入 `os`。不要使用短字符串或可预测内容作为 seed。
 - ADMIN 只能在自己所属的 account 中注册用户
 - 无法通过用户注册接口直接创建 `"root"` 角色
 - `user_config.add_targets.resource_uri` 必须是可写资源目录 URI：`viking://resources` 或 `viking://resources/...`、`viking://~/resources` 或 `viking://~/resources/...`、`viking://user/{user_id}/resources` 或 `viking://user/{user_id}/resources/...`、`viking://user/{user_id}/peers/{peer_id}/resources` 或 `viking://user/{user_id}/peers/{peer_id}/resources/...`。
@@ -855,8 +843,7 @@ curl -X POST http://localhost:1933/api/v1/admin/accounts/acme/users \
   -H "X-API-Key: <root-or-admin-key>" \
   -d '{
     "user_id": "bob",
-    "role": "user",
-    "seed": "bob-seed"
+    "role": "user"
   }'
 ```
 
@@ -872,7 +859,6 @@ result = client.admin_register_user(
     account_id="acme",
     user_id="bob",
     role="user",
-    seed="bob-seed",
 )
 print(f"User registered: {result['user_id']}")
 print(f"User key: {result.get('user_key', '(not exposed in trusted mode)')}")
@@ -900,7 +886,7 @@ if err != nil {
 }
 fmt.Println(result["user_id"])
 
-seed := "bob-seed"
+seed := os.Getenv("OV_KEY_SEED")
 result, err = client.AdminRegisterUserWithOptions(ctx, "acme", "bob-private", "user", &openviking.AdminRegisterUserOptions{
     Seed: &seed,
     UserConfig: map[string]any{
@@ -915,7 +901,7 @@ result, err = client.AdminRegisterUserWithOptions(ctx, "acme", "bob-private", "u
 # ROOT 或本账户的 ADMIN 都可以执行
 # 如果使用普通用户的 api_key 但该用户是 acme 的 ADMIN：
 ov admin register-user acme bob --role user
-ov admin register-user acme bob --role user --seed bob-seed
+ov admin register-user acme bob --role user --seed "$OV_KEY_SEED"
 # 如果使用 root_api_key（--sudo）：
 ov --sudo admin register-user acme bob --role user
 
@@ -954,7 +940,7 @@ ov admin register-user acme bob-private --role user \
 **代码入口：**
 - `openviking/server/routers/admin.py:list_users` - HTTP 路由
 - `openviking/server/api_keys/new.py:APIKeyManager.get_users` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_list_users` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_list_users` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -965,6 +951,8 @@ ov admin register-user acme bob-private --role user \
 | account_id | str | 是 | - | 工作区 ID |
 | name | str | 否 | null | 按用户 ID 过滤（通配符 `*` 和 `?` 匹配） |
 | role | str | 否 | null | 按角色过滤 |
+| query | str | 否 | null | 仅 HTTP，按用户 ID 做不区分大小写的字面包含匹配 |
+| include_summary | bool | 否 | false | 仅 HTTP，以对象返回分页用户和账号统计 |
 | include_credentials | bool | 否 | true | 仅 HTTP。设为 false 时仅返回 `user_id`、`role` 和 `api_key_available`，不返回密钥或前缀；默认保持现有按鉴权模式返回字段的行为。 |
 | limit | int | 否 | null | 每页数量（≥1）。省略则返回所有匹配项 |
 | page | int | 否 | 1 | 从 1 开始的页码；仅在设置了 `limit` 时生效 |
@@ -1077,7 +1065,7 @@ ov admin list-users acme --limit 50 --page 2
 **代码入口：**
 - `openviking/server/routers/admin.py:remove_user` - HTTP 路由
 - `openviking/service/deletion.py:DeletionService.delete` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_remove_user` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_remove_user` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -1175,7 +1163,7 @@ ov --sudo admin remove-user acme bob
 **代码入口：**
 - `openviking/server/routers/admin.py:set_user_role` - HTTP 路由
 - `openviking/server/api_keys/new.py:APIKeyManager.set_role` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_set_role` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_set_role` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -1237,7 +1225,7 @@ fmt.Println(result["role"])
 **CLI**
 
 ```bash
-# 需要 ROOT 权限，使用 --sudo
+# ROOT 调用示例；acme 的 ADMIN 可用 ov admin set-role，无需 --sudo
 ov --sudo admin set-role acme bob admin
 ```
 
@@ -1260,7 +1248,7 @@ ov --sudo admin set-role acme bob admin
 
 #### 1. API 实现介绍
 
-重新生成用户的 API Key，旧 Key 立即失效。
+生成并保存用户的 API Key。默认随机生成时，更新成功后旧 Key 失效。同一 account、user 和 seed 会生成相同的 Key；轮换密钥时应使用新 seed，或省略 seed。
 
 **处理流程：**
 1. 验证请求者具有 ROOT 权限，或为本账户的 ADMIN
@@ -1271,7 +1259,7 @@ ov --sudo admin set-role acme bob admin
 **代码入口：**
 - `openviking/server/routers/admin.py:regenerate_key` - HTTP 路由
 - `openviking/server/api_keys/new.py:APIKeyManager.regenerate_key` - 核心实现
-- `openviking_cli/client/sync_http.py:SyncHTTPClient.admin_regenerate_key` - Python SDK
+- `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_regenerate_key` - Python SDK
 
 #### 2. 接口和参数说明
 
@@ -1286,7 +1274,7 @@ ov --sudo admin set-role acme bob admin
 **说明：**
 - ADMIN 只能为自己所属的 account 中的用户重新生成密钥
 - 旧密钥会立即失效，需要更新使用该密钥的客户端
-- 省略 `seed` 时使用默认随机重新生成逻辑。
+- 省略 `seed` 时随机生成新密钥。确定性示例使用 `OV_KEY_SEED` 或 `OV_NEW_KEY_SEED`，运行前需将其设为安全生成的秘密值；Go 示例需导入 `os`。不要把示例变量名直接当作 seed。
 
 #### 3. 使用示例
 
@@ -1300,7 +1288,7 @@ POST /api/v1/admin/accounts/{account_id}/users/{user_id}/key
 curl -X POST http://localhost:1933/api/v1/admin/accounts/acme/users/bob/key \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <root-or-admin-key>" \
-  -d '{"seed": "bob-new-seed"}'
+  -d '{}'
 ```
 
 **Python SDK**
@@ -1314,7 +1302,6 @@ client.initialize()
 result = client.admin_regenerate_key(
     account_id="acme",
     user_id="bob",
-    seed="bob-new-seed",
 )
 print(f"New user key: {result['user_key']}")
 ```
@@ -1334,7 +1321,7 @@ if err != nil {
 }
 fmt.Println(result["user_key"])
 
-seed := "bob-new-seed"
+seed := os.Getenv("OV_NEW_KEY_SEED")
 result, err = client.AdminRegenerateKeyWithOptions(ctx, "acme", "bob", &openviking.AdminRegenerateKeyOptions{
     Seed: &seed,
 })
@@ -1346,7 +1333,7 @@ result, err = client.AdminRegenerateKeyWithOptions(ctx, "acme", "bob", &openviki
 # ROOT 或本账户的 ADMIN 都可以执行
 # 如果使用普通用户的 api_key 但该用户是 acme 的 ADMIN：
 ov admin regenerate-key acme bob
-ov admin regenerate-key acme bob --seed bob-new-seed
+ov admin regenerate-key acme bob --seed "$OV_NEW_KEY_SEED"
 # 如果使用 root_api_key（--sudo）：
 ov --sudo admin regenerate-key acme bob
 ```
@@ -1424,7 +1411,7 @@ curl -X POST http://localhost:1933/api/v1/admin/migrate \
   -H "X-API-Key: <root-key>" \
   -d '{"action": "migrate"}'
 
-# 清理旧 namespace
+# 迁移任务完成并核对目标数据后，再清理旧 namespace
 curl -X POST http://localhost:1933/api/v1/admin/migrate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <root-key>" \
@@ -1459,6 +1446,7 @@ fmt.Println(result["task_id"])
 
 ```bash
 ov --sudo admin migrate --output json
+# 先用 ov --sudo task status <task_id> 查询返回的任务，再核对迁移结果。
 ov --sudo admin migrate --cleanup --output json
 ```
 
@@ -1466,7 +1454,8 @@ ov --sudo admin migrate --cleanup --output json
 
 ```json
 {
-  "task_id": "legacy_migration_..."
+  "status": "ok",
+  "result": {"task_id": "legacy_migration_..."}
 }
 ```
 
@@ -1477,6 +1466,8 @@ ov --sudo admin migrate --cleanup --output json
 ## 完整示例
 
 ### 典型管理流程
+
+示例包含删除用户和工作区的步骤，只应在测试工作区完整执行；为真实用户开通账号时跳过删除步骤。
 
 ```bash
 # 步骤 1：ROOT 创建工作区，指定 alice 为首个 admin（需要 --sudo）
