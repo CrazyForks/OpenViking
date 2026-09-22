@@ -4,6 +4,8 @@ OpenViking 提供类 Unix 的文件系统操作来管理上下文。
 
 <a id="webdav"></a><a id="webdav-phase-1"></a>
 
+读取或写入文件正文见[内容 API](12-content.md)。通过 WebDAV 客户端访问文件见 [WebDAV](20-webdav.md)。
+
 ## API 参考
 
 <a id="abstract"></a><a id="overview"></a><a id="read"></a><a id="write"></a>
@@ -28,6 +30,7 @@ OpenViking 提供类 Unix 的文件系统操作来管理上下文。
 | sort_by | str | 否 | None | 在分页前，分别按 `name` 或 `mtime` 排序目录组和文件组；目录仍优先 |
 | sort_order | str | 否 | `asc` | 排序方向：`asc` 或 `desc` |
 | extra_fields | list[str] | 否 | None | 额外返回的字段：`locked`、`id`、`count` |
+| include_tags | bool | 否 | False | 不按标签过滤时，也返回 tags |
 | tags | string[] | 否 | 未设置 | 仅返回同时匹配全部 `k=v` 检索标签的条目 |
 
 `tags` 使用 AND 语义，并在 `offset` 和 `limit` 前应用。带 tags 过滤的响应会返回 `tags`；未过滤时需传 `include_tags=true`（CLI：`-f tags`）才返回它们。HTTP 的 `simple=true` 保持仅返回路径；CLI 同时指定 `--simple` 和 `--fields` 时会获取条目对象，再按指定列输出。
@@ -140,15 +143,15 @@ curl -G "http://localhost:1933/api/v1/fs/ls" \
 **CLI**
 
 ```bash
-openviking ls viking://resources/ [--simple] [--recursive] [--tags team=search,env=prod] [-f FIELDS]
-openviking tree viking://resources/my-project/ [--simple] [--tags team=search,env=prod] [-f FIELDS]
-openviking glob "**/*.md" [--uri viking://resources/] [--simple] [--tags team=search,env=prod] [-f FIELDS]
+ov ls viking://resources/
+ov tree viking://resources/my-project/
+ov glob "**/*.md"
 
 # 在对齐的表格中显示名称和 tags
-openviking ls viking://resources/ --fields name,tags
+ov ls viking://resources/ --fields name,tags
 
 # 无表头，每行输出逗号分隔的 URI 和 tags
-openviking ls viking://resources/ --simple --fields uri,tags
+ov ls viking://resources/ --simple --fields uri,tags
 ```
 
 `-f` / `--fields` 接受逗号分隔的列名。在默认的 table 输出模式下，结果为带表头、按列对齐的表格。支持的字段为 `name`、`uri`、`path`、`type`、`size`、`mode`、`mtime`、`locked`、`id`、`count`、`abstract`、`tags`。同时指定 `--simple` 和 `-f` 时，每行输出逗号分隔的字段值，不带表头或树缩进；仅使用 `--simple` 时仍每行输出一个 URI。若未选择 `name`、`uri` 或 `path`，列表会自动补充 `name` 列，树会补充 `path` 列。
@@ -156,7 +159,7 @@ openviking ls viking://resources/ --simple --fields uri,tags
 CLI 会按所选列请求 `extra_fields`（`locked`、`id`、`count`）；选择 `tags` 列时会请求 `include_tags=true`。这些列选择不改变 `tags` 的 AND 过滤语义。
 
 
-**响应**
+**响应（`output=original`、`include_tags=true`）**
 
 ```json
 {
@@ -194,6 +197,7 @@ CLI 会按所选列请求 `extra_fields`（`locked`、`id`、`count`）；选择
 | limit | int | 否 | None | `node_limit` 的别名 |
 | level_limit | int | 否 | 3 | 最大目录遍历深度 |
 | extra_fields | list[str] | 否 | None | 额外返回的字段：`locked`、`id`、`count` |
+| include_tags | bool | 否 | False | 不按标签过滤时，也返回 tags |
 | tags | string[] | 否 | 未设置 | 仅保留同时匹配全部 `k=v` 检索标签的节点 |
 
 `tags` 使用 AND 语义，并在 `offset` 和 `limit` 前应用。带 tags 过滤的响应会返回 `tags`；未过滤时需传 `include_tags=true` 才返回它们，否则会省略 tags 以避免额外的向量库读取。
@@ -258,14 +262,14 @@ curl -G "http://localhost:1933/api/v1/fs/tree" \
 **CLI**
 
 ```bash
-openviking tree viking://resources/my-project/ --fields path,type,tags
+ov tree viking://resources/my-project/ --fields path,type,tags
 
 # 与 ls、glob 一样支持 --simple 和列选择组合
-openviking tree viking://resources/my-project/ --simple --fields path,tags
+ov tree viking://resources/my-project/ --simple --fields path,tags
 ```
 
 
-**响应**
+**响应（`output=original`、`include_tags=true`）**
 
 ```json
 {
@@ -348,8 +352,8 @@ curl -X GET "http://localhost:1933/api/v1/fs/stat?uri=viking://resources/docs/ap
 **CLI**
 
 ```bash
-openviking stat viking://resources/my-project/docs/api.md
-openviking stat viking://resources/my-project/docs
+ov stat viking://resources/my-project/docs/api.md
+ov stat viking://resources/my-project/docs
 ```
 
 
@@ -391,7 +395,7 @@ openviking stat viking://resources/my-project/docs
 
 `isLocked` 字段反映路径当前是否被路径锁持有：路径自身存在有效锁（包括目标路径对应的 exact-path lock），或者任一祖先目录持有 TreeLock。当 LockManager 不可用或查询失败时返回 `false`。这只是状态查询，不会预留锁；查询后仍可能有其他写入者取得锁，写入时仍需处理 `ResourceBusyError`。
 
-`id` 字段（仅文件）是 VikingDB 中向量记录的确定性主键，对 level 2（常规文件）记录按 `md5(f"{account_id}:{uri}")` 计算。该值与向量集合 schema 中的 `id` 字段一致，可用于直接交叉引用向量记录而无需额外查询。目录不返回此字段，因为一个目录在多个语义层（L0 abstract、L1 overview、L2）下可能对应多条向量记录，id 不唯一。由于索引是异步生成的，新返回的 ID 可能暂时无法解析；对应向量记录被删除后，按 ID 查询也会失败。这两种情况下，`stat(id)` 都会返回 `NOT_FOUND`，并在原因中提示数据可能尚未索引或已经删除。
+`id` 字段（仅文件）是 VikingDB 中向量记录的确定性主键，对 level 2（常规文件）记录按 `md5(f"{account_id}:{uri}")` 计算。该值与向量集合 schema 中的 `id` 字段一致，可用于直接交叉引用向量记录而无需额外查询。目录不返回此字段，因为一个目录在多个语义层（L0 abstract、L1 overview）下可能对应多条向量记录，id 不唯一。由于索引是异步生成的，新返回的 ID 可能暂时无法解析；对应向量记录被删除后，按 ID 查询也会失败。这两种情况下，`stat(id)` 都会返回 `NOT_FOUND`，并在原因中提示数据可能尚未索引或已经删除。
 
 `count` 字段（仅目录）包含该目录下的项目（文件和子目录）估计数量（来自向量索引）。
 
@@ -453,14 +457,14 @@ curl -X POST "http://localhost:1933/api/v1/fs/attrs/set_tags" \
 **CLI**
 
 ```bash
-openviking attrs get viking://resources/docs/api.md
-openviking attrs get viking://resources/docs/api.md tags
-openviking attrs get viking://user/alice/memories/experiences/foo.md memory.resource_refs
-openviking attrs set-tags viking://resources/docs/api.md --tags team=search,env=prod
-openviking attrs set-tags viking://resources/docs --tags team=search --mode append --recursive
+ov attrs get viking://resources/docs/api.md
+ov attrs get viking://resources/docs/api.md tags
+ov attrs get viking://user/alice/memories/experiences/foo.md memory.resource_refs
+ov attrs set-tags viking://resources/docs/api.md --tags team=search,env=prod
+ov attrs set-tags viking://resources/docs --tags team=search --mode append --recursive
 ```
 
-目录目标会更新目录语义记录；`recursive=true` 还会更新已有子文件和子目录语义记录。
+`set-tags` 的目录目标会更新目录语义记录；`recursive=true` 还会更新已有子文件和子目录语义记录。
 
 
 **响应（Resource）**
@@ -555,8 +559,8 @@ curl -X POST http://localhost:1933/api/v1/fs/mkdir \
 **CLI**
 
 ```bash
-openviking mkdir viking://resources/new-project/
-openviking mkdir viking://resources/new-project/ --description "接口文档目录"
+ov mkdir viking://resources/new-project/
+ov mkdir viking://resources/new-project/ --description "接口文档目录"
 ```
 
 
@@ -578,13 +582,15 @@ openviking mkdir viking://resources/new-project/ --description "接口文档目�
 删除文件或目录。递归删除目录时会返回删除的项目估计数量。
 
 `rm` 是幂等操作：删除一个合法但不存在的 URI 仍会成功。
-URI 格式非法、scheme 不支持或使用非公开作用域时返回 `INVALID_URI`。
+URI 格式非法、scheme 不支持，或使用 `temp`、`queue` 等内部作用域时返回 `INVALID_URI`。
 
 **参数**
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | uri | str | 是 | - | 要删除的 Viking URI |
+| wait | bool | 否 | False | 等待删除后的语义刷新完成 |
+| timeout | float | 否 | None | `wait=true` 时的刷新超时，单位秒 |
 | recursive | bool | 否 | False | 递归删除目录 |
 
 
@@ -634,7 +640,7 @@ curl -X DELETE "http://localhost:1933/api/v1/fs?uri=viking://resources/old-proje
 **CLI**
 
 ```bash
-openviking rm viking://resources/old.md [--recursive]
+ov rm viking://resources/old.md
 ```
 
 
@@ -812,7 +818,7 @@ curl -X POST http://localhost:1933/api/v1/fs/mv \
 **CLI**
 
 ```bash
-openviking mv viking://resources/old-name/ viking://resources/new-name/
+ov mv viking://resources/old-name/ viking://resources/new-name/
 ```
 
 

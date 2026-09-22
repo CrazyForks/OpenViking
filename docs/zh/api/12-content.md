@@ -144,7 +144,7 @@ ov overview viking://resources/docs/
 | uri | str | 是 | - | Viking URI（如 `viking://resources/docs/api.md`）或 32 字符十六进制向量记录 `id`（由 `stat()` 返回） |
 | offset | int | 否 | 0 | 起始行号（0 开始） |
 | limit | int | 否 | -1 | 读取的行数，`-1` 表示读到结尾 |
-| raw | bool | 否 | false | 返回未过滤 MEMORY_FIELDS 的原始存储内容（仅 HTTP API，Python SDK 暂未暴露）。 |
+| raw | bool | 否 | false | 返回未过滤 MEMORY_FIELDS 的原始存储内容；Python 中使用 `client.read_raw(uri)` 读取此格式。 |
 
 **说明**
 

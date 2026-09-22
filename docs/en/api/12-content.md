@@ -144,7 +144,7 @@ Read the complete text of an L0, L1, or L2 file.
 | uri | str | Yes | - | Viking URI (e.g. `viking://resources/docs/api.md`) or a 32-character hex vector record `id` (returned by `stat()`) |
 | offset | int | No | 0 | Starting line number (0-indexed) |
 | limit | int | No | -1 | Number of lines to read, `-1` means read to end |
-| raw | bool | No | false | Return raw stored content without memory-field cleanup. HTTP API only (Python SDK does not expose it yet). |
+| raw | bool | No | false | Return raw stored content without memory-field cleanup. In Python, use `client.read_raw(uri)` to read this form. |
 
 **Notes**
 

@@ -4,6 +4,8 @@ OpenViking provides Unix-like file system operations for managing context.
 
 <a id="webdav"></a><a id="webdav-phase-1"></a>
 
+For reading and writing file contents, see [Content](12-content.md). [WebDAV](20-webdav.md) provides file access through WebDAV clients.
+
 ## API Reference
 
 <a id="abstract"></a><a id="overview"></a><a id="read"></a><a id="write"></a>
@@ -28,9 +30,10 @@ List directory contents.
 | sort_by | str | No | None | Sort directories and files within their groups by `name` or `mtime` before pagination; directories remain first |
 | sort_order | str | No | `asc` | Sort direction: `asc` or `desc` |
 | extra_fields | list[str] | No | None | Extra fields to include: `locked`, `id`, `count` |
+| include_tags | bool | No | False | Return tags without requiring a tag filter |
 | tags | string[] | No | Unset | Return only entries matching every supplied `k=v` retrieval tag |
 
-`tags` uses AND semantics and is applied before `offset` and `limit`. Tags are included for filtered responses; for an unfiltered response, request `include_tags=true` (CLI: `-f tags`).
+`tags` uses AND semantics and is applied before `offset` and `limit`. Tags are included for filtered responses; for an unfiltered response, request `include_tags=true` (CLI: `-f tags`). HTTP `simple=true` returns paths only. The CLI fetches entry objects when combining `--simple` with `--fields`.
 
 **Entry Structure**
 
@@ -124,15 +127,15 @@ curl -X GET "http://localhost:1933/api/v1/fs/ls?uri=viking://resources/&recursiv
 **CLI**
 
 ```bash
-openviking ls viking://resources/ [--simple] [--recursive] [--tags team=search,env=prod] [-f FIELDS]
-openviking tree viking://resources/my-project/ [--simple] [--tags team=search,env=prod] [-f FIELDS]
-openviking glob "**/*.md" [--uri viking://resources/] [--simple] [--tags team=search,env=prod] [-f FIELDS]
+ov ls viking://resources/
+ov tree viking://resources/my-project/
+ov glob "**/*.md"
 ```
 
-`-f`/`--fields` accepts a comma-separated list of columns to display (ps `-o` style), producing a column-aligned table with a header row. Available fields: `name`, `uri`, `path`, `type`, `size`, `mode`, `mtime`, `locked`, `id`, `count`, `abstract`, `tags`. Combining `--simple` with `-f` outputs comma-separated values (no header, no tree indentation), one entry per line — suitable for scripting pipelines. When `--simple` is used without `-f`, the previous behavior (bare URI per line) is preserved.
+`-f`/`--fields` accepts a comma-separated list of columns to display (ps `-o` style), producing a column-aligned table with a header row. Available fields: `name`, `uri`, `path`, `type`, `size`, `mode`, `mtime`, `locked`, `id`, `count`, `abstract`, `tags`. Combining `--simple` with `-f` outputs comma-separated values (no header, no tree indentation), one entry per line — suitable for scripting pipelines. When `--simple` is used without `-f`, each line contains a URI. If none of `name`, `uri`, or `path` is selected, the CLI adds `name` for lists or `path` for trees. Selected columns request the corresponding `extra_fields`; the `tags` column requests `include_tags=true`.
 
 
-**Response**
+**Response (`output=original`)**
 
 ```json
 {
@@ -169,9 +172,10 @@ Get directory tree structure.
 | limit | int | No | None | Alias for `node_limit` |
 | level_limit | int | No | 3 | Maximum directory depth to traverse |
 | extra_fields | list[str] | No | None | Extra fields to include: `locked`, `id`, `count` |
+| include_tags | bool | No | False | Return tags without requiring a tag filter |
 | tags | string[] | No | Unset | Retain only nodes matching every supplied `k=v` retrieval tag |
 
-`tags` uses AND semantics and is applied before `offset` and `limit`. Tags are included for filtered responses; for an unfiltered response, request `include_tags=true` (CLI: `-f tags`).
+`tags` uses AND semantics and is applied before `offset` and `limit`. Tags are included for filtered responses; for an unfiltered response, request `include_tags=true` (CLI: `-f tags`). HTTP `simple=true` returns paths only. The CLI fetches entry objects when combining `--simple` with `--fields`.
 
 
 **Python HTTP SDK**
@@ -216,11 +220,11 @@ curl -X GET "http://localhost:1933/api/v1/fs/tree?uri=viking://resources/" \
 **CLI**
 
 ```bash
-openviking tree viking://resources/my-project/
+ov tree viking://resources/my-project/
 ```
 
 
-**Response**
+**Response (`output=original`)**
 
 ```json
 {
@@ -301,8 +305,8 @@ curl -X GET "http://localhost:1933/api/v1/fs/stat?uri=viking://resources/docs/ap
 **CLI**
 
 ```bash
-openviking stat viking://resources/my-project/docs/api.md
-openviking stat viking://resources/my-project/docs
+ov stat viking://resources/my-project/docs/api.md
+ov stat viking://resources/my-project/docs
 ```
 
 
@@ -406,14 +410,14 @@ curl -X POST "http://localhost:1933/api/v1/fs/attrs/set_tags" \
 **CLI**
 
 ```bash
-openviking attrs get viking://resources/docs/api.md
-openviking attrs get viking://resources/docs/api.md tags
-openviking attrs get viking://user/alice/memories/experiences/foo.md memory.resource_refs
-openviking attrs set-tags viking://resources/docs/api.md --tags team=search,env=prod
-openviking attrs set-tags viking://resources/docs --tags team=search --mode append --recursive
+ov attrs get viking://resources/docs/api.md
+ov attrs get viking://resources/docs/api.md tags
+ov attrs get viking://user/alice/memories/experiences/foo.md memory.resource_refs
+ov attrs set-tags viking://resources/docs/api.md --tags team=search,env=prod
+ov attrs set-tags viking://resources/docs --tags team=search --mode append --recursive
 ```
 
-Directory targets update the directory semantic records; `recursive=true` also updates existing descendant files and directory semantic records.
+For `set-tags`, directory targets update the directory semantic records; `recursive=true` also updates existing descendant files and directory semantic records.
 
 
 **Response (Resource)**
@@ -508,8 +512,8 @@ curl -X POST http://localhost:1933/api/v1/fs/mkdir \
 **CLI**
 
 ```bash
-openviking mkdir viking://resources/new-project/
-openviking mkdir viking://resources/new-project/ --description "API docs directory"
+ov mkdir viking://resources/new-project/
+ov mkdir viking://resources/new-project/ --description "API docs directory"
 ```
 
 
@@ -531,13 +535,15 @@ openviking mkdir viking://resources/new-project/ --description "API docs directo
 Remove file or directory. When removing directories recursively, returns the estimated number of items deleted.
 
 `rm` is idempotent: removing a valid URI that does not exist still succeeds.
-Invalid URI formats, unsupported schemes, and non-public scopes return `INVALID_URI`.
+Invalid URI formats, unsupported schemes, and internal scopes such as `temp` or `queue` return `INVALID_URI`.
 
 **Parameters**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | uri | str | Yes | - | Viking URI to remove |
+| wait | bool | No | False | Wait for the semantic refresh after deletion |
+| timeout | float | No | None | Refresh timeout in seconds when `wait=true` |
 | recursive | bool | No | False | Remove directory recursively |
 
 
@@ -587,7 +593,7 @@ curl -X DELETE "http://localhost:1933/api/v1/fs?uri=viking://resources/old-proje
 **CLI**
 
 ```bash
-openviking rm viking://resources/old.md [--recursive]
+ov rm viking://resources/old.md
 ```
 
 
@@ -765,7 +771,7 @@ curl -X POST http://localhost:1933/api/v1/fs/mv \
 **CLI**
 
 ```bash
-openviking mv viking://resources/old-name/ viking://resources/new-name/
+ov mv viking://resources/old-name/ viking://resources/new-name/
 ```
 
 
