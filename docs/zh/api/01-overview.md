@@ -219,8 +219,7 @@ ov -o json ls viking://resources/
 ```json
 {
   "status": "ok",
-  "result": { ... },
-  "time": 0.123
+  "result": { ... }
 }
 ```
 

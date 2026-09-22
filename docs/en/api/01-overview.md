@@ -224,8 +224,7 @@ Regular JSON API responses use the following envelope. File downloads, SSE, Metr
 ```json
 {
   "status": "ok",
-  "result": { ... },
-  "time": 0.123
+  "result": { ... }
 }
 ```
 

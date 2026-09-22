@@ -1042,7 +1042,7 @@ parallel in one request, and scores do not compete or have to sum to 1.
 - `litellm`: LiteLLM Rerank API
 - `jev`: Jev (TypeSafe System One) structured-decision API; each document receives an independent Noul relevance score
 
-Without reranking, candidate base scores come from vector retrieval. Final ranking can still be affected by score propagation and hotness settings below.
+Without a configured reranker, `search` uses QUICK retrieval: vector scores are filtered and sorted without directory traversal, reranking, or hotness blending. `find` and image queries always use this path.
 
 ### retrieval
 
@@ -1061,10 +1061,10 @@ Retrieval ranking configuration for final search scores.
 
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
-| `hotness_alpha` | float | Weight for blending hotness into final retrieval scores. `0.0` disables the hotness boost and keeps scores equal to semantic similarity; `1.0` uses only hotness. Valid range: `0.0` to `1.0`. | `0.0` |
+| `hotness_alpha` | float | Weight for blending hotness into THINKING-mode retrieval scores. `0.0` disables hotness blending; `1.0` uses only hotness. Valid range: `0.0` to `1.0`. | `0.0` |
 | `score_propagation_alpha` | float | Weight for each child result's own score when blending with its parent score during hierarchical retrieval. `1.0` ignores the parent score (semantic similarity only); `0.5` is an equal blend with the parent score; `0.0` uses only the parent score. Valid range: `0.0` to `1.0`. | `1.0` |
 
-Setting `hotness_alpha=0.0` only disables hotness blending; it does not guarantee raw vector-similarity scores. Reranking, score propagation, and the vector backend also affect scoring. Increase it when frequently accessed or recently updated contexts should receive a boost, and compare rankings on representative queries.
+The settings above apply to the THINKING path used by text `search` with a configured reranker. QUICK retrieval ignores both weights. Setting `hotness_alpha=0.0` only disables hotness blending; it does not guarantee raw vector-similarity scores. Reranking, score propagation, and the vector backend also affect scoring. Increase it when frequently accessed or recently updated contexts should receive a boost, and compare rankings on representative queries.
 
 The `mode="context"` assembly face on `/search` uses two timeout fuses:
 
