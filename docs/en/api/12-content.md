@@ -54,7 +54,7 @@ curl -X GET "http://localhost:1933/api/v1/content/abstract?uri=viking://resource
 **CLI**
 
 ```bash
-openviking abstract viking://resources/docs/
+ov abstract viking://resources/docs/
 ```
 
 
@@ -118,7 +118,7 @@ curl -X GET "http://localhost:1933/api/v1/content/overview?uri=viking://resource
 **CLI**
 
 ```bash
-openviking overview viking://resources/docs/
+ov overview viking://resources/docs/
 ```
 
 
@@ -150,7 +150,7 @@ Read the complete text of an L0, L1, or L2 file.
 
 - `read()` accepts file URIs only. Passing an existing directory URI returns `INVALID_ARGUMENT` (`400`), not `NOT_FOUND`. This error carries a structured `details` payload — `details.expected` is `"file"`, `details.actual` is `"directory"`, and `details.resource` is the offending URI (present on the HTTP path) — so clients can detect a file-vs-directory mismatch programmatically (for example, fall back to `list`) instead of string-matching the message.
 - Instead of a Viking URI, you may pass the 32-character hex `id` returned by `stat()` for a file. The server looks up the URI via the vector index and applies the same permission checks. Because indexing is asynchronous, a newly returned ID might not be resolvable immediately; lookup also fails if the corresponding vector record has been deleted. In both cases, the server returns `NOT_FOUND` and indicates that the data may not have been indexed yet or may have been deleted.
-- Public URI parameters accept `resources`, `user`, and `agent` scopes. For session files, use `viking://user/{user_id}/sessions/{session_id}` or the backward-compatible `viking://session/{session_id}` alias. Internal scopes such as `temp` and `queue` return `INVALID_URI`.
+- Public URI parameters accept `resources`, `user`, and `agent` scopes. For session files, use `viking://user/{user_id}/sessions/{session_id}/messages.jsonl` or the backward-compatible `viking://session/{session_id}/messages.jsonl` alias. Internal scopes such as `temp` and `queue` return `INVALID_URI`.
 
 
 **Python SDK**
@@ -191,7 +191,7 @@ curl -X GET "http://localhost:1933/api/v1/content/read?uri=viking://resources/do
 **CLI**
 
 ```bash
-openviking read viking://resources/docs/api.md
+ov read viking://resources/docs/api.md
 ```
 
 
@@ -295,14 +295,14 @@ curl -X POST "http://localhost:1933/api/v1/content/write" \
 **CLI**
 
 ```bash
-openviking write viking://resources/docs/api.md \
-  --content "# Updated API\n\nFresh content." \
+ov write viking://resources/docs/api.md \
+  --content $'# Updated API\n\nFresh content.' \
   --tags team=search,env=prod \
   --tag-mode replace
 ```
 
 
-**Response**
+**Response when `wait=true` and refresh completes**
 
 ```json
 {
@@ -386,8 +386,34 @@ result = client.batch_write(
             "mode": "upsert",
         },
     ],
-    wait=False,
+    wait=True,
 )
+```
+
+**TypeScript SDK**
+
+```typescript
+const result = await client.batchWrite("viking://resources/wiki", [
+  {
+    uri: "viking://resources/wiki/new.md",
+    content: "# New page\n",
+    mode: "upsert",
+  },
+]);
+console.log(result);
+```
+
+**Go SDK**
+
+```go
+content := "# New page\n"
+result, err := client.BatchWrite(ctx, "viking://resources/wiki", []openviking.BatchWriteOperation{
+    {URI: "viking://resources/wiki/new.md", Content: &content, Mode: "upsert"},
+}, nil)
+if err != nil {
+    return err
+}
+fmt.Println(result)
 ```
 
 **HTTP API**
@@ -409,11 +435,11 @@ curl -X POST http://localhost:1933/api/v1/content/batch-write \
         "mode": "upsert"
       }
     ],
-    "wait": false
+    "wait": true
   }'
 ```
 
-**Response**
+**Response when `wait=true` and refresh completes**
 
 ```json
 {
@@ -436,7 +462,7 @@ curl -X POST http://localhost:1933/api/v1/content/batch-write \
 }
 ```
 
-The TypeScript and Go SDKs and the CLI do not currently expose batch write directly.
+The CLI does not currently expose batch write directly.
 
 ---
 
@@ -447,6 +473,38 @@ Download a file as raw bytes. This is intended for images, PDFs, and other non-t
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `uri` | string | Yes | File URI to download |
+
+**Python SDK**
+
+```python
+from pathlib import Path
+
+Path("logo.png").write_bytes(
+    client.download_bytes("viking://resources/images/logo.png")
+)
+```
+
+**TypeScript SDK**
+
+```typescript
+import { writeFile } from "node:fs/promises";
+
+const bytes = await client.downloadBytes("viking://resources/images/logo.png");
+await writeFile("logo.png", bytes);
+```
+
+**Go SDK**
+
+```go
+// Requires the os package.
+data, err := client.DownloadBytes(ctx, "viking://resources/images/logo.png")
+if err != nil {
+    return err
+}
+if err := os.WriteFile("logo.png", data, 0600); err != nil {
+    return err
+}
+```
 
 **HTTP API**
 
@@ -479,13 +537,13 @@ Content-Disposition: attachment; filename*=UTF-8''logo.png
 <binary body>
 ```
 
-`ov get <uri> <local-path>` downloads through the HTTP API above and writes the file to a local path. The Python, TypeScript, and Go SDKs do not currently expose a dedicated raw-byte download method.
+`ov get <uri> <local-path>` downloads through the HTTP API above and writes the file to a local path.
 
 ---
 
 ### set_tags()
 
-Set explicit `k=v` tags used by retrieval filters. `replace` replaces existing tags, while `append` adds tags. When the target is a directory, `recursive=true` applies the update to files below it.
+Set explicit `k=v` tags used by retrieval filters. `replace` replaces existing tags, while `append` merges tags by key. When the target is a directory, `recursive=true` applies the update to files below it.
 
 **Python SDK**
 
@@ -717,8 +775,7 @@ There is no `/api/v1/maintenance/reindex` endpoint. Use `/api/v1/content/reindex
 ```bash
 curl -X POST http://localhost:1933/api/v1/content/reindex \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default" \
+  -H "X-API-Key: your-admin-key" \
   -d '{
     "uri": "viking://resources",
     "mode": "vectors_only",
@@ -731,18 +788,18 @@ curl -X POST http://localhost:1933/api/v1/content/reindex \
 **CLI**
 
 ```bash
-openviking reindex viking://resources --mode vectors_only \
+ov reindex viking://resources --mode vectors_only \
   --tags team=search,env=prod --tag-mode replace
 ```
 
 The CLI sends tag fields only when non-empty `--tags` is provided. Use HTTP or an SDK to clear tags with `tags: []`.
 
 ```bash
-openviking reindex viking://user/default/skills --mode semantic_and_vectors --wait false
+ov reindex viking://user/default/skills --mode semantic_and_vectors --wait false
 ```
 
 ```bash
-openviking reindex viking://resources --mode prune_orphans --dry-run
+ov reindex viking://resources --mode prune_orphans --dry-run
 ```
 
 **Asynchronous response (`wait=false`)**
@@ -764,8 +821,7 @@ Poll the returned task through the task API:
 
 ```bash
 curl -X GET http://localhost:1933/api/v1/tasks/task_xxx \
-  -H "X-API-Key: your-key" \
-  -H "X-OpenViking-Account: default"
+  -H "X-API-Key: your-admin-key"
 ```
 
 Reindex background tasks use `task_type="admin_reindex"` and `resource_id` equal to the requested `uri`, so they can also be listed with:
@@ -796,7 +852,7 @@ Task records are persisted under `/local/{account_id}/_system/tasks/{user_id}/{t
 
 **Behavior notes**
 
-- `vectors_only` and `semantic_and_vectors` are non-destructive. They use rebuild/upsert behavior and do not require dropping the vector collection first.
+- `vectors_only` and `semantic_and_vectors` update vector records without deleting source files or dropping the vector collection. `semantic_and_vectors` also replaces generated semantic artifacts such as `.abstract.md` and `.overview.md`.
 - `prune_orphans` is destructive unless `dry_run=true`: it removes vector records whose source files no longer exist.
 - `viking://` reindex fans out to supported top-level namespaces and excludes `session`.
 - Namespace reindex operations such as `viking://user` propagate to supported child content types.
