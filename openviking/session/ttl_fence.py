@@ -162,7 +162,9 @@ class SessionGenerationFence:
         if not self.enabled:
             yield None
             return
-        lease = await self.viking_fs._async_agfs.pathlock_acquire_tree(self.lock_path())
+        lease = await self.viking_fs._async_agfs.pathlock_acquire_tree(
+            self.lock_path(), timeout_secs=300.0
+        )
         try:
             await self.require_current()
             yield lease

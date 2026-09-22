@@ -101,7 +101,9 @@ async def test_tree_lock_rechecks_generation_and_always_releases():
         assert lease == "tree-lease"
         fs._async_agfs.pathlock_release.assert_not_awaited()
 
-    fs._async_agfs.pathlock_acquire_tree.assert_awaited_once_with("/local/acct/user/u1/sessions/s1")
+    fs._async_agfs.pathlock_acquire_tree.assert_awaited_once_with(
+        "/local/acct/user/u1/sessions/s1", timeout_secs=300.0
+    )
     fs._async_agfs.pathlock_release.assert_awaited_once_with("tree-lease")
 
     fs.read_file.return_value = json.dumps(

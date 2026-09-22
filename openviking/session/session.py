@@ -2453,7 +2453,11 @@ class Session:
             from openviking.session.ttl_fence import reconcile_session_ttl
 
             path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
-            lease = await self._viking_fs._async_agfs.pathlock_acquire_tree(path)
+            # The durable queue is published while Phase 1 still owns the
+            # session lock. Its normal handoff must not fail the owning task.
+            lease = await self._viking_fs._async_agfs.pathlock_acquire_tree(
+                path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
+            )
             try:
                 repaired = await reconcile_session_ttl(
                     self._viking_fs, self.ctx, session_uri=self._session_uri,
@@ -4534,7 +4538,9 @@ class Session:
             session_uri=self._session_uri,
             generation=ttl_generation,
         )
-        lease = await self._viking_fs._async_agfs.pathlock_acquire_tree(fence.lock_path())
+        lease = await self._viking_fs._async_agfs.pathlock_acquire_tree(
+            fence.lock_path(), timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
+        )
         try:
             await fence.require_current(allow_expired=allow_expired)
             meta_content = await self._viking_fs.read_file(

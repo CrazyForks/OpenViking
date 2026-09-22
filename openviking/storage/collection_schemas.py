@@ -954,7 +954,9 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         viking_fs = get_viking_fs()
         object_uri = target[1]
         path = viking_fs._uri_to_path(object_uri, ctx=ctx)
-        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path)
+        # Producers enqueue before releasing their source write lease. Wait for
+        # that lease, then validate the persisted generation under our own lock.
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path, timeout_secs=300.0)
         try:
             try:
                 content = await viking_fs.read_file(object_uri, ctx=ctx, include_expired=True)
@@ -990,7 +992,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
 
         viking_fs = get_viking_fs()
         path = viking_fs._uri_to_path(sidecar_uri, ctx=ctx)
-        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path)
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path, timeout_secs=300.0)
         try:
             try:
                 raw = await viking_fs.read_file(sidecar_uri, ctx=ctx)
