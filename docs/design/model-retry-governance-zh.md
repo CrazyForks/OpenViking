@@ -1,6 +1,6 @@
 # OpenViking 模型重试治理：add_resource 与 session_commit
 
-状态：首版实现与回归评审（开发分支，未部署）。代码基线：`origin/main@611f5c469b2bb8dc6d072b215251379e780d3f23`，2026-09-22。文中次数来自确定性故障注入，不代表线上实测放大率或已节省 Token。统一重试入口已接入主要非流式路径；实际覆盖与限制见第 8 节。
+状态：首版实现与回归评审（开发分支，未发布共享服务）。代码基线：`origin/main@611f5c469b2bb8dc6d072b215251379e780d3f23`，2026-09-22。文中次数来自确定性故障注入，不代表线上实测放大率或已节省 Token。统一重试入口已接入主要非流式路径；实际覆盖与限制见第 8 至 10 节。
 
 ## 1. 建议与收益证据
 
@@ -79,7 +79,7 @@ Dashboard 先展示 attempts / logical calls 与 exhausted / logical calls，按
 
 ## 6. 验证、实施与回滚
 
-最初的独立原型位于 `benchmark/model_retry/`，14 个契约测试及基线 HTTP 回放已保留。后续首版已接入实际 adapter、队列与 Phase 2，并接入四个 Metrics；当前验证结果、环境阻塞和未覆盖路径见第 8 节。代码尚未部署，完整 E2E、跨进程恢复和线上灰度仍未完成。
+最初的独立原型位于 `benchmark/model_retry/`，14 个契约测试及基线 HTTP 回放已保留。后续首版已接入实际 adapter、队列与 Phase 2，并接入四个 Metrics；验证结果和未覆盖路径见第 8 至 10 节。最后完成了隔离 K8s 中的 7 个 native 服务/队列场景；HTTP ingress、跨进程恢复、完整长期记忆抽取与线上灰度仍未覆盖，未发布共享服务。
 
 | 顺序 | 交付与验收 |
 | --- | --- |
@@ -127,7 +127,7 @@ Embedding 与 Semantic 共用有限的熔断准入等待；等待结束仍被拒
 | Phase 2 独立流程 | 模型失败 4 次、抽取步骤执行 1 次；写失败标记并保留完成记录；恢复不重跑；WM creation/update 不触发额外 fallback | 内存文件系统和 TaskStore，未覆盖 native engine / 真 QueueFS 崩溃恢复 |
 | 扩展回归 | 879 个测试：856 passed、20 failed、3 skipped；20 个失败已在干净基线复现 | 既有 Ollama 参数 / max_tokens 和日志捕获断言问题，本次不改动其功能 |
 | Gemini 扩展测试 | 首版未安装 google-genai；本轮已在隔离依赖目录补测，结果见第 9 节 | 原工作环境未修改；使用 google-genai 2.24.0，其他 SDK 版本仍需各自验证 |
-| 完整 session 集成 | 3 个目标场景在初始化阶段被 PersistStore 缺失阻塞 | 不能声称完整 E2E 通过或已无生产回归 |
+| 本地完整 session 集成 | macOS 的 3 个目标场景在初始化阶段被 PersistStore 缺失阻塞；已另用 K8s native runtime 补验 7 个服务/队列场景，见第 10 节 | 仍不能声称完整产品 E2E 通过或已无生产回归 |
 
 ### 会改变什么，以及如何判断能否合入
 
@@ -136,7 +136,7 @@ Embedding 与 Semantic 共用有限的熔断准入等待；等待结束仍被拒
 | 短暂故障下成功率下降 | 在线不再多试；离线全局 4 次比过去 12/16/32 次更少；超过 4 个坏 credential 不会继续遍历到末尾 | 同一批固定输入对比产物、成功率、额外请求和尾延迟；允许调整有上限的配置，不恢复叠乘 |
 | 熔断等待与故障窗口完成率 | 本轮修正为当前 delivery 有限等待，取消可退出；等待期间会占用 consumer 槽位，到期仍失败 | 测试冷却后恢复、并发故障不延长本条等待、deadline 与取消；K8s 最后验证 worker 占用和尾延迟，不恢复无限重入 |
 | 工作流错误暴露更明确 | Session 模型终止不再静默变成占位摘要；Session 和 Semantic 开始执行后的存储临时错误也可能直接失败 | 确认失败状态和重新提交体验；只在具体幂等存储 I/O 处补重试，不能恢复整个抽取函数重跑 |
-| 错误类型/锁/正常链路兼容 | 回归中已修复 SDK 异常类型被覆盖、breaker 提前失败未释放移交锁两项；正常成功与凭证切换测试保留 | 仍需 native 环境 E2E，覆盖取消、并发 add_resource、commit 前序等待和向量写入失败 |
+| 错误类型/锁/正常链路兼容 | 回归中已修复 SDK 异常类型被覆盖、breaker 提前失败未释放移交锁两项；native 成功、错误终态、取消和锁释放已验证 | native 并发 add_resource、commit 前序等待、向量写入故障与进程崩溃仍需独立验证 |
 | 覆盖不全与跨重启预算 | 部分 provider/媒体/流式路径尚未验证；无 durable attempt 预占，无默认总 deadline，无 operation 全局 retry quota | 不对所有 SDK 或跨任意重启承诺物理次数上限；下一步按实际流量补齐，不新增通用调度平台 |
 
 这版可供代码评审和受控环境验证。先完成本地契约、adapter、队列与 agent 集成回归，再做 native / K8s 故障测试和灰度；K8s 放在最后，不以本地 mock 成功作为直接上线依据。
@@ -176,4 +176,24 @@ pi 正式集成还存在一个与本次重试无关的既有竞态：新 commit 
 
 本轮最终聚焦回归 **191 passed**，覆盖统一 owner、43 个真实 SDK/HTTP transport 故障场景、Semantic 终止与锁、单/多 worker 停机及初始化恢复、Phase 2、Codex 兼容和指标。扩展回归共 **1068 项：1041 passed、24 failed、3 skipped**；24 个失败用完全相同的 node ID 和依赖环境在干净基线全部复现，涉及已有 Ollama 参数/max_tokens、Gemini 配置校验大小写、日志捕获和旧 auth 分类断言，未混入本次修复。新增 Gemini 依赖隔离安装，不修改原工作环境；ruff、格式与 diff 检查通过。
 
-K8s 按约定留到最后。本轮尚未执行集群故障测试；本机存在多个 context，需明确测试 context/namespace 后再运行，不能默认使用生产目标。native engine 的 PersistStore 缺失仍限制完整本地 session E2E；上述证据不等于生产回归保证。
+K8s 按约定在本地与 adapter 回归之后执行。按部署文档新建独立 context 和个人测试 namespace，7 个 native 场景全部通过，测试 Pod 已清理；未修改共享 QA 服务。新增阶段归因问题已修复，并通过 86 项针对性回归和 native 指标断言，详见第 10 节。上述证据不等于生产回归保证。
+
+## 10. 最终 native 验证与回归边界
+
+2026-09-22 在隔离 K8s Pod 执行 `benchmark/model_retry/native_e2e.py`，测试 Python 源码为 `a13c3e6b213f3f14d01633d99661c4c8d7e7fd14`，1650 个已跟踪文件 SHA-256 一致。运行环境为 Linux/Python 3.13.15、OpenAI SDK 2.24.0、httpx 0.28.1；native 二进制取自已有 OpenViking 0.4.22.dev95 镜像，并非从该提交重新编译。镜像 digest、分场景计数与阶段断言记录在 `benchmark/model_retry/native-results.json`。
+
+实际使用 RAGFS、SQLite QueueFS、filesystem PathLock、本地向量引擎与真实 OpenAI SDK；HTTP 故障由 Pod 内 loopback 模型服务注入，无真实模型费用。初始化的 24 次目录 Embedding 先排空、单独记账，再注入目标操作故障；正常业务扇出与重试明确分开。
+
+| native 场景 | 逻辑调用与实际 HTTP | 结果 |
+| --- | --- | --- |
+| add_resource 成功 | VLM 3 次、Embedding 5 次，均无重试 | completed，队列排空，资源树锁可重新获取 |
+| Embedding 持续 429 | 5 个 logical calls，共 20 次 HTTP，每个 4 次 | failed，零模型失败 requeue，终态后无新请求，锁释放 |
+| Embedding 持续 401 | 5 个 logical calls，共 5 次 HTTP，每个 1 次 | failed，零模型失败 requeue，终态后无新请求，锁释放 |
+| session_commit 成功 | 1 个 summary call，1 次 HTTP | 实际 SessionCommit consumer 完成，`.done` 存在 |
+| Phase 2 持续 429 | 1 个 summary call，4 次 HTTP | failed，仅 `.failed.json` 存在，未重跑整步骤 |
+| Phase 2 持续 401 | 1 个 summary call，1 次 HTTP | failed，仅 `.failed.json` 存在，未重跑整步骤 |
+| add_resource 取消 | 正在进行的首个 VLM 请求中取消 | cancelled，队列排空，资源树锁释放 |
+
+native 验证发现文件/目录的新指标曾被内层 legacy `semantic_execute` 覆盖；已通过独立 `model_stage` 上下文修正。本次成功导入记录 1 个 `file_summary`、2 个 `directory_overview`，原 Token 指标仍为 `semantic_execute`；session 仍记为 `archive_summary`。修复不改变调用预算或原仪表盘标签，并通过 86 项 owner/executor/metrics/session 回归。
+
+以上是 native 服务入口和真实后台队列的集成验证，不是完整产品 E2E：未覆盖 HTTP server/Ingress、多 Pod、Redis、进程崩溃、真实模型互通、长期记忆 ExtractLoop 协议与质量。Session 场景仅开启 working-memory summary；有限重试对长故障窗口成功率的影响仍需灰度观察。测试 context 保留供后续使用，临时测试 Pod 已删除；共享 QA 服务未改动。
