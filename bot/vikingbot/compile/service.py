@@ -224,6 +224,13 @@ class BotCompileService:
             await self._prune_terminal_tasks()
             self._started = True
 
+    async def close(self) -> None:
+        """Cancel active work and let task finally blocks release their sandboxes."""
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def create_task(
         self,
         request: CompileRequest,
@@ -668,6 +675,8 @@ class BotCompileService:
                 update={"subagent_max_concurrency": self.limits.source_concurrency}
             )
         workspace_parent = self.config.bot_data_path / "compile_workspaces" / task_id
+        if task_config.uses_managed_opensandbox:
+            workspace_parent = task_config.opensandbox_workspaces_path / "compile" / task_id
         sandbox_manager = CompileSandboxManager(
             task_config, workspace_parent, task_config.workspace_path, connection=connection
         )
