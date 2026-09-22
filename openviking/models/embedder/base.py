@@ -18,7 +18,7 @@ from openviking.utils.embedding_input import (
     truncate_embedding_input,
 )
 from openviking.utils.exceptions import AllCredentialsFailedError as AllCredentialsFailedError
-from openviking.utils.model_call import run_model_async, run_model_sync
+from openviking.utils.model_call import delegate_model_call, run_model_async, run_model_sync
 from openviking.utils.model_retry import (
     OrderedCredentialSwitcher,
 )
@@ -351,6 +351,7 @@ class EmbedderBase(ABC):
             _wrapped,
             model_type="embedding",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name=operation_name,
         )
@@ -395,6 +396,7 @@ class EmbedderBase(ABC):
             _wrapped,
             model_type="embedding",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name=operation_name,
         )
@@ -787,7 +789,8 @@ class FailoverEmbedder(EmbedderBase):
         def candidate(idx):
             def execute_once():
                 instance = self._embedders[idx]
-                result = getattr(instance, method_name)(*args, **kwargs)
+                with delegate_model_call(instance):
+                    result = getattr(instance, method_name)(*args, **kwargs)
                 self._switcher.commit_success(idx)
                 return result
 
@@ -799,6 +802,7 @@ class FailoverEmbedder(EmbedderBase):
             alternatives=callbacks[1:],
             model_type="embedding",
             max_retries=self.max_retries,
+            adapter=self,
         )
 
     async def _embed_with_failover_async(self, method_name: str, *args, **kwargs):
@@ -808,7 +812,8 @@ class FailoverEmbedder(EmbedderBase):
         def candidate(idx):
             async def execute_once():
                 instance = self._embedders[idx]
-                result = await getattr(instance, method_name)(*args, **kwargs)
+                with delegate_model_call(instance):
+                    result = await getattr(instance, method_name)(*args, **kwargs)
                 self._switcher.commit_success(idx)
                 return result
 
@@ -820,6 +825,7 @@ class FailoverEmbedder(EmbedderBase):
             alternatives=callbacks[1:],
             model_type="embedding",
             max_retries=self.max_retries,
+            adapter=self,
         )
 
     @property

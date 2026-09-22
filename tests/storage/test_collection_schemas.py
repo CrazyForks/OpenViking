@@ -747,7 +747,7 @@ async def test_embedding_handler_skip_all_work_when_manager_is_closing(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_embedding_handler_open_breaker_fails_without_requeue(monkeypatch):
+async def test_embedding_handler_expired_admission_fails_without_requeue(monkeypatch):
     from unittest.mock import AsyncMock
 
     from openviking.utils.circuit_breaker import CircuitBreakerOpen
@@ -761,12 +761,43 @@ async def test_embedding_handler_open_breaker_fails_without_requeue(monkeypatch)
     )
     handler = TextEmbeddingHandler(backend)
     monkeypatch.setattr(
-        handler._circuit_breaker, "check", lambda: (_ for _ in ()).throw(CircuitBreakerOpen("open"))
+        handler._circuit_breaker,
+        "wait_until_ready",
+        AsyncMock(
+            side_effect=CircuitBreakerOpen("Model circuit breaker open after admission wait")
+        ),
     )
     result = await handler.on_dequeue(_build_queue_payload())
     assert result.outcome is ProcessOutcome.FAILED
     assert "breaker open" in result.error
     assert embedder.calls == 0
+    backend.enqueue_embedding_msg.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_embedding_handler_waits_for_breaker_then_embeds_once(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from openviking.utils.circuit_breaker import CircuitBreaker
+
+    embedder = _DummyEmbedder()
+    monkeypatch.setattr(
+        "openviking_cli.utils.config.get_openviking_config", lambda: _DummyConfig(embedder)
+    )
+    backend = SimpleNamespace(
+        is_closing=False,
+        uses_content_field=False,
+        has_queue_manager=True,
+        enqueue_embedding_msg=AsyncMock(),
+        upsert=AsyncMock(return_value="id-1"),
+    )
+    handler = TextEmbeddingHandler(backend)
+    handler._circuit_breaker = CircuitBreaker(failure_threshold=1, reset_timeout=0.01)
+    handler._circuit_breaker.record_failure(RuntimeError("503 unavailable"))
+    result = await handler.on_dequeue(_build_queue_payload())
+    assert result.outcome is ProcessOutcome.SUCCESS
+    assert embedder.calls == 1
+    backend.upsert.assert_awaited_once()
     backend.enqueue_embedding_msg.assert_not_awaited()
 
 

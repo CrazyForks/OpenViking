@@ -71,8 +71,14 @@ from openviking.utils.circuit_breaker import (
     classify_api_error,
 )
 from openviking.utils.ingest_options import IngestOptions
-from openviking.utils.model_call import ModelCallError, is_model_call_error, model_workload
-from openviking.utils.model_retry import ERROR_CLASS_INPUT_TOO_LARGE, ERROR_CLASS_PERMANENT
+from openviking.utils.model_call import ModelCallError, get_model_call_error, model_workload
+from openviking.utils.model_retry import (
+    ERROR_CLASS_AUTH,
+    ERROR_CLASS_INPUT_TOO_LARGE,
+    ERROR_CLASS_PERMANENT,
+    ERROR_CLASS_QUOTA_EXCEEDED,
+    ERROR_CLASS_TRANSIENT,
+)
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils import VikingURI
 from openviking_cli.utils.config import get_openviking_config
@@ -415,6 +421,7 @@ class SemanticProcessor(DequeueHandlerBase):
         execute_started_at: float | None = None
         queue_wait_ms = 0.0
         execute_status = "ok"
+        processing_started = False
         try:
             import json
 
@@ -468,7 +475,8 @@ class SemanticProcessor(DequeueHandlerBase):
                     await self._cleanup_local_artifact(msg)
                     return ProcessResult.success()
             try:
-                self._circuit_breaker.check()
+                with pause_task_processing():
+                    await self._circuit_breaker.wait_until_ready(deadline_at=msg.model_deadline_at)
             except CircuitBreakerOpen as error:
                 await self._release_cancelled_semantic_lock(msg)
                 raise ModelCallError("circuit_open", "transient", 0, msg.id) from error
@@ -513,6 +521,7 @@ class SemanticProcessor(DequeueHandlerBase):
                         return ProcessResult.success()
                     semantic_lock = work.scope
                     assert semantic_lock is not None
+                    processing_started = True
                     dag_stats = None
                     processing_succeeded = False
                     try:
@@ -691,10 +700,15 @@ class SemanticProcessor(DequeueHandlerBase):
 
         except asyncio.CancelledError:
             if work is not None:
+                if work.scope is None and not isinstance(work, SkillSemanticMessageWork):
+                    # Admission waiting precedes lock adoption. Resource work
+                    # still owns the producer's handoff and must release it when
+                    # cancelled; Skill work handles this in its own cancel().
+                    await run_to_completion(lambda: self._release_cancelled_semantic_lock(work.msg))
                 await work.cancel()
             raise
         except Exception as e:
-            if isinstance(e, LockAcquisitionError):
+            if isinstance(e, LockAcquisitionError) and not processing_started:
                 execute_status = "requeued"
                 logger.warning(
                     "Lock error processing semantic message, re-enqueueing without "
@@ -711,12 +725,31 @@ class SemanticProcessor(DequeueHandlerBase):
                 return ProcessResult.failed(str(e))
 
             error_class = classify_api_error(e)
-            if is_model_call_error(e) or error_class == ERROR_CLASS_INPUT_TOO_LARGE:
+            terminal = get_model_call_error(e)
+            if (
+                terminal is not None
+                or error_class == ERROR_CLASS_INPUT_TOO_LARGE
+                or processing_started
+            ):
                 execute_status = "error"
                 logger.error(
-                    f"Terminal model error processing semantic message: {e}",
+                    f"Terminal error processing semantic message: {e}",
                     exc_info=True,
                 )
+                # After execution starts, replaying the message can repeat
+                # successful model calls and writes. Storage retries, when safe,
+                # belong around their individual idempotent I/O operation.
+                if (
+                    terminal is not None
+                    and terminal.attempts > 0
+                    and terminal.error_class
+                    in {
+                        ERROR_CLASS_AUTH,
+                        ERROR_CLASS_QUOTA_EXCEEDED,
+                        ERROR_CLASS_TRANSIENT,
+                    }
+                ):
+                    self._circuit_breaker.record_failure(terminal)
                 if msg is not None:
                     self._merge_request_stats(msg.telemetry_id, error_count=1)
                     get_request_wait_tracker().mark_semantic_failed(

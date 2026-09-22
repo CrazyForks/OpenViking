@@ -357,6 +357,7 @@ class OpenAIVLM(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="OpenAI VLM completion",
         )
@@ -396,6 +397,7 @@ class OpenAIVLM(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="OpenAI VLM async completion",
         )
@@ -480,6 +482,7 @@ class OpenAIVLM(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="OpenAI VLM vision completion",
         )
@@ -513,6 +516,7 @@ class OpenAIVLM(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="OpenAI VLM async vision completion",
         )

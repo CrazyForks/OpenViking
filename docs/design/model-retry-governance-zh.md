@@ -4,7 +4,7 @@
 
 ## 1. 建议与收益证据
 
-模型调用层应成为唯一自动重试负责人。Provider/SDK 每次只发送一个请求；workflow 和 queue 收到模型终止结果后记录失败或按现有规则降级，不再重新获得一份重试预算。在线调用最多一次，离线调用只对可恢复错误做有限重试；credential failover 同样消耗总次数。
+模型调用层应成为唯一自动重试负责人。迁移的 Provider/SDK 每次只发送一个请求（Codex OAuth 401 续期重发等兼容例外见第 9 节）；workflow 和 queue 收到模型终止结果后记录失败或按现有规则降级，不再重新获得一份重试预算。在线调用最多一次，离线调用只对可恢复错误做有限重试；credential failover 同样消耗总次数。
 
 一期先覆盖 `add_resource` 的 VLM/Embedding 和 `session_commit` Phase 2。必须同时调整这些链路的失败出口，否则只把 SDK 重试关掉，仍会被外层步骤或消息重入放大。这是模型重试的接入改造，不要求建设通用任务重试、Checkpoint 或集群流控平台。
 
@@ -38,9 +38,9 @@ Operation 是归属与截止时间的上层边界，不能让整棵资源树的�
 
 ## 3. 两条链路如何接入
 
-**add_resource。** 从入口保留 root task 与 operation 归属；parse、文件摘要和 overview 每次生成建立独立 call，Embedding 消息继承归属与绝对 deadline。收到模型永久错误或预算耗尽后，Embedding consumer 返回 FAILED、通知 request wait tracker 并走现有任务终态/ACK 链路，禁止再次 enqueue。Semantic consumer 同样必须识别该终止类型。首版熔断开启时直接返回失败，不再等待并重入；这会降低故障窗口内完成率，作为显式行为变化评审；`queue_enqueued_at` 会在入队时刷新，不能把它当作任务原始 deadline。
+**add_resource。** 从入口保留 root task 与 operation 归属；parse、文件摘要和 overview 每次生成建立独立 call，Embedding 消息继承归属与绝对 deadline。收到模型永久错误或预算耗尽后，Embedding consumer 返回 FAILED、通知 request wait tracker 并走现有任务终态/ACK 链路，禁止再次 enqueue。Semantic consumer 同样必须识别该终止类型。熔断开启时在当前 delivery 内做可取消的有限等待，最多等待进入时剩余的一个冷却窗口，且不超过已有绝对 deadline；其它消息不能延长本条等待。等待不消耗模型 attempts、不重新入队，恢复后继续，仍未获准才终止；`queue_enqueued_at` 会在入队时刷新，不能把它当作任务原始 deadline。
 
-文件摘要当前有捕获异常并降级为空摘要的行为。接入时可以保留既有局部降级，但必须记录该 logical call 的失败，避免被外围重新生成；operation 预算耗尽或取消则应停止后续模型调度。向量写入失败属于存储问题，不能为了重试写入再次调用 Embedding，后续恢复应复用已生成向量或明确标失败。
+文件摘要当前有捕获异常并降级为空摘要的行为。接入时可以保留既有局部降级，但必须记录该 logical call 的失败，避免被外围重新生成；operation 预算耗尽或取消则应停止后续模型调度。向量写入失败属于存储问题，不能为了重试写入再次调用 Embedding。Semantic 同样在开始执行后不因存储异常重放整条消息，避免重复已成功摘要；只保留执行前锁冲突的调度重入。后续恢复应复用已生成结果或明确标失败，具体存储重试只能包住已确认幂等的 I/O。
 
 **session_commit。** Phase 1 负责归档、状态和投递，不直接调用模型。Phase 2 的 archive_summary、长期记忆和技能抽取接入同一个模型 owner，去掉对模型失败的整步骤重试。存储类重试只留在已确认幂等的具体 I/O 边界，不能继续包住整个抽取函数。最终失败沿用 `.failed.json` 与已完成步骤记录，已成功步骤不重复执行。等待前序 archive 的 requeue 仍是调度等待，不记为模型 attempt。
 
@@ -50,7 +50,7 @@ ExtractLoop 的工具轮次、格式/patch repair 仍由业务层控制，每次
 
 ## 4. RetryContext 与恢复的真实边界
 
-上下文只携带执行所需的最小信息：operation/stage/workload、root task/logical call 标识、已用次数/上限、绝对 deadline；reason/owner 随决策事件记录。每个并发 call 有独立预算，credential 切换共享同一个对象。正常交接或主动 requeue 时保持 identity、已用次数与 deadline，不重新初始化。
+完整契约中的上下文只需携带执行所需的最小信息（当前实际接入范围见下文）：operation/stage/workload、root task/logical call 标识、已用次数/上限、绝对 deadline；reason/owner 随决策事件记录。每个并发 call 有独立预算，credential 切换共享同一个对象。正常交接或主动 requeue 时保持 identity、已用次数与 deadline，不重新初始化。
 
 **仅给 SessionCommitMsg 或 EmbeddingMsg 加字段不能保证崩溃安全。** QueueFS 在 dequeue 后、ACK 前崩溃会恢复旧消息；若新计数只在内存或下一条消息中，恢复仍可拿到旧预算。当前 TaskWorkIndex 也是从队列重建的运行时索引，不能当持久预算账本。
 
@@ -106,13 +106,13 @@ Dashboard 先展示 attempts / logical calls 与 exhausted / logical calls，按
 
 ### 已实现的边界
 
-开发分支为 `feat/model-retry-governance`。`openviking/utils/model_call.py` 提供 sync/async 唯一 owner；工作上下文与单次调用状态分开保存，不修改共享模型实例。未绑定上下文时按在线处理，最多 1 次；两个后台入口明确绑定 offline，使用原配置 `max_retries + 1`，默认共 4 次。
+开发分支为 `feat/model-retry-governance`。`openviking/utils/model_call.py` 提供 sync/async 唯一 owner；工作上下文与单次调用状态分开保存，不修改共享模型实例。credential wrapper 只向选中的 adapter 显式委托一次请求；委托绑定 adapter 与当前执行线程/任务，消费后失效。独立子调用、并行任务和不同模型各自建立 logical call，不因处于同一调用栈而跳过预算。未绑定上下文时按在线处理，最多 1 次；两个后台入口明确绑定 offline，使用原配置 `max_retries + 1`，默认共 4 次。
 
 当前覆盖 OpenAI / Volcengine / LiteLLM 的非流式 text / vision、Embedding 公共调用入口，以及实际配置使用的 MultiCredentialVLM / FailoverEmbedder。多凭证成功路由仍保持 sticky；短暂错误在候选凭证间切换，auth / quota 错误禁用当前 call 内的失败凭证，均消费统一总次数。原始 SDK 异常类型、status 与 body 保留，通过附加 `model_call_error` 终止信息阻止外层重新获得预算；无上游异常的 deadline / breaker 拒绝使用 ModelCallError。
 
-Ark、OpenAI-compatible Embedding、Gemini、MiniMax 和 LiteLLM 的可见隐式重试已显式关闭。HTTP 请求次数目前实测验证的是 Ark Embedding、Volcengine VLM 和 OpenAI VLM；其他 provider 不能仅凭配置修改就声称通过 transport 一对一验证。流式、音视频上传/轮询/生成流程、Codex 401 刷新重发、旧 FailoverVLM 直接调用，以及第三方 adapter 仍需单独迁移/验证；配置中的旧 backup 语法已由工厂转换到 MultiCredentialVLM，不等同于直接使用旧 wrapper。
+Ark、OpenAI-compatible Embedding、Gemini、MiniMax 和 LiteLLM 的可见隐式重试已显式关闭。HTTP 请求次数已用真实 SDK + mock HTTP 验证 Ark Embedding、Volcengine VLM、OpenAI VLM 和 Gemini Embedding 的目标场景；Cohere 同步入口也已接入 owner，并补充空消息 transport timeout 的统一分类；其他 provider 不能仅凭配置修改就声称通过 transport 一对一验证。流式、音视频上传/轮询/生成流程、Codex 401 刷新重发、旧 FailoverVLM 直接调用，以及第三方 adapter 仍需单独迁移/验证；配置中的旧 backup 语法已由工厂转换到 MultiCredentialVLM，不等同于直接使用旧 wrapper。
 
-Embedding 的模型失败和 breaker 拒绝返回 FAILED，通知 wait tracker；Semantic 模型终止不重入，breaker 提前拒绝时先释放移交锁。文件摘要原有空摘要降级仍保留。Session Phase 2 去掉整步骤重试，working-memory creation/update 不再吞掉终止的模型错误；失败写 `.failed.json`，保留已完成步骤，恢复看到终态后直接结束。
+Embedding 与 Semantic 共用有限的熔断准入等待；等待结束仍被拒绝才返回 FAILED 并通知 wait tracker。Semantic 提前拒绝或取消时释放尚未接管的移交锁，开始执行后不因模型或存储异常重放整条消息。单条输入的参数、过长与内容安全错误不再影响共享 breaker 健康状态。文件摘要原有空摘要降级仍保留。Session Phase 2 去掉整步骤重试，working-memory creation/update 不再吞掉终止的模型错误；失败写 `.failed.json`，保留已完成步骤，恢复看到终态后直接结束。
 
 四个指标已通过现有 datasource / collector 路由导出，operation / stage 为固定枚举，call ID 留在异常及日志。当前 attempts 是进入 adapter 的尝试数：本地准备失败、等待 semaphore 时取消，或特殊 SDK 内部认证重发，都可能使它与 HTTP 请求数不完全相等。只在已验证 transport 契约的路径上用它近似物理调用放大，不将其当计费账本。Retry-After 在 30 秒等待上限内被尊重，超过则以 backoff_limit 终止，避免无限等待或提前重试；该上限是首版策略值，后续需结合离线完成率评估。
 
@@ -124,7 +124,7 @@ Embedding 的模型失败和 breaker 拒绝返回 FAILED，通知 wait tracker�
 | 真实 SDK + mock HTTP | 19 个场景通过；离线持续 429 共 4 次、在线共 1 次、双 credential 共 4 次、单 credential 401 为 1 次；429 后恢复成功 | 无真实模型、账单或客户线上流量 |
 | Phase 2 独立流程 | 模型失败 4 次、抽取步骤执行 1 次；写失败标记并保留完成记录；恢复不重跑；WM creation/update 不触发额外 fallback | 内存文件系统和 TaskStore，未覆盖 native engine / 真 QueueFS 崩溃恢复 |
 | 扩展回归 | 879 个测试：856 passed、20 failed、3 skipped；20 个失败已在干净基线复现 | 既有 Ollama 参数 / max_tokens 和日志捕获断言问题，本次不改动其功能 |
-| Gemini 扩展测试 | 当前环境缺少 google-genai，未纳入上述 879 项 | Gemini transport 行为尚未验证；相关旧配置断言也需独立清理 |
+| Gemini 扩展测试 | 首版未安装 google-genai；本轮已在隔离依赖目录补测，结果见第 9 节 | 原工作环境未修改；使用 google-genai 2.24.0，其他 SDK 版本仍需各自验证 |
 | 完整 session 集成 | 3 个目标场景在初始化阶段被 PersistStore 缺失阻塞 | 不能声称完整 E2E 通过或已无生产回归 |
 
 ### 会改变什么，以及如何判断能否合入
@@ -132,9 +132,46 @@ Embedding 的模型失败和 breaker 拒绝返回 FAILED，通知 wait tracker�
 | 回归风险 | 原因与首版行为 | 合入前重点观察 |
 | --- | --- | --- |
 | 短暂故障下成功率下降 | 在线不再多试；离线全局 4 次比过去 12/16/32 次更少；超过 4 个坏 credential 不会继续遍历到末尾 | 同一批固定输入对比产物、成功率、额外请求和尾延迟；允许调整有上限的配置，不恢复叠乘 |
-| 熔断期间积压变失败 | 原先消息等待/重入，首版直接失败；可能集中出现未完成索引 | 这是最需要产品接受的行为变化；上线前用故障窗口验证恢复体验；若需要延后执行，应新增有终止预算的调度等待，并与模型 retry 分开 |
-| Session 错误暴露更明确 | 模型终止不再静默变成简短占位摘要；去掉整步骤重试后存储临时错误也可能直接失败 | 确认失败状态和重新提交体验；只在具体幂等存储 I/O 处补重试，不能恢复整个抽取函数重跑 |
+| 熔断等待与故障窗口完成率 | 本轮修正为当前 delivery 有限等待，取消可退出；等待期间会占用 consumer 槽位，到期仍失败 | 测试冷却后恢复、并发故障不延长本条等待、deadline 与取消；K8s 最后验证 worker 占用和尾延迟，不恢复无限重入 |
+| 工作流错误暴露更明确 | Session 模型终止不再静默变成占位摘要；Session 和 Semantic 开始执行后的存储临时错误也可能直接失败 | 确认失败状态和重新提交体验；只在具体幂等存储 I/O 处补重试，不能恢复整个抽取函数重跑 |
 | 错误类型/锁/正常链路兼容 | 回归中已修复 SDK 异常类型被覆盖、breaker 提前失败未释放移交锁两项；正常成功与凭证切换测试保留 | 仍需 native 环境 E2E，覆盖取消、并发 add_resource、commit 前序等待和向量写入失败 |
 | 覆盖不全与跨重启预算 | 部分 provider/媒体/流式路径尚未验证；无 durable attempt 预占，无默认总 deadline，无 operation 全局 retry quota | 不对所有 SDK 或跨任意重启承诺物理次数上限；下一步按实际流量补齐，不新增通用调度平台 |
 
-这版可供代码评审和受控环境验证。完成 native 环境 E2E、确认熔断失败策略并核查未覆盖 provider 前，不以本地 mock 成功作为直接上线依据。
+这版可供代码评审和受控环境验证。先完成本地契约、adapter、队列与 agent 集成回归，再做 native / K8s 故障测试和灰度；K8s 放在最后，不以本地 mock 成功作为直接上线依据。
+
+## 9. 整体复核：统一边界、模型扩展与 agent 接入
+
+统一的是一次模型生成的重试职责，而不是把所有“再执行一次”都改成同一个循环。新模型接入统一 owner；新 agent 复用 OV 服务端的 owner。正常业务扇出、认证恢复、任务投递、流式输出和存储恢复各有自己的语义，不能用一个嵌套开关一并跳过，也不能互相重新发放模型预算。
+
+### 新模型的接入契约
+
+| 边界 | 契约与验收 |
+| --- | --- |
+| 一次请求 | adapter 执行一次 I/O，关闭 SDK/HTTP transport 的自动重试；sync/async 都接 owner，不能只改一边 |
+| 明确委托 | 当前 credential wrapper 向选中 adapter 委托一次；backend 通过 `adapter=self` 接入。单模型、多 credential 使用同一错误分类和次数规则 |
+| 独立生成 | dense/sparse 两种模型、工具下一轮、独立子任务各有自己的 logical call；不把业务组合函数当成单次 transport callback |
+| 错误与结果 | 保留 SDK 异常类型、status、body/cause 和成功结果；分类不能依赖 adapter 自行编造的提示。网络错误按类型识别，真实 quota 与短期限流分开 |
+| 回归契约 | 至少验证成功、短暂失败后成功、持续 429/timeout、永久错误、双 credential 总预算、在线一次、取消与 deadline；用真实 SDK + mock transport 数请求 |
+| 特殊协议 | 媒体上传/轮询不等于再次生成；流式已输出后不重放。认证续期等多请求 adapter 必须显式列出例外，完成 transport 计数验证后才能声明物理请求硬上限 |
+
+本轮修复了共享 bool 将独立嵌套调用误当成同一 attempt 的问题，补齐 Cohere 同步入口、httpx/requests 空消息网络异常分类，以及 Gemini 429 包装提示导致单 credential 与多 credential 分类不一致的问题。没有增加 provider 专属的重试循环，也没有扩大成通用调度框架。
+
+### pi / Codex 能得到什么
+
+| 接入方式 | 本方案覆盖 | 不应混为一谈的边界 |
+| --- | --- | --- |
+| pi、Codex 记忆插件调用 OV | 同一服务端 `add_resource` 摘要/向量化、`session_commit` 后台记忆抽取；无需每个 agent 再实现一套模型策略 | 宿主 pi/Codex 自己的推理模型不经过 OV owner；Codex 本地压缩 CLI 同样不在其中 |
+| 插件 pending queue / HTTP client | 服务端一次任务执行内的模型预算仍生效 | 网络响应丢失后的请求重投属于投递恢复；现有 commit 接口无请求幂等键，不能承诺跨多次提交共享次数预算 |
+| OV 配置 `provider=openai-codex` | 其非流式调用通过 OpenAI owner，模型限流/网络错误使用同一规则 | 当前 401 允许 OAuth 刷新后重发一次，保留原有登录兼容性；一次 adapter attempt 可能有两次 HTTP。这与 Codex 记忆插件是两条独立链路 |
+
+pi 正式集成还存在一个与本次重试无关的既有竞态：新 commit pending 时，上一份非空 overview 可能推动本地上下文截断。已在干净基线复现并单独登记 [Bug #5299](https://github.com/volcengine/OpenViking/issues/5299)。该修复已移出本次分支；不能把原始归档仍在磁盘等同于 agent 当前上下文完整。后续独立修复应校验本次 commit 对应的 task/archive，再推进边界。
+
+### 本轮直接回归防护
+
+熔断准入使用现有冷却窗口作为有限等待边界，取消立即传播；与模型 retry、QueueFS requeue 分开。Semantic 开始执行后失败不重放整个消息，避免存储错误再次生成已成功摘要。单 worker 同样走现有 drain/cancel 退出路径，防止新增等待延长停机；取消中的 delivery 不 ACK，沿用既有恢复语义。
+
+这仍有明确取舍：有限次数可能降低长故障窗口的成功率；准入等待占用 worker；Semantic/Session 的存储错误会更早成为可见失败。验收应同时看最终产物、失败状态、正常任务延迟和重复调用，而不是只看 attempts 下降。跨重启硬预算、客户端提交幂等、媒体/流式迁移与 Codex OAuth 请求统一计数是不同的后续工作，本次不声称已完成。
+
+本轮最终聚焦回归 **191 passed**，覆盖统一 owner、43 个真实 SDK/HTTP transport 故障场景、Semantic 终止与锁、单/多 worker 停机及初始化恢复、Phase 2、Codex 兼容和指标。扩展回归共 **1068 项：1041 passed、24 failed、3 skipped**；24 个失败用完全相同的 node ID 和依赖环境在干净基线全部复现，涉及已有 Ollama 参数/max_tokens、Gemini 配置校验大小写、日志捕获和旧 auth 分类断言，未混入本次修复。新增 Gemini 依赖隔离安装，不修改原工作环境；ruff、格式与 diff 检查通过。
+
+K8s 按约定留到最后。本轮尚未执行集群故障测试；本机存在多个 context，需明确测试 context/namespace 后再运行，不能默认使用生产目标。native engine 的 PersistStore 缺失仍限制完整本地 session E2E；上述证据不等于生产回归保证。

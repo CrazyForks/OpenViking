@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 
 from openviking.utils.model_retry import (
     ERROR_CLASS_AUTH,
+    ERROR_CLASS_CONTENT_SAFETY,
     ERROR_CLASS_INPUT_TOO_LARGE,
     ERROR_CLASS_PERMANENT,
     ERROR_CLASS_QUOTA_EXCEEDED,
@@ -34,8 +36,8 @@ class CircuitBreaker:
     """Thread-safe circuit breaker for API call protection.
 
     Trips after ``failure_threshold`` consecutive failures (or immediately for
-    permanent errors like 403/401). After ``reset_timeout`` seconds, allows one
-    probe request (HALF_OPEN). If the probe succeeds, the breaker closes; if it
+    credential/quota errors). After ``reset_timeout`` seconds, allows requests
+    again (HALF_OPEN). If a request succeeds, the breaker closes; if it
     fails, the breaker reopens.
     """
 
@@ -72,6 +74,38 @@ class CircuitBreaker:
                 f"Circuit breaker is OPEN, retry after {self._current_reset_timeout - elapsed:.0f}s"
             )
 
+    async def wait_until_ready(self, *, deadline_at: float | None = None) -> None:
+        """Wait for admission within one existing cooldown, without retrying work.
+
+        The bound is captured once: failures from other deliveries cannot keep
+        extending this delivery's wait. A caller's absolute deadline may shorten
+        it. Cancellation propagates so the queue can retain its unacknowledged
+        delivery. No model call has started or consumed an attempt here.
+        """
+        deadline = (
+            time.monotonic() + max(0.0, deadline_at - time.time())
+            if deadline_at is not None
+            else None
+        )
+        wait_until: float | None = None
+        while True:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise CircuitBreakerOpen("Model admission deadline exceeded")
+            try:
+                self.check()
+                return
+            except CircuitBreakerOpen:
+                if wait_until is None:
+                    with self._lock:
+                        wait_until = self._last_failure_time + self._current_reset_timeout
+                    if deadline is not None:
+                        wait_until = min(wait_until, deadline)
+                remaining = wait_until - time.monotonic()
+                if remaining <= 0:
+                    raise CircuitBreakerOpen("Model circuit breaker open after admission wait")
+                await asyncio.sleep(min(remaining, 30.0))
+
     @property
     def retry_after(self) -> float:
         """Seconds until the breaker may transition to HALF_OPEN, capped at 30s.
@@ -96,8 +130,12 @@ class CircuitBreaker:
     def record_failure(self, error: Exception) -> None:
         """Record a failed API call. May trip the breaker."""
         error_class = classify_api_error(error)
-        if error_class == ERROR_CLASS_INPUT_TOO_LARGE:
-            logger.info(f"Circuit breaker ignoring row-specific input error: {error}")
+        if error_class in (
+            ERROR_CLASS_INPUT_TOO_LARGE,
+            ERROR_CLASS_CONTENT_SAFETY,
+            ERROR_CLASS_PERMANENT,
+        ):
+            logger.info(f"Circuit breaker ignoring request-specific error: {error}")
             return
 
         with self._lock:
@@ -116,7 +154,6 @@ class CircuitBreaker:
                 return
 
             if error_class in (
-                ERROR_CLASS_PERMANENT,
                 ERROR_CLASS_AUTH,
                 ERROR_CLASS_QUOTA_EXCEEDED,
             ):

@@ -12,6 +12,7 @@ from openviking.storage.queuefs.semantic_msg import SemanticMsg
 from openviking.utils.model_call import (
     ModelCallError,
     current_model_workload,
+    delegate_model_call,
     is_model_call_error,
     model_workload,
     run_model_async,
@@ -34,6 +35,7 @@ def events(monkeypatch):
 @pytest.mark.parametrize("offline,expected", [(False, 1), (True, 4)])
 async def test_nested_owners_and_workflow_share_one_budget(events, offline, expected):
     sent = 0
+    adapter = object()
 
     async def request():
         nonlocal sent
@@ -41,10 +43,16 @@ async def test_nested_owners_and_workflow_share_one_budget(events, offline, expe
         raise TimeoutError()
 
     async def backend():
-        return await run_model_async(request, model_type="vlm", max_retries=9)
+        return await run_model_async(request, model_type="vlm", max_retries=9, adapter=adapter)
+
+    async def selected_backend():
+        with delegate_model_call(adapter):
+            return await backend()
 
     async def wrapper():
-        return await run_model_async(backend, alternatives=[backend], model_type="vlm")
+        return await run_model_async(
+            selected_backend, alternatives=[selected_backend], model_type="vlm"
+        )
 
     with model_workload("session_commit", workload="offline" if offline else "online"):
         with pytest.raises(TimeoutError):
@@ -52,6 +60,95 @@ async def test_nested_owners_and_workflow_share_one_budget(events, offline, expe
     assert sent == expected
     assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 1
     assert len([e for e in events if e[0] == "model_retry.attempt"]) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_task", [False, True])
+async def test_independent_nested_model_call_keeps_its_budget(events, child_task):
+    sent = 0
+
+    async def request():
+        nonlocal sent
+        sent += 1
+        raise TimeoutError()
+
+    async def outer_request():
+        nested = run_model_async(request, model_type="embedding")
+        with pytest.raises(TimeoutError):
+            await (asyncio.create_task(nested) if child_task else nested)
+        return "ok"
+
+    with model_workload("add_resource"):
+        assert await run_model_async(outer_request, model_type="vlm") == "ok"
+    assert sent == 4
+    assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 2
+    assert len([e for e in events if e[0] == "model_retry.attempt"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_delegation_is_adapter_specific_and_does_not_transfer_to_child_tasks(events):
+    selected = object()
+    independent = object()
+    sent = 0
+
+    async def request():
+        nonlocal sent
+        sent += 1
+        raise TimeoutError()
+
+    with model_workload("add_resource"), delegate_model_call(selected):
+        with pytest.raises(TimeoutError):
+            await run_model_async(request, model_type="vlm", adapter=independent)
+        with pytest.raises(TimeoutError):
+            await asyncio.create_task(run_model_async(request, model_type="vlm", adapter=selected))
+    assert sent == 8
+    assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 2
+
+
+def test_delegation_is_consumed_once_so_nested_calls_to_same_adapter_are_independent(events):
+    adapter = object()
+    sent = 0
+
+    def request():
+        nonlocal sent
+        sent += 1
+        raise TimeoutError()
+
+    def backend():
+        with pytest.raises(TimeoutError):
+            run_model_sync(request, model_type="vlm", adapter=adapter)
+        return "ok"
+
+    def wrapper():
+        with delegate_model_call(adapter):
+            return run_model_sync(backend, model_type="vlm", adapter=adapter)
+
+    with model_workload("add_resource"):
+        assert run_model_sync(wrapper, model_type="vlm") == "ok"
+    assert sent == 4
+    assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 2
+
+
+@pytest.mark.parametrize("error_type", ["read_timeout", "connect_error", "requests_timeout"])
+def test_transport_errors_with_empty_messages_are_retried(events, error_type):
+    import httpx
+    import requests
+
+    cls = {
+        "read_timeout": httpx.ReadTimeout,
+        "connect_error": httpx.ConnectError,
+        "requests_timeout": requests.exceptions.Timeout,
+    }[error_type]
+    sent = 0
+
+    def request():
+        nonlocal sent
+        sent += 1
+        raise cls("")
+
+    with model_workload("add_resource"), pytest.raises(cls):
+        run_model_sync(request, model_type="embedding")
+    assert sent == 4
 
 
 @pytest.mark.asyncio

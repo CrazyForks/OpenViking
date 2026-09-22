@@ -8,6 +8,10 @@ import threading
 import time
 from typing import Awaitable, Callable, TypeVar
 
+import httpx
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
+
 from openviking.pyagfs.exceptions import AGFSNotADirectoryError
 from openviking.utils.exceptions import AllCredentialsFailedError
 
@@ -231,7 +235,9 @@ def classify_api_error(error: Exception) -> str:
     chain = _iter_exception_chain(error)
     for exc in chain:
         if getattr(exc, "model_retry_terminal", False):
-            return getattr(exc, "model_call_error", exc).error_class
+            return getattr(
+                getattr(exc, "model_call_error", exc), "error_class", ERROR_CLASS_UNKNOWN
+            )
 
     for exc in chain:
         if exc is not None and isinstance(exc, _PERMANENT_IO_ERRORS):
@@ -286,6 +292,8 @@ def classify_api_error(error: Exception) -> str:
 
     for exc in chain:
         status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
         if str(status) in {"401", "403"}:
             return ERROR_CLASS_AUTH
         if str(status) in {"408", "409", "429"} or (
@@ -294,7 +302,18 @@ def classify_api_error(error: Exception) -> str:
             return ERROR_CLASS_TRANSIENT
         if isinstance(status, int) and 400 <= status < 500:
             return ERROR_CLASS_PERMANENT
-        if isinstance(exc, (TimeoutError, ConnectionError)):
+        if isinstance(
+            exc,
+            (
+                TimeoutError,
+                ConnectionError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+                RequestsTimeout,
+                RequestsConnectionError,
+            ),
+        ):
             return ERROR_CLASS_TRANSIENT
     return ERROR_CLASS_UNKNOWN
 

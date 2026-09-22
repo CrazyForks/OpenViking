@@ -3,6 +3,7 @@
 
 """Comprehensive tests for circuit breaker utility."""
 
+import asyncio
 import time
 
 import pytest
@@ -365,3 +366,78 @@ class TestCircuitBreakerEdgeCases:
 
         with pytest.raises(CircuitBreakerOpen):
             cb.check()
+
+
+@pytest.mark.parametrize(
+    "message", ["400 invalid parameter", "413 payload too large", "content policy rejected"]
+)
+def test_request_rejection_does_not_change_breaker_health(message):
+    cb = CircuitBreaker(failure_threshold=1)
+    cb.record_failure(RuntimeError(message))
+    cb.check()
+    assert cb._failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_waits_one_existing_cooldown_then_allows_work(monkeypatch):
+    now = [100.0]
+    waits = []
+    monkeypatch.setattr("openviking.utils.circuit_breaker.time.monotonic", lambda: now[0])
+
+    async def sleep(delay):
+        waits.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr("openviking.utils.circuit_breaker.asyncio.sleep", sleep)
+    cb = CircuitBreaker(failure_threshold=1, reset_timeout=65)
+    cb.record_failure(RuntimeError("503 unavailable"))
+    await cb.wait_until_ready()
+    assert waits == [30, 30, 5]
+    assert cb._failure_count == 1
+    cb.check()
+
+
+@pytest.mark.asyncio
+async def test_other_failures_cannot_extend_admission_wait(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("openviking.utils.circuit_breaker.time.monotonic", lambda: now[0])
+    cb = CircuitBreaker(failure_threshold=1, reset_timeout=10)
+    cb.record_failure(RuntimeError("503 unavailable"))
+
+    async def sleep(delay):
+        now[0] += delay
+        cb.record_failure(RuntimeError("503 unavailable"))
+
+    monkeypatch.setattr("openviking.utils.circuit_breaker.asyncio.sleep", sleep)
+    with pytest.raises(CircuitBreakerOpen, match="after admission wait"):
+        await cb.wait_until_ready()
+    assert now[0] == 110
+
+
+@pytest.mark.asyncio
+async def test_admission_respects_earlier_absolute_deadline(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("openviking.utils.circuit_breaker.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("openviking.utils.circuit_breaker.time.time", lambda: now[0] + 900)
+
+    async def sleep(delay):
+        now[0] += delay
+
+    monkeypatch.setattr("openviking.utils.circuit_breaker.asyncio.sleep", sleep)
+    cb = CircuitBreaker(failure_threshold=1, reset_timeout=60)
+    cb.record_failure(RuntimeError("503 unavailable"))
+    with pytest.raises(CircuitBreakerOpen, match="deadline"):
+        await cb.wait_until_ready(deadline_at=1005)
+    assert now[0] == 105
+
+
+@pytest.mark.asyncio
+async def test_admission_wait_is_cancellable_without_changing_health():
+    cb = CircuitBreaker(failure_threshold=1, reset_timeout=60)
+    cb.record_failure(RuntimeError("503 unavailable"))
+    task = asyncio.create_task(cb.wait_until_ready())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cb._failure_count == 1

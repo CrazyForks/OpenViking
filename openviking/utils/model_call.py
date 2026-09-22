@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0
 """The sole retry owner for non-streaming model requests.
 
-SDKs and callbacks must execute once. Credential wrappers call this owner with
-ordered alternatives; a delegated backend joins the active attempt instead of
-starting another retry loop. Workflows must not replay ModelCallError.
+SDKs and callbacks must execute once. Credential wrappers explicitly delegate
+one attempt to their selected backend. Independent nested calls retain their
+own budgets. Workflows must not replay a terminal model outcome.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import asyncio
 import logging
 import math
 import random
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -65,7 +66,52 @@ class ModelWorkload:
 
 
 _workload: ContextVar[ModelWorkload | None] = ContextVar("model_workload", default=None)
-_active_attempt: ContextVar[bool] = ContextVar("model_attempt", default=False)
+
+
+def _execution_identity() -> tuple[int, object]:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), task
+
+
+@dataclass
+class _Delegation:
+    adapter: object
+    execution: tuple[int, object]
+    consumed: bool = False
+
+
+_delegation: ContextVar[_Delegation | None] = ContextVar("model_delegation", default=None)
+
+
+@contextmanager
+def delegate_model_call(adapter: object):
+    """Let a credential wrapper invoke exactly one attempt of this backend.
+
+    This permission is tied to the selected adapter and execution task. A child
+    task or an independent nested model call must obtain its own retry budget.
+    """
+    token = _delegation.set(_Delegation(adapter, _execution_identity()))
+    try:
+        yield
+    finally:
+        _delegation.reset(token)
+
+
+def _take_delegation(adapter: object | None) -> bool:
+    delegation = _delegation.get()
+    if (
+        adapter is None
+        or delegation is None
+        or delegation.adapter is not adapter
+        or delegation.execution != _execution_identity()
+        or delegation.consumed
+    ):
+        return False
+    delegation.consumed = True
+    return True
 
 
 def current_model_workload() -> ModelWorkload:
@@ -121,16 +167,22 @@ class ModelCallError(RuntimeError):
         super().__init__(f"Model call stopped: {reason} ({error_class}, attempts={attempts})")
 
 
-def is_model_call_error(error: BaseException) -> bool:
+def get_model_call_error(error: BaseException) -> ModelCallError | None:
+    """Read a terminal outcome without replacing a provider's exception type."""
     seen = set()
     while error is not None and id(error) not in seen:
-        if isinstance(error, ModelCallError) or isinstance(
-            getattr(error, "model_call_error", None), ModelCallError
-        ):
-            return True
+        if isinstance(error, ModelCallError):
+            return error
+        terminal = getattr(error, "model_call_error", None)
+        if isinstance(terminal, ModelCallError):
+            return terminal
         seen.add(id(error))
         error = error.__cause__ or error.__context__
-    return False
+    return None
+
+
+def is_model_call_error(error: BaseException) -> bool:
+    return get_model_call_error(error) is not None
 
 
 def _retry_after(error: Exception) -> float:
@@ -261,16 +313,16 @@ def run_model_sync(
     model_type: str,
     max_retries: int = 3,
     alternatives: Sequence[Callable[[], T]] = (),
+    adapter: object | None = None,
     logger=None,
     operation_name: str = "",
 ) -> T:
-    if _active_attempt.get():
+    if _take_delegation(adapter):
         return func()
     callbacks = [func, *alternatives]
     call = _Call(model_type, max_retries, len(callbacks))
     while True:
         call.before_attempt()
-        token = _active_attempt.set(True)
         try:
             result = callbacks[call.route]()
         except Exception as error:
@@ -283,8 +335,6 @@ def run_model_sync(
             call.emit("attempt", result="ok", error_class="none")
             call.finish("ok")
             return result
-        finally:
-            _active_attempt.reset(token)
         time.sleep(delay)
 
 
@@ -294,17 +344,17 @@ async def run_model_async(
     model_type: str,
     max_retries: int = 3,
     alternatives: Sequence[Callable[[], Awaitable[T]]] = (),
+    adapter: object | None = None,
     logger=None,
     operation_name: str = "",
 ) -> T:
-    if _active_attempt.get():
+    if _take_delegation(adapter):
         return await func()
     callbacks = [func, *alternatives]
     call = _Call(model_type, max_retries, len(callbacks))
     try:
         while True:
             call.before_attempt()
-            token = _active_attempt.set(True)
             try:
                 remaining = call.remaining()
                 if remaining is None:
@@ -322,8 +372,6 @@ async def run_model_async(
                 call.emit("attempt", result="ok", error_class="none")
                 call.finish("ok")
                 return result
-            finally:
-                _active_attempt.reset(token)
             await asyncio.sleep(delay)
     except asyncio.CancelledError:
         call.finish("cancelled")
@@ -342,6 +390,7 @@ def model_call(model_type: str):
                     lambda: method(self, *args, **kwargs),
                     model_type=model_type,
                     max_retries=self.max_retries,
+                    adapter=self,
                 )
 
             return async_call
@@ -352,6 +401,7 @@ def model_call(model_type: str):
                 lambda: method(self, *args, **kwargs),
                 model_type=model_type,
                 max_retries=self.max_retries,
+                adapter=self,
             )
 
         return sync_call

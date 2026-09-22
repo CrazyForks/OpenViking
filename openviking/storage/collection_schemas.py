@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from openviking.core.context import ContextType, ResourceContentType
 from openviking.models.embedder.base import embed_compat
 from openviking.server.identity import RequestContext, Role
+from openviking.service.task_processing_time import pause_task_processing
 from openviking.service.task_tracker_concurrency import run_to_completion
 from openviking.storage.acl import ACL_GRANT_FIELDS, ACL_MODE_FIELD, AclMode
 from openviking.storage.errors import (
@@ -503,28 +504,10 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             reset_timeout=breaker_cfg.reset_timeout,
             max_reset_timeout=breaker_cfg.max_reset_timeout,
         )
-        self._breaker_open_last_log_at = 0.0
-        self._breaker_open_suppressed_count = 0
-        self._breaker_open_log_interval = 30.0
 
     def _initialize_embedder(self, config: "OpenVikingConfig"):
         """Initialize the embedder instance from config."""
         self._embedder = config.embedding.get_embedder()
-
-    def _log_breaker_open_reenqueue_summary(self) -> None:
-        """Log a throttled warning when embeddings are re-enqueued due to an open circuit breaker."""
-        now = time.monotonic()
-        if self._breaker_open_last_log_at == 0.0:
-            logger.warning("Embedding circuit breaker is open; re-enqueueing messages")
-            self._breaker_open_last_log_at = now
-            self._breaker_open_suppressed_count = 0
-            return
-
-        self._breaker_open_suppressed_count += 1
-        if now - self._breaker_open_last_log_at >= self._breaker_open_log_interval:
-            logger.warning("Embedding circuit breaker is open; re-enqueueing messages")
-            self._breaker_open_last_log_at = now
-            self._breaker_open_suppressed_count = 0
 
     @classmethod
     def _merge_request_stats(
@@ -741,14 +724,17 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                     self._record_request_success(embedding_msg)
                     return ProcessResult.success(data)
 
-                # A breaker rejects work; it must not create an unbounded queue loop.
+                # Admission waiting is bounded and consumes no model attempts.
+                # Keep this delivery instead of failing untouched work immediately
+                # or repeatedly re-enqueueing it during the same cooldown.
                 try:
-                    self._circuit_breaker.check()
-                except CircuitBreakerOpen:
+                    with pause_task_processing():
+                        await self._circuit_breaker.wait_until_ready(
+                            deadline_at=embedding_msg.model_deadline_at
+                        )
+                except CircuitBreakerOpen as error:
                     execute_status = "error"
-                    request_failed_message = self._embedding_error_msg(
-                        embedding_msg, "Model circuit breaker open"
-                    )
+                    request_failed_message = self._embedding_error_msg(embedding_msg, str(error))
                     self._merge_request_stats(embedding_msg.telemetry_id, error_count=1)
                     return ProcessResult.failed(request_failed_message)
 
@@ -813,12 +799,9 @@ class TextEmbeddingHandler(DequeueHandlerBase):
 
                         if error_class == ERROR_CLASS_AUTH:
                             execute_status = "error"
-                            # Bad/expired credential: retrying cannot succeed. Fail
-                            # terminally instead of re-enqueueing, which would cycle
-                            # forever and hold this resource's tree lock and its
-                            # add-resource --wait open. Don't trip the breaker: an open
-                            # breaker re-enqueues later messages and reintroduces the
-                            # same leak. See #2916.
+                            # Credential selection and its shared attempt budget
+                            # have already completed. Settle this message without
+                            # delaying unrelated messages for an auth failure.
                             self._log_embedding_error(logging.ERROR, error_msg, embedding_msg)
                             self._merge_request_stats(embedding_msg.telemetry_id, error_count=1)
                             request_failed_message = error_msg
@@ -1059,12 +1042,6 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         if embedding_msg is not None:
             self._record_request_success(embedding_msg)
         return ProcessResult.cancelled()
-
-    async def _reenqueue_embedding_msg(self, msg: EmbeddingMsg) -> None:
-        if msg.context_data.get("context_type") == ContextType.SKILL.value:
-            await run_to_completion(lambda: self._vikingdb.enqueue_embedding_msg(msg))
-        else:
-            await self._vikingdb.enqueue_embedding_msg(msg)
 
     @staticmethod
     def _record_request_success(

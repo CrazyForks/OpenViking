@@ -52,7 +52,9 @@ _ERROR_HINTS: Dict[int, str] = {
     401: "Invalid API key. Verify your GOOGLE_API_KEY or api_key in config.",
     403: "Permission denied. API key may lack access to this model.",
     404: "Model not found: '{model}'. Check spelling (e.g. 'gemini-embedding-2-preview').",
-    429: "Quota exceeded. Wait and retry, or increase your Google API quota.",
+    # A 429 can mean temporary throttling or exhausted quota. Do not invent a
+    # quota classification in this explanatory wrapper; preserve SDK evidence.
+    429: "Request rejected. Check the provider's error details and retry policy.",
     500: "Gemini service error (Google-side). Retry after a delay.",
     503: "Gemini service unavailable. Retry after a delay.",
 }

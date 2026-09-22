@@ -458,6 +458,7 @@ class LiteLLMVLMProvider(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="LiteLLM VLM completion",
         )
@@ -495,6 +496,7 @@ class LiteLLMVLMProvider(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="LiteLLM VLM async completion",
         )
@@ -524,6 +526,7 @@ class LiteLLMVLMProvider(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="LiteLLM VLM vision completion",
         )
@@ -553,6 +556,7 @@ class LiteLLMVLMProvider(VLMBase):
             _call,
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
             logger=logger,
             operation_name="LiteLLM VLM async vision completion",
         )

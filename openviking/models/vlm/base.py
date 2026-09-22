@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 from openviking.utils.exceptions import AllCredentialsFailedError
-from openviking.utils.model_call import run_model_async, run_model_sync
+from openviking.utils.model_call import delegate_model_call, run_model_async, run_model_sync
 from openviking.utils.model_retry import (
     OrderedCredentialSwitcher,
     PrimaryBackupSwitcher,
@@ -829,7 +829,8 @@ class MultiCredentialVLM(VLMBase):
             def execute_once():
                 instance = self._vlm_instances[idx]
                 try:
-                    result = getattr(instance, method_name)(*args, **kwargs)
+                    with delegate_model_call(instance):
+                        result = getattr(instance, method_name)(*args, **kwargs)
                 except Exception as error:
                     _annotate_vlm_error(error, instance)
                     raise
@@ -844,6 +845,7 @@ class MultiCredentialVLM(VLMBase):
             alternatives=callbacks[1:],
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
         )
 
     async def _get_completion_with_failover_async(self, method_name: str, *args, **kwargs):
@@ -854,7 +856,8 @@ class MultiCredentialVLM(VLMBase):
             async def execute_once():
                 instance = self._vlm_instances[idx]
                 try:
-                    result = await getattr(instance, method_name)(*args, **kwargs)
+                    with delegate_model_call(instance):
+                        result = await getattr(instance, method_name)(*args, **kwargs)
                 except Exception as error:
                     _annotate_vlm_error(error, instance)
                     raise
@@ -869,6 +872,7 @@ class MultiCredentialVLM(VLMBase):
             alternatives=callbacks[1:],
             model_type="vlm",
             max_retries=self.max_retries,
+            adapter=self,
         )
 
     async def stream_with_failover(
