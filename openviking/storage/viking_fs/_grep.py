@@ -288,6 +288,7 @@ class _GrepMixin:
                         "invalid regex",
                         "invalid regular expression",
                         "regex parse error",
+                        r'the literal "\n" is not allowed in a regex',
                     )
                 ):
                     raise

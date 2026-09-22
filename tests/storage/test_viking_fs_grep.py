@@ -355,60 +355,92 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "native_error",
+    ("pattern", "native_error", "content", "matched_line"),
     [
-        "regex parse error: look-around is not supported",
-        "Invalid regex pattern: look-around is not supported",
-        "Invalid regex: look-around is not supported",
+        (r"(?<=foo)bar", "regex parse error: look-around is not supported", "foobar", "foobar"),
+        (r"(foo)\1", "Invalid regex pattern: backreferences are not supported", "foofoo", "foofoo"),
+        (r"(?=foo)foo", "Invalid regex: look-around is not supported", "foobar", "foobar"),
+        (r"(?a)\w+", "Invalid regular expression: unrecognized flag", "needle", "needle"),
+        (
+            r"foo\nbar|needle",
+            r'rg failed: rg: the literal "\n" is not allowed in a regex',
+            "foo\nbar\nneedle",
+            "needle",
+        ),
     ],
 )
-async def test_session_native_grep_falls_back_for_python_only_regex(monkeypatch, native_error):
+async def test_session_native_grep_falls_back_for_python_only_regex(
+    monkeypatch, pattern, native_error, content, matched_line
+):
     viking_fs = VikingFS(agfs=_DummyAgfs())
-    fallback_result = {
+    uri = "viking://user/alice/sessions/session-1"
+    file_uri = f"{uri}/messages.jsonl"
+    native_grep = AsyncMock(side_effect=AGFSInvalidOperationError(native_error))
+    monkeypatch.setattr(viking_fs, "_session_native_grep_safe", AsyncMock(return_value=True))
+    monkeypatch.setattr(viking_fs, "_grep_with_agfs", native_grep)
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(
+        viking_fs, "ls", AsyncMock(return_value=[{"name": "messages.jsonl", "isDir": False}])
+    )
+    monkeypatch.setattr(viking_fs, "read", AsyncMock(return_value=content))
+
+    result = await viking_fs._grep_fs(
+        uri=uri,
+        pattern=pattern,
+        exclude_uri=f"{uri}/tools",
+        case_insensitive=True,
+        node_limit=1,
+        level_limit=0,
+        ctx=None,
+        before_context=1,
+        after_context=1,
+    )
+
+    lines = content.split("\n")
+    line_index = lines.index(matched_line)
+    assert result == {
         "matches": [
             {
-                "uri": "viking://user/alice/sessions/session-1/messages.jsonl",
-                "line": 1,
-                "content": "foobar",
+                "uri": file_uri,
+                "line": line_index + 1,
+                "content": matched_line,
+                "before_context": (
+                    [{"line": line_index, "content": lines[line_index - 1]}] if line_index else []
+                ),
+                "after_context": [],
             }
         ],
         "count": 1,
         "match_count": 1,
         "files_scanned": 1,
     }
-    native_grep = AsyncMock(side_effect=AGFSInvalidOperationError(native_error))
-    fallback_grep = AsyncMock(return_value=fallback_result)
-    monkeypatch.setattr(viking_fs, "_session_native_grep_safe", AsyncMock(return_value=True))
-    monkeypatch.setattr(viking_fs, "_grep_with_agfs", native_grep)
-    monkeypatch.setattr(viking_fs, "_grep_encrypted", fallback_grep)
-
-    result = await viking_fs._grep_fs(
-        uri="viking://user/alice/sessions/session-1",
-        pattern=r"(?<=foo)bar",
-        exclude_uri=None,
-        case_insensitive=False,
-        node_limit=None,
-        level_limit=10,
-        ctx=None,
-    )
-
-    assert result == fallback_result
     native_grep.assert_awaited_once()
-    fallback_grep.assert_awaited_once()
+    viking_fs.read.assert_awaited_once_with(file_uri, ctx=None)
 
 
 @pytest.mark.asyncio
-async def test_session_native_grep_propagates_unrelated_invalid_operation(monkeypatch):
+@pytest.mark.parametrize(
+    ("uri", "message"),
+    [
+        ("viking://user/alice/sessions/session-1", "wait rg failed"),
+        ("viking://resources", "regex parse error: look-around is not supported"),
+        ("viking://resources", r'rg failed: rg: the literal "\n" is not allowed in a regex'),
+    ],
+)
+async def test_native_grep_propagates_errors_outside_session_regex_fallback(
+    monkeypatch, uri, message
+):
     viking_fs = VikingFS(agfs=_DummyAgfs())
-    native_grep = AsyncMock(side_effect=AGFSInvalidOperationError("wait rg failed"))
+    error = AGFSInvalidOperationError(message)
+    native_grep = AsyncMock(side_effect=error)
     fallback_grep = AsyncMock()
     monkeypatch.setattr(viking_fs, "_session_native_grep_safe", AsyncMock(return_value=True))
     monkeypatch.setattr(viking_fs, "_grep_with_agfs", native_grep)
     monkeypatch.setattr(viking_fs, "_grep_encrypted", fallback_grep)
 
-    with pytest.raises(AGFSInvalidOperationError, match="wait rg failed"):
+    with pytest.raises(AGFSInvalidOperationError) as raised:
         await viking_fs._grep_fs(
-            uri="viking://user/alice/sessions/session-1",
+            uri=uri,
             pattern="needle",
             exclude_uri=None,
             case_insensitive=False,
@@ -417,6 +449,7 @@ async def test_session_native_grep_propagates_unrelated_invalid_operation(monkey
             ctx=None,
         )
 
+    assert raised.value is error
     fallback_grep.assert_not_awaited()
 
 
