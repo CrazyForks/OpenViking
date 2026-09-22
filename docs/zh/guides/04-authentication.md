@@ -18,23 +18,9 @@
 
 ### 决策树
 
-```
-┌─────────────────────────────────────────────────────┐
-│ 企业里有现成的身份系统？                           │
-├─────────────────────────────────────────────────────┤
-│ 是 SaaS 身份？（Okta/Auth0/Keycloak）               │
-│ → 用 **OIDC** ✅                                      │
-│                                                     │
-│ 是本地目录？（Windows AD/OpenLDAP）                  │
-│ → 用 **LDAP** ✅                                      │
-├─────────────────────────────────────────────────────┤
-│ 没有身份系统？                                       │
-│ → 用 **API Key**（默认）✅                           │
-├─────────────────────────────────────────────────────┤
-│ 部署在内部网关后面？                                 │
-│ → 用 **Trusted** ✅                                   │
-└─────────────────────────────────────────────────────┘
-```
+已有单点登录服务选 OIDC，已有企业目录选 LDAP；由网关验证并注入身份时选 Trusted。没有这些上游服务时，使用 API Key 管理账号和凭证。
+
+未显式设置 `auth_mode` 时，有非空 `root_api_key` 会选用 `api_key`，未配置则选用 `dev`。空字符串 `root_api_key` 无效。
 
 ---
 
@@ -464,10 +450,10 @@ class CustomAuthPlugin(AuthPlugin):
 ```python
 from openviking.server.identity import Role
 
-Role.register("operator", rank=1)  # 权限介于 USER (0) 与 ADMIN (1) 之间
+Role.register("operator", rank=1)  # 降权检查时，与 ADMIN 同级
 ```
 
-自定义角色可直接用于 `require_role()` 和 `require_auth_role()` 装饰器。
+rank 用于降权检查，不会继承 ADMIN 的接口权限。`require_role()` 和 `require_auth_role()` 按角色名检查，路由需要明确允许该自定义角色。
 
 ---
 
@@ -506,26 +492,7 @@ ACL 用户组是例外：组和成员通过 [Admin API](../api/08-admin.md#用�
 
 角色更新 API 只支持将用户提升为 ADMIN。Trusted Admin API 的管理权限来自已校验的部署 root key，无需也不支持创建 ROOT 用户。
 
-下面是“受信上游身份”这种方式的示例：
-
-```bash
-# 首先，注册网关管理员（在 api_key 模式下执行一次）
-curl -X POST http://localhost:1933/api/v1/admin/accounts \
-  -H "X-API-Key: your-secret-root-key-here" \
-  -H "Content-Type: application/json" \
-  -d '{"account_id": "platform", "admin_user_id": "gateway-admin"}'
-
-# 然后，在 trusted 模式下使用该身份调用 Admin API
-curl -X POST http://localhost:1933/api/v1/admin/accounts \
-  -H "X-API-Key: your-secret-root-key-here" \
-  -H "X-OpenViking-Account: platform" \
-  -H "X-OpenViking-User: gateway-admin" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "account_id": "acme",
-    "admin_user_id": "alice"
-  }'
-```
+配置了 root key 的 Trusted 部署可直接调用上面的 Admin API，无需先切换到 API Key 模式或注册网关管理员。
 
 ## 客户端使用
 
@@ -565,12 +532,12 @@ client = ov.SyncHTTPClient(
 }
 ```
 
-如果使用普通 `user key` 或 `admin key`，`account` 和 `user` 可以省略，因为服务端可以从 key 反查出来；如果使用 `trusted` 模式，则建议明确配置。
+API Key 模式下，服务端从 user/admin key 解析 account 和 user，不接受用身份请求头切换用户。Trusted 模式下的数据请求需要明确提供 account 和 user。
 
-**CLI 覆盖参数**
+**CLI 请求**
 
 ```bash
-openviking --account acme --user alice ls viking://
+ov ls viking://
 ```
 
 ### 使用 --sudo 和 Root API Key
@@ -642,9 +609,13 @@ Trusted 模式不会查询 user key，而是直接信任每个请求显式携带
 }
 ```
 
+数据请求必须提供 `X-OpenViking-Account` 和 `X-OpenViking-User`。若配置了 `root_api_key`，请求还必须携带匹配的 API Key，以验证上游网关。
+
+角色默认从已注册用户查询，未注册时为 USER。配置并验证 root key 后，上游可用 `X-OpenViking-Role: user` 或 `admin` 断言角色，不接受 `root`。Admin API 的 ROOT 授权来自部署 root key。
+
 ### Dev 模式
 
-当 `auth_mode = "dev"`（或未配置 `root_api_key` 时自动推导）时，认证禁用，所有请求以 ROOT 身份访问 default account。
+当 `auth_mode = "dev"`（或未配置 `root_api_key` 时自动推导）时，认证禁用，请求使用 ROOT 身份；未提供身份请求头时，account 和 user 均为 `default`。Dev 模式只允许监听 `127.0.0.1`、`localhost` 或 `::1`，监听其他地址会拒绝启动。
 
 ```json
 {
@@ -654,7 +625,7 @@ Trusted 模式不会查询 user key，而是直接信任每个请求显式携带
 }
 ```
 
-> **安全提示：** 默认 `host` 为 `127.0.0.1`。如果需要将服务暴露到网络，**必须**配置 `root_api_key`。
+> 默认 `host` 为 `127.0.0.1`。监听网络地址前，选择并配置 API Key、OIDC、LDAP 或受保护的 Trusted 部署。
 
 ---
 
