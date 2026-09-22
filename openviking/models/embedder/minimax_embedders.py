@@ -91,10 +91,10 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
                 self._dimension = 1536
 
     def _create_session(self) -> requests.Session:
-        """Create a requests session with retry logic"""
+        """Create an execute-once transport; the model owner handles retries."""
         session = requests.Session()
         retry_strategy = Retry(
-            total=self.max_retries,
+            total=0,
             backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST"],
@@ -200,8 +200,11 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
 
     def embed(self, text: str, is_query: bool = False) -> EmbedResult:
         """Perform dense embedding on text"""
-        vectors = self._call_api([text], is_query=is_query)
-        result = EmbedResult(dense_vector=vectors[0])
+        result = self._run_with_retry(
+            lambda: EmbedResult(dense_vector=self._call_api([text], is_query=is_query)[0]),
+            logger=logger,
+            operation_name="MiniMax embedding",
+        )
         # Estimate token usage
         estimated_tokens = self._estimate_tokens(text)
         self.update_token_usage(

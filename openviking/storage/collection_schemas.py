@@ -49,6 +49,7 @@ from openviking.utils.circuit_breaker import (
     classify_api_error,
 )
 from openviking.utils.log_correlation import log_correlation
+from openviking.utils.model_call import model_workload
 from openviking.utils.model_retry import (
     ERROR_CLASS_AUTH,
     ERROR_CLASS_INPUT_TOO_LARGE,
@@ -706,7 +707,14 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             collector = resolve_telemetry(embedding_msg.telemetry_id)
             telemetry_ctx = bind_telemetry(collector) if collector is not None else nullcontext()
 
-            with telemetry_ctx:
+            with (
+                telemetry_ctx,
+                model_workload(
+                    embedding_msg.model_operation,
+                    stage="embed_resource",
+                    deadline_at=embedding_msg.model_deadline_at,
+                ),
+            ):
                 if self._vikingdb.is_closing:
                     logger.debug("Skip embedding dequeue during shutdown")
                     self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
@@ -733,35 +741,16 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                     self._record_request_success(embedding_msg)
                     return ProcessResult.success(data)
 
-                # Circuit breaker: if API is known-broken, re-enqueue and wait
+                # A breaker rejects work; it must not create an unbounded queue loop.
                 try:
                     self._circuit_breaker.check()
-                    self._breaker_open_last_log_at = 0.0
-                    self._breaker_open_suppressed_count = 0
                 except CircuitBreakerOpen:
-                    self._log_breaker_open_reenqueue_summary()
-                    if self._vikingdb.has_queue_manager:
-                        execute_status = "requeued"
-                        wait = self._circuit_breaker.retry_after
-                        if wait > 0:
-                            await asyncio.sleep(wait)
-                        await self._reenqueue_embedding_msg(embedding_msg)
-                        self._merge_request_stats(
-                            embedding_msg.telemetry_id,
-                            requeue_count=1,
-                        )
-                        get_request_wait_tracker().record_embedding_requeue(
-                            embedding_msg.telemetry_id
-                        )
-                        return ProcessResult.requeued()
-                    # No queue manager — cannot re-enqueue, drop with error
                     execute_status = "error"
-                    error_msg = self._embedding_error_msg(
-                        embedding_msg,
-                        "Circuit breaker open and no queue manager",
+                    request_failed_message = self._embedding_error_msg(
+                        embedding_msg, "Model circuit breaker open"
                     )
-                    request_failed_message = error_msg
-                    return ProcessResult.failed(error_msg)
+                    self._merge_request_stats(embedding_msg.telemetry_id, error_count=1)
+                    return ProcessResult.failed(request_failed_message)
 
                 # Initialize embedder if not already initialized
                 if not self._embedder:
@@ -835,33 +824,10 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             request_failed_message = error_msg
                             return ProcessResult.failed(error_msg)
 
-                        # Transient or unknown — re-enqueue for retry
-                        self._log_embedding_error(logging.WARNING, error_msg, embedding_msg)
-                        execute_status = "requeued"
+                        # The model layer already owns the complete attempt budget.
+                        # Even an unclassified provider error is terminal here.
+                        self._log_embedding_error(logging.ERROR, error_msg, embedding_msg)
                         self._circuit_breaker.record_failure(embed_err)
-                        if self._vikingdb.has_queue_manager:
-                            try:
-                                await self._reenqueue_embedding_msg(embedding_msg)
-                                self._merge_request_stats(
-                                    embedding_msg.telemetry_id,
-                                    requeue_count=1,
-                                )
-                                get_request_wait_tracker().record_embedding_requeue(
-                                    embedding_msg.telemetry_id
-                                )
-                                logger.info(
-                                    "Re-enqueued embedding message after transient error: %s",
-                                    self._embedding_delivery_log_context(embedding_msg),
-                                )
-                                return ProcessResult.requeued()
-                            except Exception as requeue_err:
-                                logger.error(
-                                    self._embedding_error_msg(
-                                        embedding_msg,
-                                        f"Failed to re-enqueue message: {requeue_err}",
-                                    )
-                                )
-
                         self._merge_request_stats(embedding_msg.telemetry_id, error_count=1)
                         execute_status = "error"
                         request_failed_message = error_msg

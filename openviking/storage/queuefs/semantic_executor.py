@@ -35,6 +35,7 @@ from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.index_action import FieldPatch
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry import bind_telemetry, get_current_telemetry
+from openviking.telemetry.context import bind_telemetry_stage
 from openviking.utils.content_hash import content_md5
 from openviking.utils.ingest_options import IngestOptions
 from openviking_cli.utils import VikingURI
@@ -1130,9 +1131,10 @@ class SemanticTreeExecutor:
                 }
                 if file_content is not None:
                     summary_kwargs["file_content"] = file_content
-                summary_dict = await self._processor._generate_single_file_summary(
-                    file_path, **summary_kwargs
-                )
+                with bind_telemetry_stage("file_summary"):
+                    summary_dict = await self._processor._generate_single_file_summary(
+                        file_path, **summary_kwargs
+                    )
         except (AbstractOverviewFormatError, FileNotFoundError, ValueError):
             # A generated sidecar that opted into OKF must never be treated as
             # an empty file summary; doing so would silently feed metadata or
@@ -1449,13 +1451,14 @@ class SemanticTreeExecutor:
                     overview = self._select_direct_media_overview(node, file_summaries)
                 if overview is None:
                     async with self._llm_sem:
-                        overview = await self._processor._generate_overview(
-                            dir_uri,
-                            file_summaries,
-                            children_abstracts,
-                            total_files=len(node.file_paths),
-                            total_children=len(node.children_dirs),
-                        )
+                        with bind_telemetry_stage("directory_overview"):
+                            overview = await self._processor._generate_overview(
+                                dir_uri,
+                                file_summaries,
+                                children_abstracts,
+                                total_files=len(node.file_paths),
+                                total_children=len(node.children_dirs),
+                            )
                 overview, abstract = self._processor._normalize_overview_generation(overview)
 
             if self._closed:

@@ -44,6 +44,7 @@ from .collectors.cache import CacheCollector
 from .collectors.embedding import EmbeddingCollector
 from .collectors.encryption import EncryptionCollector
 from .collectors.http import HTTPCollector
+from .collectors.model_retry import ModelRetryCollector
 from .collectors.rerank import RerankCollector
 from .collectors.resource import ResourceIngestionCollector
 from .collectors.retrieval import RetrievalCollector
@@ -172,7 +173,9 @@ def init_metrics_from_server_config(
             max_active_accounts=int(account_dimension.max_active_accounts),
         )
         _registry = registry or _create_metric_registry()
-        collector_manager = create_default_collector_manager(app=app, service=service, config=config)
+        collector_manager = create_default_collector_manager(
+            app=app, service=service, config=config
+        )
         _event_router = _build_event_router(_registry)
         register_event_subscriber(
             _METRICS_EVENT_SUBSCRIBER,
@@ -299,6 +302,7 @@ def _build_event_router(registry: MetricRegistry) -> EventCollectorRouter:
     embedding_collector = EmbeddingCollector()
     rerank_collector = RerankCollector()
     vlm_collector = VLMCollector()
+    model_retry_collector = ModelRetryCollector()
     session_collector = SessionCollector()
     resource_collector = ResourceIngestionCollector()
     retrieval_collector = RetrievalCollector()
@@ -330,6 +334,7 @@ def _build_event_router(registry: MetricRegistry) -> EventCollectorRouter:
         ("embedding.error", embedding_collector),
         ("rerank.call", rerank_collector),
         ("vlm.call", vlm_collector),
+        *((event, model_retry_collector) for event in ModelRetryCollector.SUPPORTED_EVENTS),
         ("session.lifecycle", session_collector),
         ("session.archive", session_collector),
         ("resource.stage", resource_collector),

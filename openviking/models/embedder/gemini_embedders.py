@@ -141,7 +141,7 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
                 api_key=api_key,
                 http_options=HttpOptions(
                     retry_options=HttpRetryOptions(
-                        attempts=max(self.max_retries + 1, 1),
+                        attempts=1,
                         initial_delay=0.5,
                         max_delay=8.0,
                         exp_base=2.0,
@@ -216,14 +216,10 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
             return EmbedResult(dense_vector=vector)
 
         try:
-            result = (
-                _call()
-                if _HTTP_RETRY_AVAILABLE
-                else self._run_with_retry(
-                    _call,
-                    logger=logger,
-                    operation_name="Gemini embedding",
-                )
+            result = self._run_with_retry(
+                _call,
+                logger=logger,
+                operation_name="Gemini embedding",
             )
             # Estimate token usage
             estimated_tokens = self._estimate_tokens(text)

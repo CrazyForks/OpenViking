@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0
 """VolcEngine VLM backend implementation."""
 
-import asyncio
 import base64
 import json
 import time
@@ -16,6 +15,7 @@ from openviking.models.network import (
 )
 from openviking.telemetry import tracer
 from openviking.utils.message_format import format_messages, sanitize_openai_messages
+from openviking.utils.model_call import model_call
 from openviking.utils.multimodal import redact_image_data_urls
 from openviking_cli.utils import get_logger
 
@@ -117,12 +117,12 @@ class VolcEngineVLM(OpenAIVLM):
                 raise ImportError(
                     "Please install volcenginesdkarkruntime: pip install volcenginesdkarkruntime"
                 )
-            kwargs = dict(
-                api_key=self.api_key,
-                base_url=self.api_base,
-                timeout=self.timeout,
-                max_retries=0,
-            )
+            kwargs = {
+                "api_key": self.api_key,
+                "base_url": self.api_base,
+                "timeout": self.timeout,
+                "max_retries": 0,
+            }
             http_client = create_optional_sync_httpx_client(
                 self.api_base,
                 timeout=self.timeout,
@@ -140,12 +140,12 @@ class VolcEngineVLM(OpenAIVLM):
             raise ImportError(
                 "Please install volcenginesdkarkruntime: pip install volcenginesdkarkruntime"
             )
-        kwargs = dict(
-            api_key=self.api_key,
-            base_url=self.api_base,
-            timeout=self.timeout,
-            max_retries=0,
-        )
+        kwargs = {
+            "api_key": self.api_key,
+            "base_url": self.api_base,
+            "timeout": self.timeout,
+            "max_retries": 0,
+        }
         http_client = create_optional_async_httpx_client(
             self.api_base,
             timeout=self.timeout,
@@ -187,6 +187,7 @@ class VolcEngineVLM(OpenAIVLM):
             media_type=media_type,
         )
 
+    @model_call("vlm")
     def get_completion(
         self,
         prompt: str = "",
@@ -227,6 +228,7 @@ class VolcEngineVLM(OpenAIVLM):
             return result
         return self._clean_response(str(result))
 
+    @model_call("vlm")
     async def get_completion_async(
         self,
         prompt: str = "",
@@ -266,30 +268,21 @@ class VolcEngineVLM(OpenAIVLM):
 
         client = self.get_async_client()
 
-        last_error = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                t0 = time.perf_counter()
-                response = await client.chat.completions.create(**kwargs)
-                elapsed = time.perf_counter() - t0
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
-                result = self._build_vlm_response(response, has_tools=bool(tools))
-                if tools:
-                    return result
-                content = self._clean_response(str(result))
-                if content:
-                    tracer.info(f"message.content={content}")
-                return content
-            except Exception as e:
-                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
-                last_error = e
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
-
-        if last_error:
-            raise last_error
-        else:
-            raise RuntimeError("Unknown error in async completion")
+        try:
+            t0 = time.perf_counter()
+            response = await client.chat.completions.create(**kwargs)
+            elapsed = time.perf_counter() - t0
+            self._update_token_usage_from_response(response, duration_seconds=elapsed)
+            result = self._build_vlm_response(response, has_tools=bool(tools))
+            if tools:
+                return result
+            content = self._clean_response(str(result))
+            if content:
+                tracer.info(f"message.content={content}")
+            return content
+        except Exception as e:
+            self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
+            raise
 
     def _detect_image_format(self, data: bytes) -> str:
         """Detect image format from magic bytes.
@@ -405,6 +398,7 @@ class VolcEngineVLM(OpenAIVLM):
         else:
             return {"type": "image_url", "image_url": {"url": image}}
 
+    @model_call("vlm")
     def get_vision_completion(
         self,
         prompt: str = "",
@@ -453,6 +447,7 @@ class VolcEngineVLM(OpenAIVLM):
             return result
         return self._clean_response(str(result))
 
+    @model_call("vlm")
     async def get_vision_completion_async(
         self,
         prompt: str = "",

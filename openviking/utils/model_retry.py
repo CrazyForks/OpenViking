@@ -228,13 +228,16 @@ def classify_api_error(error: Exception) -> str:
             return ERROR_CLASS_AUTH
         return ERROR_CLASS_UNKNOWN
 
-    for exc in (error, getattr(error, "__cause__", None)):
+    chain = _iter_exception_chain(error)
+    for exc in chain:
+        if getattr(exc, "model_retry_terminal", False):
+            return getattr(exc, "model_call_error", exc).error_class
+
+    for exc in chain:
         if exc is not None and isinstance(exc, _PERMANENT_IO_ERRORS):
             return ERROR_CLASS_PERMANENT
 
-    texts = [str(error)]
-    if error.__cause__ is not None:
-        texts.append(str(error.__cause__))
+    texts = [str(exc) for exc in chain]
 
     for text in texts:
         text_lower = text.lower()
@@ -281,11 +284,25 @@ def classify_api_error(error: Exception) -> str:
             if _pattern_matches(text_lower, text_compact, pattern):
                 return ERROR_CLASS_TRANSIENT
 
+    for exc in chain:
+        status = getattr(exc, "status_code", None)
+        if str(status) in {"401", "403"}:
+            return ERROR_CLASS_AUTH
+        if str(status) in {"408", "409", "429"} or (
+            isinstance(status, int) and 500 <= status < 600
+        ):
+            return ERROR_CLASS_TRANSIENT
+        if isinstance(status, int) and 400 <= status < 500:
+            return ERROR_CLASS_PERMANENT
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return ERROR_CLASS_TRANSIENT
     return ERROR_CLASS_UNKNOWN
 
 
 def is_retryable_api_error(error: Exception) -> bool:
     """Return True if the error should be retried."""
+    if any(getattr(exc, "model_retry_terminal", False) for exc in _iter_exception_chain(error)):
+        return False
     return classify_api_error(error) == ERROR_CLASS_TRANSIENT
 
 

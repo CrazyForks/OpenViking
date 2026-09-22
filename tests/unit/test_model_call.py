@@ -1,0 +1,200 @@
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+# SPDX-License-Identifier: AGPL-3.0
+import asyncio
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from openviking.metrics.datasources.model_retry import ModelRetryEventDataSource
+from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
+from openviking.storage.queuefs.semantic_msg import SemanticMsg
+from openviking.utils.model_call import (
+    ModelCallError,
+    current_model_workload,
+    is_model_call_error,
+    model_workload,
+    run_model_async,
+    run_model_sync,
+)
+from openviking.utils.model_retry import is_retryable_api_error, retry_async
+
+
+@pytest.fixture
+def events(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        ModelRetryEventDataSource, "_emit", lambda name, payload: events.append((name, payload))
+    )
+    monkeypatch.setattr("openviking.utils.model_call.random.uniform", lambda *_: 0)
+    return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline,expected", [(False, 1), (True, 4)])
+async def test_nested_owners_and_workflow_share_one_budget(events, offline, expected):
+    sent = 0
+
+    async def request():
+        nonlocal sent
+        sent += 1
+        raise TimeoutError()
+
+    async def backend():
+        return await run_model_async(request, model_type="vlm", max_retries=9)
+
+    async def wrapper():
+        return await run_model_async(backend, alternatives=[backend], model_type="vlm")
+
+    with model_workload("session_commit", workload="offline" if offline else "online"):
+        with pytest.raises(TimeoutError):
+            await retry_async(wrapper, max_retries=3, base_delay=0)
+    assert sent == expected
+    assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 1
+    assert len([e for e in events if e[0] == "model_retry.attempt"]) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "401 Unauthorized",
+        "403 Forbidden",
+        "400 InvalidParameter",
+        "content safety",
+        "AccountQuotaExceeded",
+        "unknown provider failure",
+    ],
+)
+async def test_permanent_errors_never_retry_same_credential(events, message):
+    sent = 0
+
+    async def request():
+        nonlocal sent
+        sent += 1
+        raise RuntimeError(message)
+
+    with model_workload("add_resource"):
+        with pytest.raises(RuntimeError) as exc:
+            await run_model_async(request, model_type="embedding")
+    assert sent == 1
+    wrapped = RuntimeError("adapter wrapper")
+    wrapped.__cause__ = exc.value
+    assert is_model_call_error(wrapped)
+    assert not is_retryable_api_error(wrapped)
+
+
+@pytest.mark.asyncio
+async def test_auth_route_is_removed_and_transient_route_uses_remaining_budget(events):
+    sent = [0, 0]
+
+    async def auth():
+        sent[0] += 1
+        raise RuntimeError("401 Unauthorized")
+
+    async def transient():
+        sent[1] += 1
+        raise RuntimeError("429 TooManyRequests")
+
+    with model_workload("add_resource"):
+        with pytest.raises(RuntimeError) as exc:
+            await run_model_async(auth, alternatives=[transient], model_type="embedding")
+    assert sent == [1, 3]
+    assert exc.value.model_call_error.reason == "max_attempts"
+
+
+@pytest.mark.asyncio
+async def test_deadline_and_retry_after_do_not_start_an_extra_request(events):
+    sent = 0
+
+    async def request():
+        nonlocal sent
+        sent += 1
+        error = RuntimeError("429 TooManyRequests")
+        error.response = SimpleNamespace(headers={"retry-after": "30"})
+        raise error
+
+    with model_workload("add_resource", deadline_at=time.time() + 5):
+        with pytest.raises(RuntimeError) as exc:
+            await run_model_async(request, model_type="embedding")
+        assert exc.value.model_call_error.reason == "deadline"
+    assert sent == 1
+    with model_workload("add_resource", deadline_at=time.time() - 1):
+        with pytest.raises(ModelCallError, match="deadline"):
+            await run_model_async(request, model_type="embedding")
+    assert sent == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_backoff_has_no_extra_attempt(events, monkeypatch):
+    started = asyncio.Event()
+    monkeypatch.setattr("openviking.utils.model_call.random.uniform", lambda *_: 30)
+
+    async def request():
+        started.set()
+        raise TimeoutError()
+
+    with model_workload("session_commit"):
+        task = asyncio.create_task(run_model_async(request, model_type="vlm"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len([e for e in events if e[0] == "model_retry.attempt"]) == 1
+    assert [p["result"] for e, p in events if e == "model_retry.logical_call"] == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_online_offline_scopes_do_not_mutate_model_config(events):
+    async def call(workload):
+        sent = 0
+
+        async def request():
+            nonlocal sent
+            sent += 1
+            raise TimeoutError()
+
+        with model_workload("search", workload=workload):
+            with pytest.raises(TimeoutError):
+                await run_model_async(request, model_type="vlm")
+        return sent
+
+    assert await asyncio.gather(call("online"), call("offline")) == [1, 4]
+    assert current_model_workload().workload == "online"
+
+
+def test_sync_recovery_and_normal_fanout_have_independent_budgets(events):
+    sent = 0
+
+    def request():
+        nonlocal sent
+        sent += 1
+        if sent < 3:
+            raise TimeoutError()
+        return "ok"
+
+    with model_workload("add_resource"):
+        assert run_model_sync(request, model_type="vlm") == "ok"
+        for _ in range(20):
+            assert run_model_sync(lambda: "ok", model_type="vlm") == "ok"
+    assert sent == 3
+    assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 21
+
+
+@pytest.mark.parametrize("kind", ["embedding", "semantic"])
+def test_message_roundtrip_preserves_operation_and_absolute_deadline(kind):
+    cls = EmbeddingMsg if kind == "embedding" else SemanticMsg
+    with model_workload("session_commit", deadline_at=12345):
+        msg = (
+            cls(message="text")
+            if kind == "embedding"
+            else cls(uri="viking://x", context_type="memory")
+        )
+    with model_workload("add_resource", deadline_at=99999):
+        restored = cls.from_dict(msg.to_dict())
+    assert restored.model_operation == "session_commit"
+    assert restored.model_deadline_at == 12345
+    legacy = msg.to_dict()
+    del legacy["model_operation"], legacy["model_deadline_at"]
+    assert cls.from_dict(legacy).model_operation == "other"
+    assert cls.from_dict(legacy).model_deadline_at is None

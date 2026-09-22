@@ -71,6 +71,7 @@ from openviking.utils.circuit_breaker import (
     classify_api_error,
 )
 from openviking.utils.ingest_options import IngestOptions
+from openviking.utils.model_call import ModelCallError, is_model_call_error, model_workload
 from openviking.utils.model_retry import ERROR_CLASS_INPUT_TOO_LARGE, ERROR_CLASS_PERMANENT
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils import VikingURI
@@ -466,20 +467,21 @@ class SemanticProcessor(DequeueHandlerBase):
                         get_request_wait_tracker().mark_semantic_done(msg.telemetry_id, msg.id)
                     await self._cleanup_local_artifact(msg)
                     return ProcessResult.success()
-            # Circuit breaker: if API is known-broken, re-enqueue and wait
             try:
                 self._circuit_breaker.check()
-            except CircuitBreakerOpen:
-                logger.warning(
-                    f"Circuit breaker is open, re-enqueueing semantic message: {msg.uri}"
-                )
-                await work.reenqueue()
-                self._merge_request_stats(msg.telemetry_id, requeue_count=1)
-                get_request_wait_tracker().record_semantic_requeue(msg.telemetry_id)
-                return ProcessResult.requeued()
+            except CircuitBreakerOpen as error:
+                await self._release_cancelled_semantic_lock(msg)
+                raise ModelCallError("circuit_open", "transient", 0, msg.id) from error
             collector = work.resolve_telemetry()
             telemetry_ctx = bind_telemetry(collector) if collector is not None else nullcontext()
-            with telemetry_ctx:
+            with (
+                telemetry_ctx,
+                model_workload(
+                    msg.model_operation,
+                    stage="semantic_execute",
+                    deadline_at=msg.model_deadline_at,
+                ),
+            ):
                 root_attrs = create_root_span_attributes(
                     http_method="QUEUE",
                     http_route=msg.context_type or "/queuefs/semantic",
@@ -709,10 +711,10 @@ class SemanticProcessor(DequeueHandlerBase):
                 return ProcessResult.failed(str(e))
 
             error_class = classify_api_error(e)
-            if error_class == ERROR_CLASS_INPUT_TOO_LARGE:
+            if is_model_call_error(e) or error_class == ERROR_CLASS_INPUT_TOO_LARGE:
                 execute_status = "error"
                 logger.error(
-                    f"Input too large processing semantic message, dropping: {e}",
+                    f"Terminal model error processing semantic message: {e}",
                     exc_info=True,
                 )
                 if msg is not None:

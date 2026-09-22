@@ -1,0 +1,359 @@
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+# SPDX-License-Identifier: AGPL-3.0
+"""The sole retry owner for non-streaming model requests.
+
+SDKs and callbacks must execute once. Credential wrappers call this owner with
+ordered alternatives; a delegated backend joins the active attempt instead of
+starting another retry loop. Workflows must not replay ModelCallError.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import random
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+from functools import wraps
+from typing import Awaitable, Callable, Sequence, TypeVar
+from uuid import uuid4
+
+from openviking.utils.model_retry import classify_api_error
+
+T = TypeVar("T")
+_logger = logging.getLogger(__name__)
+
+OPERATIONS = frozenset({"add_resource", "session_commit", "find", "search", "other"})
+STAGES = frozenset(
+    {
+        "parse",
+        "file_summary",
+        "directory_overview",
+        "semantic_execute",
+        "embed_resource",
+        "embed_query",
+        "archive_summary",
+        "memory_extract",
+        "skill_extract",
+        "working_memory",
+        "other",
+    }
+)
+_OPERATION_ALIASES = {
+    "resources.add_resource": "add_resource",
+    "resources.add_skill": "add_resource",
+    "add_resource_job": "add_resource",
+    "session_commit_phase2": "session_commit",
+    "session.commit": "session_commit",
+    "retrieval.find": "find",
+    "retrieval.search": "search",
+    "search.find": "find",
+    "search.search": "search",
+}
+
+
+@dataclass(frozen=True)
+class ModelWorkload:
+    operation: str = "other"
+    workload: str = "online"
+    stage: str = "other"
+    deadline_at: float | None = None
+
+
+_workload: ContextVar[ModelWorkload | None] = ContextVar("model_workload", default=None)
+_active_attempt: ContextVar[bool] = ContextVar("model_attempt", default=False)
+
+
+def current_model_workload() -> ModelWorkload:
+    from openviking.telemetry.context import get_current_telemetry, get_current_telemetry_stage
+
+    bound = _workload.get()
+    operation = bound.operation if bound else get_current_telemetry().operation
+    operation = _OPERATION_ALIASES.get(operation, operation)
+    stage = get_current_telemetry_stage() or (bound.stage if bound else "other")
+    return ModelWorkload(
+        operation=operation if operation in OPERATIONS else "other",
+        workload=bound.workload if bound else "online",
+        stage=stage if stage in STAGES else "other",
+        deadline_at=bound.deadline_at if bound else None,
+    )
+
+
+@contextmanager
+def model_workload(
+    operation: str,
+    *,
+    workload: str = "offline",
+    stage: str = "other",
+    deadline_at: float | None = None,
+):
+    """Bind policy to this execution context, never to a shared model instance.
+
+    Unbound calls are online (one attempt). An optional absolute deadline is
+    enforced around async calls and before sync calls; sync I/O still relies on
+    the adapter's transport timeout. This is not a durable operation budget.
+    """
+    if workload not in {"online", "offline"}:
+        raise ValueError("workload must be online or offline")
+    if deadline_at is not None and not math.isfinite(deadline_at):
+        raise ValueError("deadline_at must be finite")
+    token = _workload.set(ModelWorkload(operation, workload, stage, deadline_at))
+    try:
+        yield
+    finally:
+        _workload.reset(token)
+
+
+class ModelCallError(RuntimeError):
+    """Terminal model outcome; queue/workflow retries must not grant a new budget."""
+
+    model_retry_terminal = True
+
+    def __init__(self, reason: str, error_class: str, attempts: int, logical_call_id: str):
+        self.reason = reason
+        self.error_class = error_class
+        self.attempts = attempts
+        self.logical_call_id = logical_call_id
+        super().__init__(f"Model call stopped: {reason} ({error_class}, attempts={attempts})")
+
+
+def is_model_call_error(error: BaseException) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, ModelCallError) or isinstance(
+            getattr(error, "model_call_error", None), ModelCallError
+        ):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _retry_after(error: Exception) -> float:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        headers = getattr(getattr(error, "response", None), "headers", {}) or {}
+        value = headers.get("retry-after")
+        if value:
+            try:
+                delay = float(value)
+            except (ValueError, TypeError):
+                try:
+                    delay = parsedate_to_datetime(value).timestamp() - time.time()
+                except (ValueError, TypeError, OverflowError):
+                    delay = 0.0
+            if math.isfinite(delay):
+                return max(0.0, delay)
+        error = error.__cause__ or error.__context__
+    return 0.0
+
+
+class _Call:
+    def __init__(self, model_type: str, max_retries: int, candidates: int):
+        self.scope = current_model_workload()
+        self.labels = {
+            "model_type": model_type,
+            "operation": self.scope.operation,
+            "stage": self.scope.stage,
+        }
+        self.logical_call_id = uuid4().hex
+        self.limit = max(0, int(max_retries)) + 1 if self.scope.workload == "offline" else 1
+        self.attempts = 0
+        self.route = 0
+        self.candidates = candidates
+        self.disabled: set[int] = set()
+        self.finished = False
+
+    def emit(self, event: str, **fields) -> None:
+        from openviking.metrics.datasources.model_retry import ModelRetryEventDataSource
+
+        ModelRetryEventDataSource.record(event, **self.labels, **fields)
+
+    def finish(self, result: str) -> None:
+        if not self.finished:
+            self.finished = True
+            self.emit("logical_call", result=result)
+
+    def stop(self, reason: str, error_class: str, cause: Exception | None = None):
+        _logger.warning(
+            "Model call stopped operation=%s stage=%s logical_call_id=%s attempts=%s reason=%s error_class=%s",
+            self.scope.operation,
+            self.scope.stage,
+            self.logical_call_id,
+            self.attempts,
+            reason,
+            error_class,
+        )
+        self.emit("decision", decision="stop", reason=reason, owner="model")
+        if reason in {"max_attempts", "deadline", "backoff_limit"}:
+            self.emit("exhausted", reason=reason)
+        self.finish("error")
+        terminal = ModelCallError(reason, error_class, self.attempts, self.logical_call_id)
+        if cause is not None:
+            # Preserve SDK exception types/status/body for callers and the HTTP
+            # error mapper. The attached terminal outcome survives cause wrappers.
+            try:
+                cause.model_call_error = terminal
+                cause.model_retry_terminal = True
+            except (AttributeError, TypeError):
+                raise terminal from cause
+            raise cause
+        raise terminal from cause
+
+    def remaining(self) -> float | None:
+        if self.scope.deadline_at is None:
+            return None
+        return self.scope.deadline_at - time.time()
+
+    def before_attempt(self) -> None:
+        remaining = self.remaining()
+        if remaining is not None and remaining <= 0:
+            self.stop("deadline", "transient")
+        self.attempts += 1
+
+    def failed(self, error: Exception) -> float:
+        kind = classify_api_error(error)
+        self.emit("attempt", result="error", error_class=kind)
+        if is_model_call_error(error) or kind not in {"transient", "auth", "quota_exceeded"}:
+            self.stop(kind, kind, error)
+        if self.scope.workload == "online":
+            self.stop("online", kind, error)
+        if kind in {"auth", "quota_exceeded"}:
+            self.disabled.add(self.route)
+            if len(self.disabled) == self.candidates:
+                self.stop(kind, kind, error)
+        if self.attempts >= self.limit:
+            self.stop("max_attempts", kind, error)
+        next_route = next(
+            (self.route + offset) % self.candidates
+            for offset in range(1, self.candidates + 1)
+            if (self.route + offset) % self.candidates not in self.disabled
+        )
+        retry_after = _retry_after(error) if kind == "transient" else 0.0
+        if retry_after > 30.0:
+            # Never wait without bound or retry earlier than the provider permits.
+            self.stop("backoff_limit", kind, error)
+        delay = max(random.uniform(0, min(30.0, 2 ** min(self.attempts - 1, 5))), retry_after)
+        # Credential rejection is not a congestion signal.
+        if kind in {"auth", "quota_exceeded"}:
+            delay = 0.0
+        remaining = self.remaining()
+        if remaining is not None and delay >= remaining:
+            self.stop("deadline", kind, error)
+        self.emit(
+            "decision",
+            decision="failover" if next_route != self.route else "retry",
+            reason=kind,
+            owner="model",
+        )
+        self.route = next_route
+        return delay
+
+
+def run_model_sync(
+    func: Callable[[], T],
+    *,
+    model_type: str,
+    max_retries: int = 3,
+    alternatives: Sequence[Callable[[], T]] = (),
+    logger=None,
+    operation_name: str = "",
+) -> T:
+    if _active_attempt.get():
+        return func()
+    callbacks = [func, *alternatives]
+    call = _Call(model_type, max_retries, len(callbacks))
+    while True:
+        call.before_attempt()
+        token = _active_attempt.set(True)
+        try:
+            result = callbacks[call.route]()
+        except Exception as error:
+            delay = call.failed(error)
+        except BaseException:
+            call.emit("attempt", result="cancelled", error_class="cancelled")
+            call.finish("cancelled")
+            raise
+        else:
+            call.emit("attempt", result="ok", error_class="none")
+            call.finish("ok")
+            return result
+        finally:
+            _active_attempt.reset(token)
+        time.sleep(delay)
+
+
+async def run_model_async(
+    func: Callable[[], Awaitable[T]],
+    *,
+    model_type: str,
+    max_retries: int = 3,
+    alternatives: Sequence[Callable[[], Awaitable[T]]] = (),
+    logger=None,
+    operation_name: str = "",
+) -> T:
+    if _active_attempt.get():
+        return await func()
+    callbacks = [func, *alternatives]
+    call = _Call(model_type, max_retries, len(callbacks))
+    try:
+        while True:
+            call.before_attempt()
+            token = _active_attempt.set(True)
+            try:
+                remaining = call.remaining()
+                if remaining is None:
+                    result = await callbacks[call.route]()
+                else:
+                    result = await asyncio.wait_for(
+                        callbacks[call.route](), timeout=max(0, remaining)
+                    )
+            except asyncio.CancelledError:
+                call.emit("attempt", result="cancelled", error_class="cancelled")
+                raise
+            except Exception as error:
+                delay = call.failed(error)
+            else:
+                call.emit("attempt", result="ok", error_class="none")
+                call.finish("ok")
+                return result
+            finally:
+                _active_attempt.reset(token)
+            await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        call.finish("cancelled")
+        raise
+
+
+def model_call(model_type: str):
+    """Decorate an execute-once adapter method (not a workflow or stream)."""
+
+    def decorate(method):
+        if asyncio.iscoroutinefunction(method):
+
+            @wraps(method)
+            async def async_call(self, *args, **kwargs):
+                return await run_model_async(
+                    lambda: method(self, *args, **kwargs),
+                    model_type=model_type,
+                    max_retries=self.max_retries,
+                )
+
+            return async_call
+
+        @wraps(method)
+        def sync_call(self, *args, **kwargs):
+            return run_model_sync(
+                lambda: method(self, *args, **kwargs),
+                model_type=model_type,
+                max_retries=self.max_retries,
+            )
+
+        return sync_call
+
+    return decorate
