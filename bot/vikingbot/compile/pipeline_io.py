@@ -211,7 +211,7 @@ class JsonModel:
                 len(str(m.get("content", ""))) for m in messages if m.get("role") == "tool"
             ),
             "skill_attachment_chars": sum(len(value) for value in self.resources.snapshots.values())
-            if self.resources
+            if self.resources and stage != "route"
             else 0,
         }
         self.metrics["estimated_input_tokens"] += cal_str_tokens(
@@ -283,8 +283,8 @@ class JsonModel:
                 }
                 if self.fits(system, candidate, schema):
                     data = candidate
-        # Every request carries the complete supplied Skill attachments.
-        if self.resources and self.resources.snapshots:
+        # Routing uses the planned criteria; Skill attachments belong to other stages.
+        if stage != "route" and self.resources and self.resources.snapshots:
             system += "\nComplete Skill attachments (authoritative data):\n" + json.dumps(
                 self.resources.snapshots, ensure_ascii=False
             )
@@ -338,7 +338,7 @@ class JsonModel:
         ]
         evidence = EvidenceReader(self.files, data)
         readers = {"read_evidence": evidence} if evidence.allowed - evidence.delivered else {}
-        if self.resources:
+        if self.resources and stage != "route":
             readers[self.resources.name] = self.resources
         for reader in readers.values():
             tools.append(
@@ -351,13 +351,16 @@ class JsonModel:
                     },
                 }
             )
+        if stage != "route":
+            system += (
+                "\nSupplied complete attachments fulfill the Skill's reading requirements. "
+                "Only read additional resources whose contents are missing; never reread supplied text."
+            )
         messages = [
             {
                 "role": "system",
                 "content": system
-                + "\nSupplied complete attachments fulfill the Skill's reading requirements. "
-                "Only read additional resources whose contents are missing; never reread supplied text. "
-                "Return one emit tool call; no prose.",
+                + "\nSubmit the final result with one `emit` tool call, without extra prose.",
             },
             {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
         ]
