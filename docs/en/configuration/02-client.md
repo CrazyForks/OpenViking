@@ -4,7 +4,7 @@
 
 Agent plugins using the shared configuration loader also read the `plugin` section, workspace settings, and `OPENVIKING_*` environment variables for recall, conversation capture, and diagnostics. This page distinguishes CLI settings from plugin settings. See [Agent Integrations](../agent-integrations/01-overview.md) for host-specific support.
 
-Use `ov config` to manage CLI connections and `ov config show` to inspect the active configuration with secrets redacted. Current CLI add/edit operations serialize the Rust configuration structure and can remove unrecognized fields such as `plugin`. Keep a copy and inspect the result when editing a file that contains plugin settings. `ov config switch` copies the file directly and preserves those fields.
+Use `ov config` to manage CLI connections and `ov config show` to inspect the active configuration with secrets redacted. Editing or renaming a configuration preserves extra top-level fields such as `plugin`. On a switch, fields explicitly present in the incoming profile take precedence; if it omits `plugin`, the active file’s existing plugin settings are retained.
 
 Default path:
 

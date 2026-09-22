@@ -4,7 +4,7 @@
 
 采用共享配置加载器的 Agent 插件还会读取本文件的 `plugin` 段、工作区配置和 `OPENVIKING_*` 环境变量，控制召回、对话捕获和调试。下文分别说明 CLI 与插件的配置；各宿主的支持范围见 [Agent 集成](../agent-integrations/01-overview.md)。
 
-使用 `ov config` 管理 CLI 连接，使用 `ov config show` 查看脱敏后的当前配置。当前 CLI 的新增、编辑操作按 Rust 配置结构重写文件，可能移除 `plugin` 等未识别字段；修改已有插件配置前保留副本并检查写回结果。`ov config switch` 直接复制文件，会保留这些字段。
+使用 `ov config` 管理 CLI 连接，使用 `ov config show` 查看脱敏后的当前配置。编辑或重命名配置时，CLI 会保留 `plugin` 等额外顶层字段。切换配置时，新配置显式包含的字段优先；若未包含 `plugin`，则保留 active 文件已有的插件配置。
 
 默认路径：
 

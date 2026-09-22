@@ -247,7 +247,7 @@ openclaw 的 peer 由 `peer_role`/`peer_prefix` 推导（`peer_role=sender` 时�
 |---|---|---|
 | env `OPENVIKING_*` | 各家族见上；行为配置项见各档案卡 | 唯一横跨所有 JS 系的层 |
 | workspace 层：每机注册表 `~/.openviking/workspaces/<slot>.json` > `<repo-root>/.openviking/config.local.json`（私有，gitignore）> `<repo-root>/.openviking/config.json`（提交进仓库、团队共享） | claude-code / codex / cursor / trae / trae-cn / zcode / opencode / dsh / pi | schema v1，必须写 `version: 1`，声明其他版本的文件会被跳过并告警。可用 key：`peer.source`、`peer.id`、`recall.{enabled,peer_scope,dedup_turns,max_items,score_threshold}`、`capture.{enabled,commit_token_threshold}`、`bypass.session_patterns`、`labels`。列表类跨层取并集，首元素写 `"!reset"` 可清空继承来的内容；不认识的 key 原样保留但不生效。hook 是非交互的，这些文件因此无提示直接信任，换来的是结构性的拒绝：连接与凭据类 key（`url`、`api_key`、`account`、`user`、`extra_headers` 等）一律剥离并告警，这些文件里的 `${VAR}` 永不展开。注册表目前没有写入方：条目由人工创建，`ov-memory-doctor` 会打印该放到哪个 slot 路径。提交进仓库的文件关掉了什么，由 `ov-memory-doctor` 播报而不是拦截 |
-| ovcli.conf `plugin` 段（共享标量，可被 `plugin.<harness>` 对象覆盖） | claude-code / codex / cursor / trae / trae-cn / zcode / opencode / dsh / pi | 每个 harness 键两种写法都认——`claude_code` 或 `claude-code`、`trae_cn` 或 `trae-cn`。注意：`ov config add/edit` 会以 Rust Config 结构重写整个文件，从而丢弃其不识别的 `plugin` 段；而 `ov config switch` 为字节复制，不受影响 |
+| ovcli.conf `plugin` 段（共享标量，可被 `plugin.<harness>` 对象覆盖） | claude-code / codex / cursor / trae / trae-cn / zcode / opencode / dsh / pi | 每个 harness 键两种写法都认——`claude_code` 或 `claude-code`、`trae_cn` 或 `trae-cn`。`ov config` 编辑和重命名会保留 `plugin` 等额外顶层字段；切换时以新配置显式提供的字段为准，缺省的额外字段沿用 active 文件 |
 | ov.conf harness 段（`<harness>.*`，legacy） | 每个 harness 读与自己同名的那段 | 凭据字段（`apiKey`/`accountId`/`userId`/`peerId`）与调优配置项都按调用方 harness 取自己的段。两种写法指向同一段 |
 | harness 自有配置文件 | dsh cordis patch（会被 `plugin` 段压过）、openclaw `openclaw.json`、hermes `config.yaml`+`.env` | |
 
@@ -668,7 +668,7 @@ MCP `write` / REST `content/write` 的三道 guard（`content_write.py`）：可
 ## 5.2 全局选项与独有机制
 
 - `-o/--output table|json`（默认取 conf `output`）｜`-c/--compact`（默认 true）｜`--account`/`--user`/`--actor-peer-id`｜`--sudo`（用 root_api_key，只允许 admin/system/reindex/task status/task list）｜`--profile`（隐藏）
-- **多 profile**：active 为 `~/.openviking/ovcli.conf`，命名规范为 `ovcli.conf.<name>`；`switch` 是字节复制（保留 `plugin` 段），而 `add/edit` 走 serde 重写（会丢弃 Rust Config 不识别的键，含 `plugin` 段，见 [§3.1.4](#_3-1-4-配置体系分层)）。
+- **多 profile**：active 为 `~/.openviking/ovcli.conf`，命名配置为 `ovcli.conf.<name>`。编辑和重命名保留 `plugin` 等额外顶层字段。切换时替换连接配置；新配置若显式提供 `plugin`，则采用该段，否则保留 active 文件原有的 `plugin`。
 - **语言门禁**：跑任何命令前要求先存显示语言（未存 + 非交互 → exit 2）；HEAD 起 `--help` 在门禁前豁免（0.4.10 尚无此豁免），但 `--version` 仍需先过门禁。
 - **三种 JSON 输出格式（按命令组不同）**：普通命令 compact 下输出 `{"ok":true,"result":…}`，`-c false` 输出裸 payload，失败输出 `{"ok":false,"error":…}`；config 系为 `{"status":"ok","result":…}`；带 profile 时追加 `"profile":[…]`。脚本解析时需注意；此外 `echo_command` 默认 true 且不受 `-o json` 抑制（stdout 第一行是 `cmd: …`）。
 - **env**：`OPENVIKING_CLI_CONFIG_FILE`、`OPENVIKING_UPLOAD_MODE`（local/shared）、`OPENVIKING_ASSETS_CREDENTIALS_FILE`、`OPENVIKING_LANG`/`LC_*`/`LANG`，以及 chat 用的 `VIKINGBOT_ENDPOINT`/`VIKINGBOT_API_KEY`/`OPENVIKING_URL`。
