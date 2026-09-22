@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from openviking.core.namespace import is_session_uri
-from openviking.pyagfs.exceptions import AGFSNotSupportedError
+from openviking.pyagfs.exceptions import AGFSInvalidOperationError, AGFSNotSupportedError
 from openviking.server.identity import RequestContext
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs._base import logger
@@ -255,15 +255,19 @@ class _GrepMixin:
             and await self._session_native_grep_safe(uri, ctx)
         )
         if native_safe:
+            session_uri = is_session_uri(uri)
+            if session_uri:
+                # Session grep used Python ``re`` before the native fast path was
+                # introduced. Keep rejecting patterns that Python itself rejects,
+                # and retain Python-only constructs through the fallback below.
+                re.compile(pattern, re.IGNORECASE if case_insensitive else 0)
             try:
                 # Session grep historically used the Python fallback, where
                 # level_limit counts directory expansions and therefore
                 # includes files one path segment deeper than native grep.
                 # Preserve that public behavior when selecting the fast path.
                 native_level_limit = (
-                    level_limit + 1
-                    if is_session_uri(uri) and level_limit is not None
-                    else level_limit
+                    level_limit + 1 if session_uri and level_limit is not None else level_limit
                 )
                 return await self._grep_with_agfs(
                     uri=uri,
@@ -275,6 +279,22 @@ class _GrepMixin:
                     ctx=ctx,
                     before_context=before_context,
                     after_context=after_context,
+                )
+            except AGFSInvalidOperationError as e:
+                message = str(e).lower()
+                if not session_uri or not any(
+                    marker in message
+                    for marker in (
+                        "invalid regex",
+                        "invalid regular expression",
+                        "regex parse error",
+                    )
+                ):
+                    raise
+                logger.debug(
+                    "agfs does not support this Python regex, falling back to VikingFS "
+                    "implementation: %s",
+                    e,
                 )
             except (AttributeError, AGFSNotSupportedError, NotImplementedError) as e:
                 logger.debug(f"agfs grep unavailable, falling back to VikingFS implementation: {e}")
