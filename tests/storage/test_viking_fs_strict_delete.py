@@ -7,8 +7,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.expr import Eq, Or, PathScope
+from openviking.storage.expr import Eq, In, Or, PathScope
+from openviking.storage.vectordb.index.cuvs_index import matches_filter
+from openviking.storage.vectordb_adapters.local_adapter import LocalCollectionAdapter
 from openviking.storage.viking_fs import VikingFS
+from openviking.storage.viking_vector_index_backend import VikingVectorIndexBackend
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -55,3 +58,61 @@ async def test_strict_recursive_delete_clears_orphan_vector_subtree_when_source_
         "filter": Or([Eq("uri", session_uri), PathScope("uri", session_uri, depth=-1)]),
         "ctx": _ctx(),
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trailing_slash", [False, True])
+async def test_parent_summary_deletion_preserves_live_descendant_vectors(trailing_slash):
+    """Exercise the cloud path-filter boundary, including delete's slash alias."""
+    parent = "viking://user/alice/memories/events/batch"
+    ctx = _ctx()
+    rows = [
+        {"id": "abstract", "uri": parent, "account_id": ctx.account_id},
+        {"id": "overview", "uri": parent + "/", "account_id": ctx.account_id},
+        {"id": "live", "uri": parent + "/live.md", "account_id": ctx.account_id},
+        {"id": "nested", "uri": parent + "/nested/live.md", "account_id": ctx.account_id},
+        {"id": "prefix", "uri": parent + "-other/live.md", "account_id": ctx.account_id},
+        {"id": "foreign", "uri": parent, "account_id": "other"},
+    ]
+    compiler = object.__new__(LocalCollectionAdapter)
+
+    def selected(expr, row):
+        return matches_filter(
+            {**row, "uri": compiler._encode_uri_field_value(row["uri"])},
+            compiler._compile_filter(expr),
+            {"uri": "path", "account_id": "string"},
+        )
+
+    async def delete_by_filter(expr):
+        rows[:] = [row for row in rows if not selected(expr, row)]
+
+    async def count(filter=None):
+        return sum(selected(filter, row) for row in rows if row["account_id"] == ctx.account_id)
+
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend._get_backend_for_context = lambda _: SimpleNamespace(
+        delete_by_filter=delete_by_filter, count=count
+    )
+    fs = VikingFS(agfs=SimpleNamespace(), vector_store=backend)
+    target = parent + "/" if trailing_slash else parent
+
+    await fs._delete_from_vector_store([target], ctx=ctx)
+    await fs._confirm_vector_uris_cleared([target], ctx=ctx)
+
+    assert {row["id"] for row in rows} == {"live", "nested", "prefix", "foreign"}
+
+
+@pytest.mark.parametrize("field", ["uri", "parent_uri"])
+def test_path_membership_matches_only_listed_paths(field):
+    compiler = object.__new__(LocalCollectionAdapter)
+    paths = ["viking://user/alice/memories/events/a", "viking://user/alice/memories/events/b"]
+    compiled = compiler._compile_filter(In(field, paths))
+    candidates = [*paths, paths[0] + "/live.md", paths[1] + "-sibling"]
+    selected = [
+        value
+        for value in candidates
+        if matches_filter(
+            {field: compiler._encode_uri_field_value(value)}, compiled, {field: "path"}
+        )
+    ]
+    assert selected == paths
