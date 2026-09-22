@@ -1,6 +1,6 @@
 # 多写存储指南
 
-本指南介绍如何配置 OpenViking 的多写存储能力。多写存储允许一个 primary 后端同时复制写入多个 backup 后端，用于高可用、跨区域副本、读加速和存储迁移。
+本指南介绍如何配置 OpenViking 的多写存储能力。多写存储允许一个 primary 后端同时复制写入多个 backup 后端，用于保存副本、配置读路由和存储迁移。primary 故障时不会自动提升 backup。
 
 多写能力位于 RAGFS 内部。OpenViking 的 Python SDK、HTTP API 和 CLI 使用方式保持不变。
 
@@ -13,7 +13,7 @@
 
 ## 最小配置
 
-下面示例使用本地目录作为 primary，并把写入复制到另一个本地目录。
+将下列片段合并到现有模型和服务端配置。下面示例使用本地目录作为 primary，并把写入复制到另一个本地目录。
 
 ```json
 {
@@ -94,12 +94,12 @@
 
 ### S3 兼容存储注意事项
 
-使用 S3 兼容服务（MinIO、RustFS、Ceph 等）时，`s3` 段需要额外配置以下字段：
+按实际 endpoint 和对象存储配置选择以下 `s3` 字段：
 
 | 字段 | 是否必填 | 说明 |
 | --- | --- | --- |
-| `use_path_style` | 大多数 S3 兼容服务必填 | 设置为 `true` 使用路径风格 URL（`http://host/bucket/key`）。大多数 S3 兼容服务需要此配置。 |
-| `directory_marker_mode` | S3 兼容服务必填 | **必须显式设置为 `"none"`**。如果不配置，RAGFS Rust binding 启动时会报 `AGFSConfigError: invalid directory_marker_mode: null` 并静默崩溃。 |
+| `use_path_style` | 可选，默认 `true` | 使用路径风格 URL（`http://host/bucket/key`），按 endpoint 支持的方式选择。 |
+| `directory_marker_mode` | 可选，默认 `"empty"` | `none` 不创建标记，`empty` 创建零字节标记，`nonempty` 创建带内容的标记。 |
 | `use_ssl` | 可选 | HTTP 端点（如 `http://localhost:9000`）需要设置为 `false`。 |
 
 **S3 兼容存储最小示例（RustFS/MinIO）：**
@@ -121,9 +121,7 @@
 }
 ```
 
-> **为什么需要 `directory_marker_mode`？**
->
-> S3 兼容存储服务对"目录"的处理方式与 AWS S3 不同。RAGFS Rust binding 必须知道创建目录时是否需要写入目录标记对象。合法取值为 `"none"`、`"empty"` 和 `"nonempty"`。对于不使用目录标记的 S3 兼容服务（RustFS、MinIO、Ceph 等），设置为 `"none"`。如果省略，Rust binding 默认值为 `null`（不合法），导致服务端在启动时静默崩溃，报错 `AGFSConfigError: invalid directory_marker_mode: null`。
+上面的示例主动选择 `none`。旧版本可能传入无效的 null marker 值；遇到该错误时，显式设置合法值，并核对部署版本。当前 Python 配置默认使用 `empty`。
 
 ### Docker 网络配置
 
@@ -154,7 +152,7 @@
 - primary 写入成功后立即返回。
 - backup 写入在后台执行。
 - 写入延迟低。
-- backup 可能短暂落后。
+- 后端不可用期间，落后时间没有固定上限，需观察同步和恢复状态。
 
 适合：
 
@@ -172,7 +170,7 @@
     "sync_type": "sync",
     "write_ack_count": 1,
     "write_ack_timeout_ms": 5000,
-    "items": []
+    "items": [{"name": "local-backup", "backend": "local", "local": {"workspace": "./backup-data"}}]
   }
 }
 ```
@@ -206,6 +204,7 @@ backup 默认不参与读取。要让 backup 服务读取，需要显式配置 `
   "name": "cache-backend",
   "backend": "memfs",
   "operations": [
+    {"operation": "write", "priority": 0},
     {
       "operation": "read",
       "priority": 10
@@ -378,7 +377,7 @@ openviking write viking://resources/multiwrite-check.txt \
 openviking read viking://resources/multiwrite-check.txt
 ```
 
-如果使用本地 backup，可以直接检查 backup 目录中是否出现对应文件。生产环境更推荐使用系统健康检查和同步状态命令。
+如果使用本地 backup，可以直接检查 backup 目录中是否出现对应文件。还应运行 `ov system backend sync-status viking://resources`，逐个核对预期副本。普通读取成功可能只读到了 primary，不能证明复制完成。
 
 ## 常见问题
 
@@ -389,6 +388,7 @@ backup 默认只参与写入，不参与读取。需要在 backup 上显式配�
 ```json
 {
   "operations": [
+    {"operation": "write", "priority": 0},
     {
       "operation": "read",
       "priority": 10
@@ -403,7 +403,7 @@ backup 默认只参与写入，不参与读取。需要在 backup 上显式配�
 
 ### 异步模式下能否保证立即读到 backup 的最新数据？
 
-不能。异步模式只保证最终一致。需要强读一致时，应让读取回退到 primary，或避免让可能滞后的 backup 参与读路由。
+不能。后台重试需要后端恢复可用才能追上进度。backup 返回旧数据但读取成功时，不会自动回退 primary；需要最新数据时，应让读路由使用 primary。
 
 ### 内部元数据文件会出现在用户列表里吗？
 

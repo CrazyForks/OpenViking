@@ -1,6 +1,6 @@
 # Multi-Write Storage Guide
 
-This guide explains how to configure multi-write storage in OpenViking. Multi-write storage lets one primary backend replicate writes to multiple backup backends for high availability, cross-region replicas, read acceleration, and storage migration.
+This guide explains how to configure multi-write storage in OpenViking. Multi-write storage lets one primary backend replicate writes to multiple backup backends for replica storage, optional read routing, and migration. It does not automatically promote a backup when the primary fails.
 
 Multi-write lives inside RAGFS. The Python SDK, HTTP API, and CLI usage remain unchanged.
 
@@ -13,7 +13,7 @@ Multi-write lives inside RAGFS. The Python SDK, HTTP API, and CLI usage remain u
 
 ## Minimal Configuration
 
-The following example uses a local directory as the primary backend and replicates writes to another local directory.
+Merge these excerpts into your existing model/server configuration. The following example uses a local directory as the primary backend and replicates writes to another local directory.
 
 ```json
 {
@@ -94,12 +94,12 @@ Recommendations:
 
 ### S3-Compatible Storage Notes
 
-When using S3-compatible services (MinIO, RustFS, Ceph, etc.), the `s3` section requires additional fields:
+Match these `s3` fields to the endpoint and object-store configuration:
 
 | Field | Required? | Description |
 | --- | --- | --- |
-| `use_path_style` | Yes for most S3-compatible | Set to `true` for path-style URLs (`http://host/bucket/key`). Most S3-compatible services require this. |
-| `directory_marker_mode` | Yes for S3-compatible | **Must be explicitly set to `"none"`**. Without this, the RAGFS Rust binding panics with `AGFSConfigError: invalid directory_marker_mode: null` during startup, causing a silent crash loop. |
+| `use_path_style` | Optional; default `true` | Use path-style URLs (`http://host/bucket/key`); select the style your endpoint supports. |
+| `directory_marker_mode` | Optional; default `"empty"` | `none` creates no marker, `empty` creates a zero-byte marker, and `nonempty` creates a marker with content. |
 | `use_ssl` | Optional | Set to `false` for HTTP endpoints (e.g. `http://localhost:9000`). |
 
 **Minimal S3-compatible example (RustFS/MinIO):**
@@ -121,9 +121,7 @@ When using S3-compatible services (MinIO, RustFS, Ceph, etc.), the `s3` section 
 }
 ```
 
-> **Why is `directory_marker_mode` required?**
->
-> S3-compatible storage services handle "directories" differently from AWS S3. The RAGFS Rust binding must know whether to write directory marker objects when creating directories. Valid values are `"none"`, `"empty"`, and `"nonempty"`. For S3-compatible services that don't use directory markers (RustFS, MinIO, Ceph, etc.), set this to `"none"`. If omitted, the Rust binding defaults to `null` which is rejected, causing the server to crash silently during startup with `AGFSConfigError: invalid directory_marker_mode: null`.
+The example chooses `none` deliberately. Older versions could pass an invalid null marker value; if you encounter that error, set a valid value explicitly and check the deployed version. Current Python configuration defaults to `empty`.
 
 ### Docker Networking for S3 Backup
 
@@ -154,7 +152,7 @@ Characteristics:
 - Returns immediately after the primary write succeeds.
 - Backup writes run in the background.
 - Low write latency.
-- Backups may lag temporarily.
+- Lag has no fixed bound while a backend is unavailable; monitor synchronization and recovery.
 
 Suitable for:
 
@@ -172,7 +170,7 @@ Sync mode waits for backup acknowledgements.
     "sync_type": "sync",
     "write_ack_count": 1,
     "write_ack_timeout_ms": 5000,
-    "items": []
+    "items": [{"name": "local-backup", "backend": "local", "local": {"workspace": "./backup-data"}}]
   }
 }
 ```
@@ -206,6 +204,7 @@ Backups do not participate in reads by default. To let a backup serve reads, exp
   "name": "cache-backend",
   "backend": "memfs",
   "operations": [
+    {"operation": "write", "priority": 0},
     {
       "operation": "read",
       "priority": 10
@@ -378,7 +377,7 @@ openviking write viking://resources/multiwrite-check.txt \
 openviking read viking://resources/multiwrite-check.txt
 ```
 
-If you use a local backup, you can also inspect the backup directory directly. In production, system health checks and sync-status commands are preferable.
+If you use a local backup, you can also inspect the backup directory directly. Also run `ov system backend sync-status viking://resources` and check every intended replica. A successful ordinary read may come only from the primary and does not prove replication.
 
 ## FAQ
 
@@ -389,6 +388,7 @@ Backups are write-only by default. To make a backup serve reads, configure:
 ```json
 {
   "operations": [
+    {"operation": "write", "priority": 0},
     {
       "operation": "read",
       "priority": 10
@@ -403,7 +403,7 @@ Multi-write only handles new writes after it is enabled. For historical data, fo
 
 ### Can async mode guarantee that the newest data is immediately readable from a backup?
 
-No. Async mode provides eventual consistency only. If you need stronger read consistency, let reads fall back to the primary backend or avoid routing reads to backups that may lag.
+No. Background retries need a functioning backend to catch up. A stale but successful backup read does not fall back to the primary; route reads to the primary when current data is required.
 
 ### Will internal metadata files appear in normal user listings?
 
