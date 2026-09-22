@@ -544,6 +544,34 @@ async def test_vectorize_directory_meta_writes_search_tags_into_embedding_contex
 
 
 @pytest.mark.asyncio
+async def test_memory_directory_vectors_are_fenced_by_source_sidecars(monkeypatch):
+    from openviking.storage.abstract_overview import semantic_body_digest
+
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("ignored"))
+    uri = "viking://user/default/memories/events/2026"
+
+    await embedding_utils.vectorize_directory_meta(
+        uri=uri,
+        abstract="event abstract",
+        overview="event overview",
+        context_type="memory",
+        ctx=DummyReq(),
+        content_is_body=True,
+    )
+
+    assert queue.items[0].context_data["_source_sidecar_uri"] == f"{uri}/.abstract.md"
+    assert queue.items[0].context_data["_source_sidecar_digest"] == semantic_body_digest(
+        "event abstract"
+    )
+    assert queue.items[1].context_data["_source_sidecar_uri"] == f"{uri}/.overview.md"
+    assert queue.items[1].context_data["_source_sidecar_digest"] == semantic_body_digest(
+        "event overview"
+    )
+
+
+@pytest.mark.asyncio
 async def test_vectorize_directory_meta_appends_search_tags_by_level(monkeypatch):
     queue = DummyQueue()
     monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))

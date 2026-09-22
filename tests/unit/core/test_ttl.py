@@ -5,14 +5,14 @@
 These cover the pure resolution/barrier logic that every writer and reader
 shares: URI -> scope classification, frozen-snapshot computation, the
 absent/future/expired rules of ``is_expired``/``hidden_by_ttl``, and the
-``range_out`` read-barrier predicate. TTL is default OFF, so the disabled path
-(no barrier, nothing hidden) is asserted explicitly.
+``range_out`` read-barrier predicate. TTL is default OFF for object creation,
+while already-frozen snapshots remain authoritative after a policy change.
 """
 
 from __future__ import annotations
 
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -85,14 +85,30 @@ def test_resolve_ttl_days_none_when_config_unavailable(monkeypatch):
     assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") is None
 
 
+def test_resolve_ttl_days_uses_nearest_concrete_directory(monkeypatch):
+    config = TTLConfig(
+        user_events={"mode": "days", "ttl_days": 30},
+        directories={
+            "viking://user/u1/memories/events/project": {"mode": "days", "ttl_days": 5},
+            "viking://user/u1/memories/events/project/keep": {"mode": "disabled"},
+        },
+    )
+    _install_config(monkeypatch, config)
+    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/project/e.md") == 5
+    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/project/keep/e.md") is None
+    # An out-of-scope URI never becomes TTL-managed merely because configured.
+    assert ttl.resolve_ttl_days("viking://user/u1/resources/project/r.md") is None
+
+
 def test_freeze_ttl_fields_snapshot(monkeypatch):
     config = TTLConfig(user_events={"mode": "days", "ttl_days": 10})
     _install_config(monkeypatch, config)
 
     received = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    snap = ttl.freeze_ttl_fields(
-        "viking://user/u1/memories/events/e.md", received_at=received
-    )
+    snap = ttl.freeze_ttl_fields("viking://user/u1/memories/events/e.md", received_at=received)
+    assert snap is not None
+    generation = snap.pop("ttl_generation")
+    assert generation
     assert snap == {
         "ttl_days": 10,
         "received_at": "2026-01-01T00:00:00.000Z",
@@ -117,11 +133,31 @@ def test_freeze_ttl_fields_naive_received_at_treated_as_utc(monkeypatch):
     assert snap["expires_at"] == "2026-05-02T12:00:00.000Z"
 
 
+def test_apply_ttl_fields_owns_creation_and_preserves_existing(monkeypatch):
+    config = TTLConfig(user_events={"mode": "days", "ttl_days": 3})
+    _install_config(monkeypatch, config)
+    received = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    created = ttl.apply_ttl_fields(
+        "viking://user/u1/memories/events/e.md",
+        {"title": "x", "ttl_days": 999, "expires_at": "2999-01-01T00:00:00Z"},
+        received_at=received,
+    )
+    assert created["ttl_days"] == 3
+    assert created["expires_at"] == "2026-01-04T00:00:00.000Z"
+    updated = ttl.apply_ttl_fields(
+        "viking://user/u1/memories/events/e.md",
+        {"title": "y", "ttl_days": 1},
+        existing_fields=created,
+    )
+    assert updated["title"] == "y"
+    assert updated["ttl_days"] == 3
+    assert updated["received_at"] == created["received_at"]
+    assert updated["expires_at"] == created["expires_at"]
+
+
 def test_compute_expires_at_day_granularity():
     received = datetime(2026, 3, 10, 6, 30, tzinfo=timezone.utc)
-    assert ttl.compute_expires_at(received, 3) == datetime(
-        2026, 3, 13, 6, 30, tzinfo=timezone.utc
-    )
+    assert ttl.compute_expires_at(received, 3) == datetime(2026, 3, 13, 6, 30, tzinfo=timezone.utc)
 
 
 # ── is_expired: absent / future / past rules ────────────────────────────────
@@ -148,22 +184,23 @@ def test_is_expired_naive_expiry_treated_as_utc():
     assert ttl.is_expired("2026-05-01T00:00:00", now=now) is True
 
 
-# ── ttl_enabled / hidden_by_ttl / expiry_filter_now gate ────────────────────
+# ── ttl_enabled / hidden_by_ttl / expiry_filter_now snapshot semantics ─────
 
 
-def test_disabled_config_is_fully_inert(monkeypatch):
+def test_disabled_config_stops_creation_but_does_not_revive_snapshots(monkeypatch):
     _install_config(monkeypatch, TTLConfig())  # default OFF
     assert ttl.ttl_enabled() is False
-    assert ttl.expiry_filter_now() is None
-    # Even a clearly-past expiry is not hidden while TTL is off.
-    assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is False
+    assert ttl.freeze_ttl_fields("viking://user/u1/sessions/new") is None
+    # A snapshot frozen while an earlier policy was active stays authoritative.
+    assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is True
+    assert ttl.expiry_filter_now() is not None
 
 
-def test_unavailable_config_fails_closed_to_off(monkeypatch):
+def test_unavailable_config_stops_creation_without_reviving_snapshots(monkeypatch):
     _install_config(monkeypatch, None)
     assert ttl.ttl_enabled() is False
-    assert ttl.expiry_filter_now() is None
-    assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is False
+    assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is True
+    assert ttl.expiry_filter_now() is not None
 
 
 def test_enabled_config_hides_expired_only(monkeypatch):

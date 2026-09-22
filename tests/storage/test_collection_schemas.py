@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import requests
@@ -512,6 +513,201 @@ async def test_embedding_handler_materialize_content_keeps_inline(monkeypatch):
     assert content == "already inline"
 
 
+def _ttl_event_embedding_message(generation: str = "generation-1") -> EmbeddingMsg:
+    return EmbeddingMsg(
+        "embedding text",
+        {
+            "uri": "viking://user/default/memories/events/event.md",
+            "ttl_generation": generation,
+        },
+    )
+
+
+def _ttl_memory_content(*, expires_at: str, generation: str) -> str:
+    return (
+        '<!-- MEMORY_FIELDS {"expires_at": "'
+        + expires_at
+        + '", "ttl_generation": "'
+        + generation
+        + '"} -->\nbody'
+    )
+
+
+def _install_ttl_event_fs(monkeypatch, *, content=None, error=None):
+    class _FakeFS:
+        def __init__(self):
+            self._async_agfs = SimpleNamespace(
+                pathlock_acquire_exact=AsyncMock(return_value="event-lease"),
+                pathlock_release=AsyncMock(),
+            )
+            self.read_file = AsyncMock(side_effect=error, return_value=content)
+
+        def _uri_to_path(self, uri, *, ctx):
+            assert ctx.account_id == "default"
+            return f"/{uri.removeprefix('viking://')}"
+
+    fs = _FakeFS()
+    monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
+    return fs
+
+
+def _ttl_embedding_handler(monkeypatch) -> TextEmbeddingHandler:
+    class _DummyVikingDB:
+        is_closing = False
+
+    monkeypatch.setattr(
+        "openviking_cli.utils.config.get_openviking_config",
+        lambda: _DummyConfig(_DummyEmbedder()),
+    )
+    return TextEmbeddingHandler(_DummyVikingDB())
+
+
+@pytest.mark.asyncio
+async def test_ttl_event_embedding_skips_when_source_is_missing(monkeypatch):
+    fs = _install_ttl_event_fs(monkeypatch, error=FileNotFoundError("event.md"))
+    write_vector = AsyncMock(return_value="record-1")
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+
+    result = await handler._write_ttl_vector_if_current(
+        _ttl_event_embedding_message(), ctx, write_vector
+    )
+
+    assert result is None
+    write_vector.assert_not_awaited()
+    fs.read_file.assert_awaited_once_with(
+        "viking://user/default/memories/events/event.md",
+        ctx=ctx,
+        include_expired=True,
+    )
+    fs._async_agfs.pathlock_release.assert_awaited_once_with("event-lease")
+
+
+@pytest.mark.asyncio
+async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch):
+    fs = _install_ttl_event_fs(
+        monkeypatch,
+        content=_ttl_memory_content(
+            expires_at="2000-01-01T00:00:00.000Z", generation="generation-1"
+        ),
+    )
+    write_vector = AsyncMock(return_value="record-1")
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+
+    result = await handler._write_ttl_vector_if_current(
+        _ttl_event_embedding_message(), ctx, write_vector
+    )
+
+    assert result is None
+    write_vector.assert_not_awaited()
+    fs._async_agfs.pathlock_release.assert_awaited_once_with("event-lease")
+
+
+@pytest.mark.asyncio
+async def test_ttl_event_embedding_skips_stale_generation(monkeypatch):
+    fs = _install_ttl_event_fs(
+        monkeypatch,
+        content=_ttl_memory_content(
+            expires_at="2999-01-01T00:00:00.000Z", generation="generation-2"
+        ),
+    )
+    write_vector = AsyncMock(return_value="record-1")
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+
+    result = await handler._write_ttl_vector_if_current(
+        _ttl_event_embedding_message("generation-1"), ctx, write_vector
+    )
+
+    assert result is None
+    write_vector.assert_not_awaited()
+    fs._async_agfs.pathlock_release.assert_awaited_once_with("event-lease")
+
+
+@pytest.mark.asyncio
+async def test_ttl_event_embedding_writes_current_generation_under_lock(monkeypatch):
+    fs = _install_ttl_event_fs(
+        monkeypatch,
+        content=_ttl_memory_content(
+            expires_at="2999-01-01T00:00:00.000Z", generation="generation-1"
+        ),
+    )
+    write_vector = AsyncMock(return_value="record-1")
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+
+    result = await handler._write_ttl_vector_if_current(
+        _ttl_event_embedding_message("generation-1"), ctx, write_vector
+    )
+
+    assert result == "record-1"
+    write_vector.assert_awaited_once_with()
+    fs._async_agfs.pathlock_release.assert_awaited_once_with("event-lease")
+
+
+@pytest.mark.asyncio
+async def test_directory_embedding_skips_when_source_sidecar_was_invalidated(monkeypatch):
+    fs = _install_ttl_event_fs(monkeypatch, error=FileNotFoundError(".overview.md"))
+    write_vector = AsyncMock(return_value="record-1")
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+
+    result = await handler._write_directory_vector_if_current(
+        "viking://user/default/memories/events/.overview.md",
+        "old-digest",
+        ctx,
+        write_vector,
+    )
+
+    assert result is None
+    write_vector.assert_not_awaited()
+    fs._async_agfs.pathlock_release.assert_awaited_once_with("event-lease")
+
+
+@pytest.mark.asyncio
+async def test_directory_embedding_skips_when_sidecar_body_changed(monkeypatch):
+    _install_ttl_event_fs(monkeypatch, content="new overview")
+    write_vector = AsyncMock(return_value="record-1")
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+
+    result = await handler._write_directory_vector_if_current(
+        "viking://user/default/memories/events/.overview.md",
+        "old-digest",
+        ctx,
+        write_vector,
+    )
+
+    assert result is None
+    write_vector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_directory_embedding_carries_the_persisted_summary_deadline(monkeypatch):
+    from openviking.core.ttl import expiry_filter_now
+    from openviking.storage.abstract_overview import render_abstract_overview, semantic_body_digest
+    from openviking.storage.vectordb.index.cuvs_index import matches_filter
+
+    uri = "viking://user/default/memories/events"
+    expiry = "2026-09-23T00:00:00.000Z"
+    raw = render_abstract_overview(0, uri, "summary", {"expires_at": expiry})
+    _install_ttl_event_fs(monkeypatch, content=raw)
+    handler = _ttl_embedding_handler(monkeypatch)
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+    data = {"uri": uri, "level": 0}
+    written = []
+    async def write():
+        written.append(dict(data))
+        return "id"
+    await handler._write_directory_vector_if_current(
+        uri + "/.abstract.md", semantic_body_digest("summary"), ctx, write, context_data=data,
+    )
+    assert written[0]["expires_at"] == expiry
+    from openviking.utils.time_utils import parse_iso_datetime
+    assert not matches_filter(data, expiry_filter_now(now=parse_iso_datetime(expiry)).payload, {})
+
+
 @pytest.mark.asyncio
 async def test_embedding_handler_propagates_account_id_on_error(monkeypatch):
     class _DummyVikingDB:
@@ -960,7 +1156,7 @@ def test_volcengine_aksk_collection_ignores_unknown_fields_on_fetch_and_search()
     calls = []
 
     class _Collection(VolcengineCollection):
-        def _data_post(self, path, data):
+        def _data_post(self, path, data, **kwargs):
             calls.append((path, data))
             return {}
 

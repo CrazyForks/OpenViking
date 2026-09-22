@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import openviking.core.ttl as ttl
 from openviking.message import Message
 from openviking.message.part import TextPart, ToolPart
 from openviking.prompts.manager import PromptManager
@@ -43,6 +44,7 @@ from openviking.session.memory.utils import (
 from openviking.storage.abstract_overview import parse_abstract_overview
 from openviking_cli.exceptions import NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
+from openviking_cli.utils.config import TTLConfig
 
 
 class TestMemoryUpdateResult:
@@ -1339,6 +1341,56 @@ class TestApplyEditWithSearchReplacePatch:
         result = MemoryFileUtils.read(written_content)
         assert result.extra_fields["source_extraction_id"] == "extract_1"
         assert result.extra_fields["last_update_trace_id"] == "trace_1"
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_uses_system_owned_ttl_snapshot(self, monkeypatch):
+        content_field = MemoryField(
+            name="content",
+            field_type=FieldType.STRING,
+            merge_op=MergeOp.PATCH,
+        )
+        schema = MemoryTypeSchema(
+            memory_type="test",
+            description="test",
+            fields=[content_field],
+        )
+        registry = MemoryTypeRegistry(load_schemas=False)
+        registry.register(schema)
+        updater = MemoryUpdater(registry=registry)
+        mock_viking_fs = MagicMock()
+        mock_viking_fs.read_file = AsyncMock(side_effect=FileNotFoundError("missing"))
+        written_content = None
+
+        async def mock_write_file(uri, content, **kwargs):
+            nonlocal written_content
+            written_content = content
+
+        mock_viking_fs.write_file = mock_write_file
+        updater._get_viking_fs = MagicMock(return_value=mock_viking_fs)
+        config = TTLConfig(user_events={"mode": "days", "ttl_days": 4})
+        monkeypatch.setattr(
+            ttl,
+            "get_openviking_config",
+            lambda: type("Config", (), {"ttl": config})(),
+        )
+        uri = "viking://user/test/memories/events/2026/event.md"
+        op = ResolvedOperation(
+            memory_fields={
+                "content": "event",
+                "ttl_days": 999,
+                "expires_at": "2999-01-01T00:00:00.000Z",
+            },
+            memory_type="test",
+            uris=[uri],
+        )
+
+        await updater._apply_upsert(op, MagicMock())
+
+        assert written_content is not None
+        result = MemoryFileUtils.read(written_content, uri=uri)
+        assert result.extra_fields["ttl_days"] == 4
+        assert result.extra_fields["expires_at"] != "2999-01-01T00:00:00.000Z"
+        assert result.extra_fields["received_at"]
 
     @pytest.mark.asyncio
     async def test_apply_edit_with_str_patch_instance(self):

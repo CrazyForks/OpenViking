@@ -1666,6 +1666,9 @@ class ReindexExecutor:
             expires_at = (
                 memory_file.extra_fields.get("expires_at") if memory_file else None
             )
+            ttl_generation = (
+                memory_file.extra_fields.get("ttl_generation") if memory_file else None
+            )
             existing = await self._fetch_existing_record(
                 uri=file_uri,
                 level=2,
@@ -1673,6 +1676,8 @@ class ReindexExecutor:
             )
             if expires_at is None and existing is not None:
                 expires_at = existing.get("expires_at") or None
+            if ttl_generation is None and existing is not None:
+                ttl_generation = existing.get("ttl_generation") or None
             abstract = self._best_non_empty(
                 self._record_abstract(existing),
                 await self._best_file_summary(file_uri, ctx=ctx),
@@ -1697,6 +1702,7 @@ class ReindexExecutor:
                         ctx=ctx,
                         ingest_options=ingest_options,
                         expires_at=expires_at,
+                        ttl_generation=ttl_generation,
                     )
                     file_counters.rebuilt_records += 1
                 except Exception as exc:
@@ -1716,6 +1722,7 @@ class ReindexExecutor:
                     ctx=ctx,
                     ingest_options=ingest_options,
                     expires_at=expires_at,
+                    ttl_generation=ttl_generation,
                 )
                 file_counters.rebuilt_records += 1
                 file_counters.warnings.append(
@@ -1873,6 +1880,7 @@ class ReindexExecutor:
         meta: Optional[dict[str, Any]] = None,
         ingest_options: IngestOptions | None = None,
         expires_at: Optional[str] = None,
+        ttl_generation: Optional[str] = None,
     ) -> None:
         service = get_service()
         assert service.vikingdb_manager is not None
@@ -1891,6 +1899,7 @@ class ReindexExecutor:
             owner_space=owner_space_for_uri(uri),
             meta=merged_meta,
             expires_at=expires_at,
+            ttl_generation=ttl_generation,
         )
         context.set_vectorize(Vectorize(text=vector_text))
         msg = EmbeddingMsgConverter.from_context(context)

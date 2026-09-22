@@ -16,6 +16,12 @@ from openviking.core.namespace import (
     is_hidden_by_actor_peer_view,
     may_include_hidden_actor_peers,
 )
+from openviking.core.ttl import (
+    hidden_by_ttl,
+    ttl_enabled,
+    ttl_object_for_uri,
+    ttl_scope_for_uri,
+)
 from openviking.resource.watch_storage import is_watch_task_control_uri
 from openviking.server.error_mapping import is_not_found_error
 from openviking.server.identity import RequestContext, Role
@@ -527,13 +533,21 @@ class _AccessMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        *,
+        include_expired: bool = False,
     ):
         """Yield one visible tree page after namespace and ACL filtering."""
         real_ctx = self._ctx_or_default(ctx)
         primary_path = self._uri_to_path(uri, ctx=ctx)
         path: Optional[str] = None
         for candidate_path in self._read_paths(uri, ctx=ctx):
-            if not await self._read_path_visible(uri, candidate_path, primary_path, real_ctx):
+            if not await self._read_path_visible(
+                uri,
+                candidate_path,
+                primary_path,
+                real_ctx,
+                include_expired=include_expired,
+            ):
                 continue
             if await self._agfs_path_exists(candidate_path):
                 path = candidate_path
@@ -575,7 +589,13 @@ class _AccessMixin:
                     acl_enabled=acl_enabled,
                 ):
                     continue
-                if not await self._read_path_visible(uri, entry["path"], primary_path, real_ctx):
+                if not await self._read_path_visible(
+                    uri,
+                    entry["path"],
+                    primary_path,
+                    real_ctx,
+                    include_expired=include_expired,
+                ):
                     continue
                 entry_uri = self._alias_uri_for_path(
                     request_uri=uri,
@@ -723,12 +743,148 @@ class _AccessMixin:
         path: str,
         primary_path: str,
         ctx: RequestContext,
+        *,
+        include_expired: bool = False,
     ) -> bool:
-        if path == primary_path:
-            return True
-        if self._legacy_session_alias(request_uri):
+        if path != primary_path and self._legacy_session_alias(request_uri):
             owner_user_id = self._safe_uri_parts(request_uri)[1]
-            return await self._legacy_session_path_visible(path, owner_user_id=owner_user_id)
+            if not await self._legacy_session_path_visible(path, owner_user_id=owner_user_id):
+                return False
+        if include_expired:
+            return True
+
+        visible_uri = request_uri
+        primary_prefix = primary_path.rstrip("/") + "/"
+        if path.startswith(primary_prefix):
+            relative_path = path[len(primary_prefix) :].strip("/")
+            request_root = request_uri.rstrip("/")
+            separator = "" if request_root.endswith("://") else "/"
+            visible_uri = (
+                request_root if not relative_path else f"{request_root}{separator}{relative_path}"
+            )
+        return await self._ttl_uri_visible(visible_uri, ctx, path=path)
+
+    async def _ttl_summary_visible(self, uri: str, raw: bytes | str, ctx: RequestContext) -> bool:
+        from openviking.storage.abstract_overview import parse_abstract_overview
+
+        try:
+            document = parse_abstract_overview(raw)
+        except ValueError:
+            return False
+        expires_at = document.metadata.get("expires_at")
+        if expires_at:
+            return not hidden_by_ttl(expires_at)
+        if ttl_scope_for_uri(uri) in {"user_events", "peer_events"}:
+            # Legacy summaries have no trustworthy dependency deadline. Once
+            # TTL is in use they must be regenerated before serving their body.
+            directory_uri = uri.rsplit("/", 1)[0] if uri.endswith(("/.abstract.md", "/.overview.md")) else uri
+            return not await self.ttl_registry.summary_requires_snapshot(ctx.account_id, directory_uri)
+        return True
+
+    async def _ttl_uri_visible(
+        self,
+        uri: str,
+        ctx: RequestContext,
+        *,
+        path: Optional[str] = None,
+    ) -> bool:
+        """Return object-level TTL visibility without recursing through VikingFS.
+
+        Event expiry is stored in the event markdown file itself. Session expiry
+        is stored at the session root and hides the complete session subtree.
+        Directory policy nodes are never visibility objects by themselves.
+        Malformed or unreadable metadata fails open because expiry cannot be
+        proven; physical cleanup follows the same absent-expiry rule.
+        """
+        scope = ttl_scope_for_uri(uri)
+        if scope != "sessions" and uri.rsplit("/", 1)[-1] in {".abstract.md", ".overview.md"}:
+            candidates = [path] if path is not None else self._read_paths(uri, ctx=ctx)
+            for candidate in candidates:
+                try:
+                    await self._async_agfs.stat(candidate)
+                    raw = self._handle_agfs_read(await self._async_agfs.read(candidate))
+                except Exception as exc:
+                    if is_not_found_error(exc):
+                        continue
+                    return False
+                return await self._ttl_summary_visible(uri, raw, ctx)
+            return False
+        if scope is None:
+            return True
+        if not ttl_enabled() and not await self.ttl_registry.account_may_have_records(
+            ctx.account_id
+        ):
+            # Default-off accounts have no marker. Avoid parsing event/session
+            # metadata on their hot read paths. While policy is enabled we never
+            # trust a cached marker miss: another service process may have just
+            # created the account's first TTL object.
+            return True
+
+        parts = self._safe_uri_parts(uri)
+        if scope == "sessions":
+            # viking://user/{uid}/sessions is the container, not a TTL object.
+            if len(parts) < 4:
+                return True
+            object_uri = "viking://" + "/".join(parts[:4])
+            suffix_depth = len(parts) - 4
+            candidate_paths: List[str] = []
+            if path is not None:
+                object_path = path.rstrip("/")
+                for _ in range(suffix_depth):
+                    object_path = object_path.rsplit("/", 1)[0]
+                candidate_paths.append(object_path)
+            for candidate in self._read_paths(object_uri, ctx=ctx):
+                if candidate not in candidate_paths:
+                    candidate_paths.append(candidate)
+            metadata_paths = [f"{candidate}/.meta.json" for candidate in candidate_paths]
+        else:
+            # Only concrete event markdown files carry a frozen TTL snapshot.
+            if not parts or not parts[-1].endswith(".md"):
+                return True
+            metadata_paths = [path] if path is not None else []
+            canonical_path = self._uri_to_path(uri, ctx=ctx)
+            if canonical_path not in metadata_paths:
+                metadata_paths.append(canonical_path)
+
+        for metadata_path in metadata_paths:
+            if not metadata_path:
+                continue
+            try:
+                await self._async_agfs.stat(metadata_path)
+                raw = self._handle_agfs_read(await self._async_agfs.read(metadata_path))
+            except Exception as exc:
+                if is_not_found_error(exc):
+                    continue
+                return True
+            try:
+                if scope == "sessions":
+                    metadata = json.loads(self._decode_bytes(raw))
+                else:
+                    from openviking.session.memory.utils.messages import (
+                        parse_memory_file_with_fields,
+                    )
+
+                    metadata = parse_memory_file_with_fields(self._decode_bytes(raw))
+            except Exception:
+                return True
+            if not isinstance(metadata, dict):
+                return True
+            return not hidden_by_ttl(metadata.get("expires_at"))
+
+        # A strict recursive delete can remove the session metadata before a
+        # later filesystem/vector step fails. Keep any residual subtree hidden
+        # until the durable cleanup record is removed after full success. This
+        # exact-key lookup is only reached when scoped metadata is absent, so
+        # the ordinary/default-off read path pays no registry cost.
+        target = ttl_object_for_uri(uri)
+        if target is not None:
+            _object_type, object_uri = target
+            try:
+                record = await self.ttl_registry.get(ctx.account_id, object_uri)
+            except Exception:
+                return True
+            if record is not None and hidden_by_ttl(record.expires_at):
+                return False
         return True
 
     def _alias_uri_for_path(
@@ -925,7 +1081,11 @@ class _AccessMixin:
         real_ctx = self._ctx_or_default(ctx)
         if self._is_session_root_uri(uri):
             items = await self._session_root_items(uri, real_ctx)
-            return items, len(items), True
+            visible_items = []
+            for entry, entry_uri in items:
+                if await self._ttl_uri_visible(entry_uri, real_ctx):
+                    visible_items.append((entry, entry_uri))
+            return visible_items, len(items), True
 
         primary_path = self._uri_to_path(uri, ctx=ctx)
         merge_paths = self._legacy_session_alias(uri) is not None
@@ -966,6 +1126,9 @@ class _AccessMixin:
                     entry_path=f"{path.rstrip('/')}/{entry.get('name', '')}",
                     ctx=ctx,
                 )
+                entry_path = f"{path.rstrip('/')}/{entry.get('name', '')}"
+                if not await self._ttl_uri_visible(entry_uri, real_ctx, path=entry_path):
+                    continue
                 by_uri.setdefault(entry_uri, (entry, entry_uri))
             if not merge_paths:
                 break

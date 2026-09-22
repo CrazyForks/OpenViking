@@ -503,6 +503,13 @@ class _GrepMixin:
             Dict with matches, count, match_count, files_scanned
         """
         path = self._uri_to_path(uri, ctx=ctx)
+        real_ctx = self._ctx_or_default(ctx)
+        # Native grep applies node_limit before VikingFS can enforce object TTL.
+        # Only accounts that have ever registered TTL objects need the wider
+        # candidate set; default-off accounts preserve the existing fast path.
+        apply_ttl_filter = await self.ttl_registry.account_may_have_records(
+            real_ctx.account_id
+        )
 
         excluded_path = None
         if exclude_uri:
@@ -517,7 +524,7 @@ class _GrepMixin:
                 recursive=True,
                 case_insensitive=case_insensitive,
                 stream=False,
-                node_limit=node_limit,
+                node_limit=None if apply_ttl_filter else node_limit,
                 exclude_path=excluded_path,
                 level_limit=level_limit,
             )
@@ -529,7 +536,6 @@ class _GrepMixin:
         matches = result.get("matches", [])
         results = []
         files_scanned_set = set()
-        real_ctx = self._ctx_or_default(ctx)
 
         # Resolve every matched file to a Viking URI first, then run one
         # ACL-aware batch authorization. ``_is_accessible`` is ACL-blind for
@@ -545,6 +551,13 @@ class _GrepMixin:
             match_uris.append(self._path_to_uri(agfs_file_path, ctx=ctx))
 
         access = await self._can_access_many(match_uris, real_ctx)
+        ttl_visible: Dict[str, bool] = {}
+        if apply_ttl_filter:
+            unique_uris = list(dict.fromkeys(match_uris))
+            visible = await asyncio.gather(
+                *(self._ttl_uri_visible(match_uri, real_ctx) for match_uri in unique_uris)
+            )
+            ttl_visible = dict(zip(unique_uris, visible, strict=True))
 
         for match in matches:
             match_file = match.get("file", "")
@@ -554,7 +567,7 @@ class _GrepMixin:
             agfs_file_path = self._resolve_grep_match_agfs_path(path, match_file)
 
             file_uri = self._path_to_uri(agfs_file_path, ctx=ctx)
-            if not access.get(file_uri, False):
+            if not access.get(file_uri, False) or not ttl_visible.get(file_uri, True):
                 continue
 
             files_scanned_set.add(file_uri)

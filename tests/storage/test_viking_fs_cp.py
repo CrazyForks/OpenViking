@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ import pytest
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import parse_abstract_overview
 from openviking.storage.acl import AclAction
+from openviking.storage.ttl_registry import TTLRecord
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import (
     InvalidArgumentError,
@@ -228,6 +230,139 @@ def _viking_fs(monkeypatch, agfs: _CopyAGFS) -> VikingFS:
         lambda path, **_kwargs: f"viking://{path.removeprefix('/local/acct/')}",
     )
     return fs
+
+
+class _TTLTransferAGFS(_CopyAGFS):
+    def __init__(self, content: bytes):
+        super().__init__()
+        self.content = content
+        self.paths = {"/local/acct/user/alice/memories/events/source.md"}
+
+    async def stat(self, path, fs_ctx=None):
+        self.events.append(("stat", path, fs_ctx))
+        if path in self.paths:
+            return {"isDir": False}
+        if path == "/local/acct/user/alice/memories/events":
+            return {"isDir": True}
+        raise FileNotFoundError(path)
+
+    async def read(self, path, fs_ctx=None):
+        self.events.append(("read", path, fs_ctx))
+        assert path in self.paths
+        return self.content
+
+    async def cp(self, source, target, recursive=False, fs_ctx=None):
+        self.events.append(("cp", source, target, recursive, fs_ctx))
+        assert source in self.paths
+        self.paths.add(target)
+
+    async def rm(self, path, recursive=False, fs_ctx=None):
+        self.events.append(("rm", path, recursive, fs_ctx))
+        self.paths.discard(path)
+
+
+class _TTLTransferRegistry:
+    def __init__(self, events):
+        self.events = events
+        self.records = {}
+
+    async def get(self, account_id, uri):
+        return self.records.get((account_id, uri))
+
+    async def upsert(self, record):
+        self.events.append(("ttl-upsert", record.object_uri, record.generation))
+        self.records[(record.account_id, record.object_uri)] = record
+
+    async def remove_if_generation(self, account_id, uri, generation):
+        self.events.append(("ttl-remove", uri, generation))
+        current = self.records.get((account_id, uri))
+        if current is None or current.generation != generation:
+            return False
+        del self.records[(account_id, uri)]
+        return True
+
+
+def _ttl_transfer_fs(monkeypatch):
+    fields = {
+        "ttl_days": 30,
+        "received_at": "2026-01-01T00:00:00.000Z",
+        "expires_at": "2026-01-31T00:00:00.000Z",
+        "ttl_generation": "generation-1",
+    }
+    content = f"event\n\n<!-- MEMORY_FIELDS\n{json.dumps(fields)}\n-->".encode()
+    agfs = _TTLTransferAGFS(content)
+    fs = _viking_fs(monkeypatch, agfs)
+    fs.ttl_registry = _TTLTransferRegistry(agfs.events)
+    monkeypatch.setattr(fs, "_copy_vector_store_uris", AsyncMock(return_value=None))
+    monkeypatch.setattr(fs, "_update_vector_store_uris", AsyncMock(return_value=None))
+    return fs, agfs
+
+
+@pytest.mark.asyncio
+async def test_cp_preregisters_frozen_ttl_before_publishing_target(monkeypatch):
+    fs, agfs = _ttl_transfer_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/events/target.md"
+
+    await fs.cp(source, target, ctx=_ctx())
+
+    record = fs.ttl_registry.records[("acct", target)]
+    assert record.expires_at == "2026-01-31T00:00:00.000Z"
+    assert record.generation == "generation-1"
+    assert next(i for i, event in enumerate(agfs.events) if event[0] == "ttl-upsert") < next(
+        i for i, event in enumerate(agfs.events) if event[0] == "cp"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cp_overwrite_keeps_old_generation_until_bytes_are_published(monkeypatch):
+    fs, agfs = _ttl_transfer_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/events/target.md"
+    fs.ttl_registry.records[("acct", target)] = TTLRecord(
+        object_uri=target,
+        object_type="event",
+        account_id="acct",
+        user_id="alice",
+        expires_at="2040-01-01T00:00:00.000Z",
+        generation="target-old",
+    )
+
+    await fs.cp(source, target, ctx=_ctx())
+
+    ttl_events = [event for event in agfs.events if event[0] == "ttl-upsert"]
+    assert ttl_events == [
+        ("ttl-upsert", target, "target-old"),
+        ("ttl-upsert", target, "generation-1"),
+    ]
+    assert agfs.events.index(ttl_events[0]) < next(
+        i for i, event in enumerate(agfs.events) if event[0] == "cp"
+    )
+    assert next(i for i, event in enumerate(agfs.events) if event[0] == "cp") < (
+        agfs.events.index(ttl_events[1])
+    )
+
+
+@pytest.mark.asyncio
+async def test_mv_transfers_frozen_ttl_and_removes_source_projection(monkeypatch):
+    fs, agfs = _ttl_transfer_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/events/target.md"
+    source_record = TTLRecord(
+        object_uri=source,
+        object_type="event",
+        account_id="acct",
+        user_id="alice",
+        expires_at="2026-01-31T00:00:00.000Z",
+        generation="generation-1",
+    )
+    fs.ttl_registry.records[("acct", source)] = source_record
+
+    await fs.mv(source, target, ctx=_ctx())
+
+    assert ("acct", source) not in fs.ttl_registry.records
+    assert fs.ttl_registry.records[("acct", target)].generation == "generation-1"
+    assert ("ttl-remove", source, "generation-1") in agfs.events
 
 
 @pytest.mark.parametrize(

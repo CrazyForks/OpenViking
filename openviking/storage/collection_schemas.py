@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from openviking.core.context import ContextType, ResourceContentType
 from openviking.models.embedder.base import embed_compat
+from openviking.server.error_mapping import is_not_found_error
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker_concurrency import run_to_completion
 from openviking.storage.acl import ACL_GRANT_FIELDS, ACL_MODE_FIELD, AclMode
@@ -103,6 +104,9 @@ class CollectionSchemas:
             # expires_at 字段：TTL 到期时间（对象创建时固化）。
             # 未启用 TTL 的对象该字段缺省，读取屏障将其视为"永不过期"。
             {"FieldName": "expires_at", "FieldType": "date_time"},
+            # Incarnation fence used to reject delayed writes after cleanup or
+            # delete/recreate. It is intentionally not indexed.
+            {"FieldName": "ttl_generation", "FieldType": "string"},
             {"FieldName": "active_count", "FieldType": "int64"},
         ]
         fields.extend(
@@ -809,6 +813,10 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                 # Write to vector database
                 try:
                     raw_upsert_options = inserted_data.pop("_upsert_options", {})
+                    source_sidecar_uri = str(inserted_data.pop("_source_sidecar_uri", "") or "")
+                    source_sidecar_digest = str(
+                        inserted_data.pop("_source_sidecar_digest", "") or ""
+                    )
                     upsert_options = normalize_upsert_options(
                         {**raw_upsert_options, "partial_update": True}
                     )
@@ -819,25 +827,52 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             account_id, uri, inserted_data.get("level", 2)
                         )
 
-                    if self._vikingdb.uses_content_field:
-                        inserted_data["content"] = await self._materialize_content(
-                            embedding_msg,
-                            ctx,
-                        )
-                    if inserted_data.get("context_type") == ContextType.SKILL.value:
-                        # Cancelling the waiter cannot stop a threaded DB write.
-                        # Keep this task active until that write has settled.
-                        result = await run_to_completion(
-                            lambda: self._vikingdb.upsert(
-                                inserted_data, ctx=ctx, options=upsert_options
+                    async def _write_vector() -> Any:
+                        if self._vikingdb.uses_content_field:
+                            inserted_data["content"] = await self._materialize_content(
+                                embedding_msg,
+                                ctx,
                             )
-                        )
-                    else:
-                        result = await self._vikingdb.upsert(
+                        if inserted_data.get("context_type") == ContextType.SKILL.value:
+                            # Cancelling the waiter cannot stop a threaded DB write.
+                            # Keep this task active until that write has settled.
+                            return await run_to_completion(
+                                lambda: self._vikingdb.upsert(
+                                    inserted_data, ctx=ctx, options=upsert_options
+                                )
+                            )
+                        return await self._vikingdb.upsert(
                             inserted_data,
                             ctx=ctx,
                             options=upsert_options,
                         )
+
+                    if source_sidecar_uri and source_sidecar_digest:
+                        result = await self._write_directory_vector_if_current(
+                            source_sidecar_uri,
+                            source_sidecar_digest,
+                            ctx,
+                            _write_vector,
+                            context_data=inserted_data,
+                        )
+                        if result is None:
+                            self._merge_request_stats(
+                                embedding_msg.telemetry_id, processed=1
+                            )
+                            self._record_request_success(embedding_msg)
+                            return ProcessResult.success(inserted_data)
+                    elif inserted_data.get("ttl_generation"):
+                        result = await self._write_ttl_vector_if_current(
+                            embedding_msg, ctx, _write_vector
+                        )
+                        if result is None:
+                            self._merge_request_stats(
+                                embedding_msg.telemetry_id, processed=1
+                            )
+                            self._record_request_success(embedding_msg)
+                            return ProcessResult.success(inserted_data)
+                    else:
+                        result = await _write_vector()
                     record_id = result
                     if record_id:
                         logger.debug("Successfully wrote embedding: uri=%s", uri)
@@ -907,6 +942,89 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         finally:
             if embedding_msg is not None and request_failed_message is not None:
                 self._record_request_failure(embedding_msg, request_failed_message)
+
+    async def _write_ttl_vector_if_current(
+        self,
+        embedding_msg: EmbeddingMsg,
+        ctx: RequestContext,
+        write_vector,
+    ) -> Any:
+        """Write a TTL vector only while its source incarnation is live.
+
+        The source object lock makes the final metadata check and vector upsert
+        mutually exclusive with generation-fenced cleanup. A delayed message
+        from a deleted/recreated URI therefore becomes a harmless no-op.
+        """
+        from openviking.core.ttl import OBJECT_TYPE_EVENT, hidden_by_ttl, ttl_object_for_uri
+        from openviking.session.memory.utils.messages import parse_memory_file_with_fields
+        from openviking.storage.viking_fs import get_viking_fs
+
+        data = embedding_msg.context_data
+        uri = str(data.get("uri") or "")
+        target = ttl_object_for_uri(uri)
+        if target is None or target[0] != OBJECT_TYPE_EVENT:
+            return await write_vector()
+
+        viking_fs = get_viking_fs()
+        object_uri = target[1]
+        path = viking_fs._uri_to_path(object_uri, ctx=ctx)
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path)
+        try:
+            try:
+                content = await viking_fs.read_file(
+                    object_uri, ctx=ctx, include_expired=True
+                )
+            except Exception as exc:
+                if is_not_found_error(exc):
+                    return None
+                raise
+            fields = parse_memory_file_with_fields(content)
+            if (
+                hidden_by_ttl(fields.get("expires_at"))
+                or str(fields.get("ttl_generation") or "")
+                != str(data.get("ttl_generation") or "")
+            ):
+                return None
+            return await write_vector()
+        finally:
+            await viking_fs._async_agfs.pathlock_release(lease)
+
+    async def _write_directory_vector_if_current(
+        self,
+        sidecar_uri: str,
+        expected_digest: str,
+        ctx: RequestContext,
+        write_vector,
+        *,
+        context_data: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Fence delayed directory embeddings with their source sidecar."""
+        from openviking.storage.abstract_overview import (
+            body_for_preview,
+            parse_abstract_overview,
+            semantic_body_digest,
+        )
+        from openviking.storage.viking_fs import get_viking_fs
+
+        viking_fs = get_viking_fs()
+        path = viking_fs._uri_to_path(sidecar_uri, ctx=ctx)
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path)
+        try:
+            try:
+                raw = await viking_fs.read_file(sidecar_uri, ctx=ctx)
+            except Exception as exc:
+                if is_not_found_error(exc):
+                    return None
+                raise
+            if semantic_body_digest(body_for_preview(raw)) != expected_digest:
+                return None
+            if context_data is not None:
+                expiry = parse_abstract_overview(raw).metadata.get("expires_at")
+                if expiry:
+                    context_data["expires_at"] = expiry
+            return await write_vector()
+        finally:
+            await viking_fs._async_agfs.pathlock_release(lease)
 
     async def on_cancelled(self, data: Optional[Dict[str, Any]]) -> ProcessResult:
         """Settle request-scoped waiting when a queued embedding is cancelled."""

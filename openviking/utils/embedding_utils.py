@@ -26,7 +26,11 @@ from openviking.parse.parsers.media.utils import (
 from openviking.parse.parsers.upload_utils import is_text_file
 from openviking.server.identity import RequestContext
 from openviking.service.task_work_index import TaskWorkRejected
-from openviking.storage.abstract_overview import body_for_preview, embedding_text_for_body
+from openviking.storage.abstract_overview import (
+    body_for_preview,
+    embedding_text_for_body,
+    semantic_body_digest,
+)
 from openviking.storage.acl import CreatorAclGrant
 from openviking.storage.queuefs import get_queue_manager
 from openviking.storage.queuefs.embedding_msg_converter import EmbeddingMsgConverter
@@ -71,6 +75,7 @@ _PORTABLE_SCALAR_FIELDS = frozenset(
         "tags",
         "abstract",
         "expires_at",
+        "ttl_generation",
     }
 )
 
@@ -422,6 +427,11 @@ async def vectorize_directory_meta(
                 Vectorize(text=embedding_text_for_body(ContextLevel.ABSTRACT, uri, abstract))
             )
             msg_abstract = EmbeddingMsgConverter.from_context(context_abstract, creator_acl_grant)
+            if msg_abstract is not None and context_type == "memory":
+                msg_abstract.context_data["_source_sidecar_uri"] = f"{uri}/.abstract.md"
+                msg_abstract.context_data["_source_sidecar_digest"] = semantic_body_digest(
+                    abstract
+                )
             _apply_scalar_overrides(
                 msg_abstract,
                 (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value)),
@@ -468,6 +478,11 @@ async def vectorize_directory_meta(
                 Vectorize(text=embedding_text_for_body(ContextLevel.OVERVIEW, uri, overview))
             )
             msg_overview = EmbeddingMsgConverter.from_context(context_overview, creator_acl_grant)
+            if msg_overview is not None and context_type == "memory":
+                msg_overview.context_data["_source_sidecar_uri"] = f"{uri}/.overview.md"
+                msg_overview.context_data["_source_sidecar_digest"] = semantic_body_digest(
+                    overview
+                )
             _apply_scalar_overrides(
                 msg_overview,
                 (scalar_overrides or {}).get(int(ContextLevel.OVERVIEW.value)),

@@ -82,6 +82,11 @@ from openviking.session.train import (
     get_streaming_policy_trainer,
     make_streaming_policy_trainer_key,
 )
+from openviking.session.ttl_fence import (
+    SessionGenerationFence,
+    StaleSessionGenerationError,
+    session_generation_fence,
+)
 from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking_cli.utils import get_logger
@@ -144,9 +149,7 @@ def _memory_type_by_uri(operations: ResolvedOperations) -> dict[str, str]:
     for file_content in getattr(operations, "delete_file_contents", []) or []:
         uri = str(getattr(file_content, "uri", "") or "")
         if uri:
-            types_by_uri[uri] = str(
-                getattr(file_content, "memory_type", "") or "unknown"
-            )
+            types_by_uri[uri] = str(getattr(file_content, "memory_type", "") or "unknown")
     return types_by_uri
 
 
@@ -201,6 +204,7 @@ async def _commit_experience_snapshot(
     experience_uris: list[str],
     archive_uri: str = "",
     experience_trajectory_map: Optional[dict[str, list[str]]] = None,
+    write_fence: Optional[SessionGenerationFence] = None,
 ) -> None:
     commit = getattr(viking_fs, "commit", None)
     if not callable(commit):
@@ -225,11 +229,13 @@ async def _commit_experience_snapshot(
         f"{json.dumps(trajectory_map, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
     )
     try:
-        await commit(
-            message=message,
-            paths=paths,
-            ctx=ctx,
-        )
+        if write_fence is not None:
+            async with write_fence.lock():
+                await commit(message=message, paths=paths, ctx=ctx)
+        else:
+            await commit(message=message, paths=paths, ctx=ctx)
+    except StaleSessionGenerationError:
+        raise
     except Exception as exc:
         logger.warning("Failed to commit experience snapshot for %s: %s", paths, exc, exc_info=True)
 
@@ -256,10 +262,9 @@ class SessionCompressorV3:
     ):
         self.vikingdb = vikingdb
         self.skill_processor = skill_processor
-        self.rollout_analyzer = rollout_analyzer or TrajectoryRolloutAnalyzer(
-            viking_fs=get_viking_fs(),
-            vikingdb=vikingdb,
-        )
+        # Resolve VikingFS when extraction starts. Construction is also used by
+        # CLI and unit-test paths before the process singleton is initialized.
+        self.rollout_analyzer = rollout_analyzer or TrajectoryRolloutAnalyzer(vikingdb=vikingdb)
         self.streaming_trainer_config = streaming_trainer_config or StreamingPolicyTrainerConfig()
         self.streaming_memory_updater_config = (
             streaming_memory_updater_config or StreamingMemoryUpdaterConfig()
@@ -416,6 +421,8 @@ class SessionCompressorV3:
         archive_uri: Optional[str] = None,
         allowed_memory_types: Optional[set[str]] = None,
         agent_evolution_enabled: bool = True,
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
         allow_self_memory: bool = True,
         allowed_peer_ids: Optional[set[str]] = None,
         event_search_tags: Optional[List[str]] = None,
@@ -445,6 +452,8 @@ class SessionCompressorV3:
                     strict_extract_errors=strict_extract_errors,
                     agent_evolution_enabled=agent_evolution_enabled,
                     allowed_memory_types=allowed_memory_types,
+                    source_session_uri=source_session_uri,
+                    source_ttl_generation=source_ttl_generation,
                 )
 
             result = await self._extract_user_memories(
@@ -460,6 +469,8 @@ class SessionCompressorV3:
                 peer_memory_enabled=peer_memory_enabled,
                 allowed_peer_ids=allowed_peer_ids,
                 event_search_tags=event_search_tags,
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
             )
             agent_memory_types = _allowed_agent_memory_types(allowed_memory_types)
             cases_allowed = (
@@ -481,6 +492,8 @@ class SessionCompressorV3:
                     strict_extract_errors=strict_extract_errors,
                     collect_memory_diff=True,
                     allowed_memory_types=agent_memory_types,
+                    source_session_uri=source_session_uri,
+                    source_ttl_generation=source_ttl_generation,
                 )
             elif not agent_evolution_enabled and allow_self_memory and session_skills_enabled:
                 train_result = await self.extract_session_skills(
@@ -488,6 +501,8 @@ class SessionCompressorV3:
                     ctx=ctx,
                     archive_uri=archive_uri or "",
                     strict_extract_errors=strict_extract_errors,
+                    source_session_uri=source_session_uri,
+                    source_ttl_generation=source_ttl_generation,
                 )
             else:
                 train_result = {
@@ -506,6 +521,8 @@ class SessionCompressorV3:
                     getattr(result, "memory_diff", None),
                     train_result.get("memory_diff"),
                 ],
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
             )
             return _v3_extraction_response(
                 contexts=result.contexts,
@@ -529,6 +546,8 @@ class SessionCompressorV3:
         strict_extract_errors: bool,
         agent_evolution_enabled: bool,
         allowed_memory_types: Optional[set[str]],
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> dict[str, Any]:
         if ctx is None:
             logger.warning("No RequestContext provided, skipping training case fast path")
@@ -537,6 +556,8 @@ class SessionCompressorV3:
             case=case,
             ctx=ctx,
             archive_uri=archive_uri,
+            source_session_uri=source_session_uri,
+            source_ttl_generation=source_ttl_generation,
         )
         case_result = _applied_memory_result(case_write)
         contexts = _contexts_from_update_result(case_result)
@@ -552,6 +573,8 @@ class SessionCompressorV3:
                 strict_extract_errors=strict_extract_errors,
                 collect_memory_diff=True,
                 allowed_memory_types=agent_memory_types,
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
             )
         else:
             train_result = {
@@ -566,6 +589,8 @@ class SessionCompressorV3:
                 _applied_memory_diff(case_write),
                 train_result.get("memory_diff"),
             ],
+            source_session_uri=source_session_uri,
+            source_ttl_generation=source_ttl_generation,
         )
         return _v3_extraction_response(
             contexts=contexts,
@@ -580,6 +605,8 @@ class SessionCompressorV3:
         case: Case,
         ctx: RequestContext,
         archive_uri: str,
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> Any:
         viking_fs = get_viking_fs()
         registry = get_default_registry()
@@ -621,17 +648,41 @@ class SessionCompressorV3:
             delete_file_contents=[],
             errors=[],
         )
-        updater = self._get_or_create_updater(registry, transaction_handle=None)
-        result = await updater.apply_operations(
-            operations,
-            ctx,
-            extract_context=extract_context,
-            isolation_handler=MemoryIsolationHandler(
+        if source_session_uri and source_ttl_generation:
+            updater = await get_streaming_memory_updater(
+                key=make_streaming_memory_updater_key(request_context=ctx),
+                registry=registry,
+                vikingdb=self.vikingdb,
+                config=self.streaming_memory_updater_config,
+            )
+            update_result = await updater.submit(
+                MemoryUpdateRequest(
+                    operations=operations,
+                    messages=[],
+                    ctx=ctx,
+                    strict_extract_errors=True,
+                    memory_registry=registry,
+                    isolation_options={"allowed_memory_types": {_CASES_MEMORY_TYPE}},
+                    metadata={
+                        "archive_uri": archive_uri,
+                        "source_session_uri": source_session_uri,
+                        "source_ttl_generation": source_ttl_generation,
+                    },
+                )
+            )
+            result = update_result.apply_result
+        else:
+            updater = self._get_or_create_updater(registry, transaction_handle=None)
+            result = await updater.apply_operations(
+                operations,
                 ctx,
-                extract_context,
-                allowed_memory_types={_CASES_MEMORY_TYPE},
-            ),
-        )
+                extract_context=extract_context,
+                isolation_handler=MemoryIsolationHandler(
+                    ctx,
+                    extract_context,
+                    allowed_memory_types={_CASES_MEMORY_TYPE},
+                ),
+            )
         memory_diff = None
         if archive_uri:
             memory_diff = await self._build_memory_diff(
@@ -662,6 +713,8 @@ class SessionCompressorV3:
         peer_memory_enabled: bool = True,
         allowed_peer_ids: Optional[set[str]] = None,
         event_search_tags: Optional[List[str]] = None,
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> "_V3ExtractionResult":
         del user
         if not messages:
@@ -756,6 +809,8 @@ class SessionCompressorV3:
                     "archive_uri": archive_uri,
                     "trace_id": tracer.get_trace_id(),
                     "extracted_at": extracted_at,
+                    "source_session_uri": source_session_uri,
+                    "source_ttl_generation": source_ttl_generation,
                 },
             )
         )
@@ -804,6 +859,8 @@ class SessionCompressorV3:
         ctx: Optional[RequestContext],
         archive_uri: str = "",
         strict_extract_errors: bool = False,
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> dict[str, Any]:
         """Extract reusable skills without producing Agent Evolution memories."""
         if not messages or ctx is None:
@@ -827,6 +884,8 @@ class SessionCompressorV3:
                 include_trajectories=False,
                 include_session_skills=True,
                 source_archive_uri=archive_uri,
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
             )
             skill_gradients = [
                 gradient
@@ -848,6 +907,8 @@ class SessionCompressorV3:
                 messages=messages,
                 strict_extract_errors=strict_extract_errors,
                 archive_uri=archive_uri,
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
             )
             training_result = await skill_trainer.submit_gradients(skill_gradients)
             apply_result = getattr(training_result, "apply_result", None)
@@ -874,7 +935,15 @@ class SessionCompressorV3:
         messages: list[Message],
         strict_extract_errors: bool,
         archive_uri: str,
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> Any:
+        write_fence = session_generation_fence(
+            viking_fs,
+            ctx,
+            session_uri=source_session_uri,
+            generation=source_ttl_generation,
+        )
         skill_root_uri = _skill_root_uri(ctx)
         skill_policy_set = await SkillSetLoader(viking_fs=viking_fs).load(
             skill_root_uri,
@@ -887,7 +956,11 @@ class SessionCompressorV3:
             source_archive_uri=archive_uri,
         )
         return await get_streaming_policy_trainer(
-            key=_skill_trainer_key(ctx),
+            key=_skill_trainer_key(
+                ctx,
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
+            ),
             policy_set=skill_policy_set,
             rollout_analyzer=self.rollout_analyzer,
             gradient_estimator=_NoopGradientEstimator(),
@@ -913,6 +986,7 @@ class SessionCompressorV3:
                     request_context=ctx,
                 ),
                 apply_context=ctx,
+                write_fence=write_fence if write_fence.enabled else None,
             ),
             config=self.streaming_trainer_config,
         )
@@ -930,6 +1004,8 @@ class SessionCompressorV3:
         strict_extract_errors: bool = False,
         collect_memory_diff: bool = False,
         allowed_memory_types: Optional[set[str]] = None,
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> dict[str, Any]:
         if not messages or ctx is None:
             return {"case_count": 0, "submitted": 0, "reason": "missing_messages_or_ctx"}
@@ -950,6 +1026,12 @@ class SessionCompressorV3:
 
         try:
             viking_fs = get_viking_fs()
+            write_fence = session_generation_fence(
+                viking_fs,
+                ctx,
+                session_uri=source_session_uri,
+                generation=source_ttl_generation,
+            )
 
             # --- Experience streaming trainer ---
             exp_root_uri = _experience_root_uri(ctx)
@@ -968,11 +1050,15 @@ class SessionCompressorV3:
                 strict_extract_errors=strict_extract_errors,
                 include_session_skills=skill_enabled,
                 source_archive_uri=archive_uri or "",
+                source_session_uri=source_session_uri,
+                source_ttl_generation=source_ttl_generation,
             )
             exp_trainer = await get_streaming_policy_trainer(
                 key=make_streaming_policy_trainer_key(
                     policy_root_uri=exp_root_uri,
                     request_context=ctx,
+                    source_session_uri=source_session_uri,
+                    source_ttl_generation=source_ttl_generation,
                 ),
                 policy_set=exp_policy_set,
                 rollout_analyzer=self.rollout_analyzer,
@@ -989,6 +1075,7 @@ class SessionCompressorV3:
                     gradient_context=gradient_context,
                     optimization_context=optimizer_context,
                     apply_context=ctx,
+                    write_fence=write_fence if write_fence.enabled else None,
                 ),
                 config=self.streaming_trainer_config,
             )
@@ -1002,6 +1089,8 @@ class SessionCompressorV3:
                     messages=messages,
                     strict_extract_errors=strict_extract_errors,
                     archive_uri=archive_uri,
+                    source_session_uri=source_session_uri,
+                    source_ttl_generation=source_ttl_generation,
                 )
 
             submitted = 0
@@ -1044,36 +1133,46 @@ class SessionCompressorV3:
                         if (uri := str(getattr(trajectory, "uri", "") or ""))
                     }
 
-                    async def commit_experience_batch(
-                        batch_result: RolloutTrainingResult,
-                        *,
-                        _fallback_trajectory_uris: set[str] = fallback_trajectory_uris,
-                    ) -> None:
-                        persisted_result = (
-                            getattr(batch_result, "batch_result", None) or batch_result
-                        )
-                        snapshot_apply_result, experience_trajectory_map = (
-                            _experience_snapshot_provenance(
-                                batch_result,
-                                fallback_trajectory_uris=_fallback_trajectory_uris,
+                    batch_finalizer = None
+                    if callable(getattr(viking_fs, "commit", None)):
+
+                        async def commit_experience_batch(
+                            batch_result: RolloutTrainingResult,
+                            *,
+                            _fallback_trajectory_uris: set[str] = fallback_trajectory_uris,
+                        ) -> None:
+                            persisted_result = (
+                                getattr(batch_result, "batch_result", None) or batch_result
                             )
-                        )
-                        await _commit_experience_snapshot(
-                            viking_fs,
-                            ctx=ctx,
-                            experience_uris=_visible_experience_snapshot_uris(
-                                plan=persisted_result.plan,
-                                apply_result=snapshot_apply_result,
-                            ),
-                            archive_uri=archive_uri,
-                            experience_trajectory_map=experience_trajectory_map,
-                        )
+                            snapshot_apply_result, experience_trajectory_map = (
+                                _experience_snapshot_provenance(
+                                    batch_result,
+                                    fallback_trajectory_uris=_fallback_trajectory_uris,
+                                )
+                            )
+                            await _commit_experience_snapshot(
+                                viking_fs,
+                                ctx=ctx,
+                                experience_uris=_visible_experience_snapshot_uris(
+                                    plan=persisted_result.plan,
+                                    apply_result=snapshot_apply_result,
+                                ),
+                                archive_uri=archive_uri,
+                                experience_trajectory_map=experience_trajectory_map,
+                                write_fence=(write_fence if write_fence.enabled else None),
+                            )
+
+                        batch_finalizer = commit_experience_batch
 
                     exp_training_result = await exp_trainer.submit_gradients(
                         exp_gradients,
                         analysis=analysis,
                         rollout=rollout,
-                        batch_finalizer=commit_experience_batch,
+                        **(
+                            {"batch_finalizer": batch_finalizer}
+                            if batch_finalizer is not None
+                            else {}
+                        ),
                     )
                 if case_uri:
                     await self._link_case_to_training_outputs(
@@ -1083,6 +1182,7 @@ class SessionCompressorV3:
                         apply_result=exp_training_result.apply_result,
                         ctx=ctx,
                         viking_fs=viking_fs,
+                        write_fence=write_fence if write_fence.enabled else None,
                     )
                 # Skill path: co-extracted skill gradients go directly to skill trainer
                 if skill_trainer is not None and analysis.gradients:
@@ -1248,6 +1348,7 @@ class SessionCompressorV3:
         apply_result: PolicyApplyResult,
         ctx: RequestContext,
         viking_fs: Any,
+        write_fence: Optional[SessionGenerationFence] = None,
     ) -> None:
         links = _case_training_links(
             analysis=analysis,
@@ -1257,11 +1358,21 @@ class SessionCompressorV3:
         )
         if not links:
             return
+        if write_fence is not None:
+            async with write_fence.lock() as lease:
+                await _render_case_links_from_template(
+                    case_uri=case_uri,
+                    links=links,
+                    ctx=ctx,
+                    viking_fs=viking_fs,
+                    lease_ref=lease,
+                )
+                await write_stored_links(
+                    links, ctx, viking_fs, skip_uris={case_uri}, lease_ref=lease
+                )
+            return
         await _render_case_links_from_template(
-            case_uri=case_uri,
-            links=links,
-            ctx=ctx,
-            viking_fs=viking_fs,
+            case_uri=case_uri, links=links, ctx=ctx, viking_fs=viking_fs
         )
         await write_stored_links(links, ctx, viking_fs, skip_uris={case_uri})
 
@@ -1271,6 +1382,8 @@ class SessionCompressorV3:
         archive_uri: str,
         ctx: Optional[RequestContext],
         memory_diffs: list[Any],
+        source_session_uri: str = "",
+        source_ttl_generation: str = "",
     ) -> None:
         if not archive_uri or ctx is None:
             return
@@ -1281,11 +1394,26 @@ class SessionCompressorV3:
         viking_fs = get_viking_fs()
         if viking_fs is None:
             return
-        await viking_fs.write_file(
-            uri=f"{archive_uri.rstrip('/')}/memory_diff.json",
-            content=json.dumps(merged, ensure_ascii=False, indent=4),
-            ctx=ctx,
+        fence = session_generation_fence(
+            viking_fs,
+            ctx,
+            session_uri=source_session_uri,
+            generation=source_ttl_generation,
         )
+        if not fence.enabled:
+            await viking_fs.write_file(
+                uri=f"{archive_uri.rstrip('/')}/memory_diff.json",
+                content=json.dumps(merged, ensure_ascii=False, indent=4),
+                ctx=ctx,
+            )
+            return
+        async with fence.lock() as lease:
+            await viking_fs.write_file(
+                uri=f"{archive_uri.rstrip('/')}/memory_diff.json",
+                content=json.dumps(merged, ensure_ascii=False, indent=4),
+                ctx=ctx,
+                lease_ref=lease,
+            )
 
 
 @dataclass(slots=True)
@@ -1710,7 +1838,12 @@ def _skill_root_uri(ctx: RequestContext) -> str:
     return f"viking://user/{user_space}/skills"
 
 
-def _skill_trainer_key(ctx: RequestContext) -> tuple[str, str, str]:
+def _skill_trainer_key(
+    ctx: RequestContext,
+    *,
+    source_session_uri: str = "",
+    source_ttl_generation: str = "",
+) -> tuple[str, str, str]:
     """Registry key for the skill streaming trainer (separate from exp trainer)."""
     from openviking.session.train.components.policy_trainer import (
         make_streaming_policy_trainer_key,
@@ -1719,6 +1852,8 @@ def _skill_trainer_key(ctx: RequestContext) -> tuple[str, str, str]:
     return make_streaming_policy_trainer_key(
         policy_root_uri=_skill_root_uri(ctx),
         request_context=ctx,
+        source_session_uri=source_session_uri,
+        source_ttl_generation=source_ttl_generation,
     )
 
 
@@ -2012,6 +2147,7 @@ async def _render_case_links_from_template(
     links: list[StoredLink],
     ctx: RequestContext,
     viking_fs: Any,
+    lease_ref: Any = None,
 ) -> None:
     if not links:
         return
@@ -2034,6 +2170,7 @@ async def _render_case_links_from_template(
         case_uri,
         MemoryFileUtils.write(mf, content_template=content_template),
         ctx=ctx,
+        lease_ref=lease_ref,
     )
 
 

@@ -1,9 +1,17 @@
 # tests/storage/test_viking_fs_git.py
+import json
+from unittest.mock import AsyncMock
+
 import pytest
 
-from openviking.pyagfs.exceptions import AGFSNotFoundError, AGFSPathNotFoundError
+from openviking.pyagfs.exceptions import (
+    AGFSNotFoundError,
+    AGFSPathNotFoundError,
+    GitRestoreWritebackPartialError,
+)
 from openviking.server.identity import RequestContext, Role
 from openviking.storage import viking_fs as viking_fs_module
+from openviking.storage.ttl_registry import TTLRecord
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import PermissionDeniedError, ResourceExhaustedError
 from openviking_cli.session.user_id import UserIdentifier
@@ -348,3 +356,275 @@ async def test_diff_does_not_treat_missing_storage_object_as_absent():
             to_ref="to",
             ctx=_request_context(),
         )
+
+
+def _ttl_event(generation: str, expires_at: str = "2030-01-02T00:00:00.000Z") -> bytes:
+    fields = {
+        "ttl_days": 1,
+        "received_at": "2030-01-01T00:00:00.000Z",
+        "expires_at": expires_at,
+        "ttl_generation": generation,
+    }
+    return f"event\n\n<!-- MEMORY_FIELDS\n{json.dumps(fields)}\n-->".encode()
+
+
+def _ttl_session(generation: str) -> bytes:
+    return json.dumps(
+        {
+            "ttl_days": 1,
+            "received_at": "2030-01-01T00:00:00.000Z",
+            "expires_at": "2030-01-02T00:00:00.000Z",
+            "ttl_generation": generation,
+        }
+    ).encode()
+
+
+class _MemoryTTLRegistry:
+    def __init__(self, records=()):
+        self.records = {(item.account_id, item.object_uri): item for item in records}
+        self.mutations = []
+
+    async def get(self, account_id, uri):
+        return self.records.get((account_id, uri))
+
+    async def upsert(self, record):
+        self.mutations.append(("upsert", record.object_uri, record.generation))
+        self.records[(record.account_id, record.object_uri)] = record
+
+    async def remove_if_generation(self, account_id, uri, generation):
+        current = self.records.get((account_id, uri))
+        self.mutations.append(("remove", uri, generation))
+        if current is None or current.generation != generation:
+            return False
+        del self.records[(account_id, uri)]
+        return True
+
+
+class _RestoreAGFS:
+    def __init__(self, *, plan, blobs, result=None, error=None):
+        self.plan = plan
+        self.blobs = blobs
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    async def pathlock_acquire_tree(self, path):
+        self.calls.append(("lock", path))
+        return {"lease_ref": "restore"}
+
+    async def pathlock_release(self, lease):
+        self.calls.append(("unlock", lease))
+
+    async def run(self, operation, **kwargs):
+        self.calls.append((operation, kwargs))
+        if operation == "git_show":
+            data = self.blobs[kwargs["path"]]
+            return {"oid": "b" * 40, "size": len(data), "bytes": data}
+        assert operation == "git_restore"
+        if kwargs.get("dry_run"):
+            return self.plan
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def _restore_vfs(agfs, registry):
+    vfs = object.__new__(VikingFS)
+    vfs._async_agfs = agfs
+    vfs.ttl_registry = registry
+    vfs.acl_manager = None
+    vfs.vector_store = None
+    vfs._background_tasks = set()
+    vfs._schedule_restore_reindex_for_paths = AsyncMock(return_value=None)
+    return vfs
+
+
+def _restore_plan(*, to_write=(), to_delete=()):
+    return {
+        "result": "dry_run",
+        "source": "a" * 40,
+        "head": "c" * 40,
+        "diff": {
+            "to_write": [
+                {"path": path, "oid": str(index) * 40}
+                for index, path in enumerate(to_write, start=1)
+            ],
+            "to_delete": list(to_delete),
+            "unchanged": [],
+        },
+    }
+
+
+def _record(uri: str, generation: str) -> TTLRecord:
+    return TTLRecord(
+        object_uri=uri,
+        object_type="session" if "/sessions/" in uri else "event",
+        account_id="account",
+        user_id="user",
+        expires_at="2029-01-01T00:00:00.000Z",
+        generation=generation,
+    )
+
+
+async def test_restore_registers_ttl_event_and_session_before_writeback():
+    event_path = "user/user/memories/events/e.md"
+    session_meta = "user/user/sessions/s1/.meta.json"
+    plan = _restore_plan(to_write=(event_path, session_meta))
+    agfs = _RestoreAGFS(
+        plan=plan,
+        blobs={event_path: _ttl_event("event-new"), session_meta: _ttl_session("session-new")},
+        result={
+            "result": "applied",
+            "written_paths": [event_path, session_meta],
+            "deleted_paths": [],
+        },
+    )
+    registry = _MemoryTTLRegistry()
+    vfs = _restore_vfs(agfs, registry)
+
+    await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+
+    event_uri = "viking://user/user/memories/events/e.md"
+    session_uri = "viking://user/user/sessions/s1"
+    assert registry.records[("account", event_uri)].generation == "event-new"
+    assert registry.records[("account", session_uri)].generation == "session-new"
+    apply_index = next(
+        index
+        for index, call in enumerate(agfs.calls)
+        if call[0] == "git_restore" and not call[1].get("dry_run")
+    )
+    assert registry.mutations == [
+        ("upsert", event_uri, "event-new"),
+        ("upsert", session_uri, "session-new"),
+    ]
+    assert all(call[0] == "git_show" for call in agfs.calls[2:apply_index])
+    assert agfs.calls[apply_index][1]["source_commit"] == "a" * 40
+
+
+async def test_restore_removes_registry_only_after_successful_nonttl_write_or_delete():
+    overwritten_path = "user/user/memories/events/old.md"
+    deleted_meta = "user/user/sessions/deleted/.meta.json"
+    overwritten_uri = "viking://user/user/memories/events/old.md"
+    deleted_uri = "viking://user/user/sessions/deleted"
+    registry = _MemoryTTLRegistry(
+        [_record(overwritten_uri, "old-event"), _record(deleted_uri, "old-session")]
+    )
+    plan = _restore_plan(to_write=(overwritten_path,), to_delete=(deleted_meta,))
+    agfs = _RestoreAGFS(
+        plan=plan,
+        blobs={overwritten_path: b"event without ttl"},
+        result={
+            "result": "applied",
+            "written_paths": [overwritten_path],
+            "deleted_paths": [deleted_meta],
+        },
+    )
+    vfs = _restore_vfs(agfs, registry)
+
+    await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+
+    assert registry.records == {}
+    assert registry.mutations == [
+        ("remove", overwritten_uri, "old-event"),
+        ("remove", deleted_uri, "old-session"),
+    ]
+
+
+async def test_partial_restore_rolls_back_preregistration_for_failed_write():
+    success_path = "user/user/memories/events/success.md"
+    failed_path = "user/user/memories/events/failed.md"
+    success_uri = f"viking://{success_path}"
+    failed_uri = f"viking://{failed_path}"
+    old_success = _record(success_uri, "success-old")
+    old_failed = _record(failed_uri, "failed-old")
+    registry = _MemoryTTLRegistry([old_success, old_failed])
+    plan = _restore_plan(to_write=(success_path, failed_path))
+    partial = GitRestoreWritebackPartialError(
+        "partial",
+        {
+            "written_paths": [success_path],
+            "deleted_paths": [],
+            "failed_writes": [(failed_path, "injected")],
+        },
+    )
+    agfs = _RestoreAGFS(
+        plan=plan,
+        blobs={success_path: _ttl_event("success-new"), failed_path: _ttl_event("failed-new")},
+        error=partial,
+    )
+    vfs = _restore_vfs(agfs, registry)
+
+    with pytest.raises(GitRestoreWritebackPartialError):
+        await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+
+    assert registry.records[("account", success_uri)].generation == "success-new"
+    assert registry.records[("account", failed_uri)].generation == "failed-old"
+
+
+async def test_restore_overwrite_keeps_old_generation_until_writeback_succeeds():
+    path = "user/user/memories/events/e.md"
+    uri = f"viking://{path}"
+    old = _record(uri, "old")
+    old = TTLRecord(
+        **{**old.__dict__, "expires_at": "2040-01-01T00:00:00.000Z"}
+    )
+    registry = _MemoryTTLRegistry([old])
+    plan = _restore_plan(to_write=(path,))
+    agfs = _RestoreAGFS(
+        plan=plan,
+        blobs={path: _ttl_event("new", "2030-01-02T00:00:00.000Z")},
+        result={"result": "applied", "written_paths": [path], "deleted_paths": []},
+    )
+    vfs = _restore_vfs(agfs, registry)
+
+    await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+
+    assert registry.mutations == [
+        ("upsert", uri, "old"),
+        ("upsert", uri, "new"),
+    ]
+    assert registry.records[("account", uri)].generation == "new"
+
+
+async def test_partial_restore_keeps_session_registry_when_child_delete_fails():
+    session_uri = "viking://user/user/sessions/s1"
+    session_meta = "user/user/sessions/s1/.meta.json"
+    session_child = "user/user/sessions/s1/messages.jsonl"
+    old = _record(session_uri, "session-old")
+    registry = _MemoryTTLRegistry([old])
+    plan = _restore_plan(to_delete=(session_meta, session_child))
+    partial = GitRestoreWritebackPartialError(
+        "partial",
+        {
+            "written_paths": [],
+            "deleted_paths": [session_meta],
+            "failed_deletes": [(session_child, "injected")],
+        },
+    )
+    agfs = _RestoreAGFS(plan=plan, blobs={}, error=partial)
+    vfs = _restore_vfs(agfs, registry)
+
+    with pytest.raises(GitRestoreWritebackPartialError):
+        await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+
+    assert registry.records[("account", session_uri)] == old
+    assert registry.mutations == []
+
+
+async def test_restore_dry_run_does_not_touch_ttl_registry():
+    path = "user/user/memories/events/e.md"
+    registry = _MemoryTTLRegistry()
+    agfs = _RestoreAGFS(
+        plan=_restore_plan(to_write=(path,)),
+        blobs={path: _ttl_event("new")},
+    )
+    vfs = _restore_vfs(agfs, registry)
+
+    result = await VikingFS.restore(
+        vfs, source_commit="source", dry_run=True, ctx=_request_context()
+    )
+
+    assert result["result"] == "dry_run"
+    assert registry.records == {}
+    assert registry.mutations == []
+    assert [call[0] for call in agfs.calls] == ["git_restore"]

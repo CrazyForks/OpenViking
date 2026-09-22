@@ -4,9 +4,10 @@
 
 import asyncio
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Union
 
+from openviking.core.ttl import OBJECT_TYPE_EVENT, OBJECT_TYPE_SESSION, ttl_object_for_uri
 from openviking.pyagfs.exceptions import (
     AGFSInvalidOperationError,
     AGFSNotFoundError,
@@ -16,10 +17,12 @@ from openviking.pyagfs.exceptions import (
 from openviking.server.error_mapping import is_not_found_error, map_exception
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import AclAction
+from openviking.storage.ttl_registry import TTLRecord
 from openviking.storage.viking_fs._base import (
     _prepare_snapshot_diff,
     logger,
 )
+from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.exceptions import (
     InvalidArgumentError,
     NotFoundError,
@@ -30,6 +33,15 @@ from openviking_cli.exceptions import (
 
 def _pkg():
     return sys.modules[__package__]
+
+
+@dataclass(frozen=True)
+class _RestoreTTLMutation:
+    """Registry state around one restore write/delete."""
+
+    object_uri: str
+    previous: Any
+    preregistered: Any = None
 
 
 class _SnapshotMixin:
@@ -120,6 +132,191 @@ class _SnapshotMixin:
     @staticmethod
     def _restore_reindex_context(ctx: RequestContext) -> RequestContext:
         return replace(ctx, bypass_acl=True)
+
+    def _restore_ttl_target(self, tree_path: str) -> Optional[tuple[str, str]]:
+        """Return the TTL object controlled by one account-relative path."""
+        uri = self._tree_path_to_uri(tree_path)
+        target = ttl_object_for_uri(uri)
+        if target is None:
+            return None
+        object_type, object_uri = target
+        if object_type == OBJECT_TYPE_EVENT and uri.rstrip("/") == object_uri:
+            return uri, object_uri
+        if object_type == OBJECT_TYPE_SESSION and uri.rstrip("/") == (
+            f"{object_uri}/.meta.json"
+        ):
+            return uri, object_uri
+        return None
+
+    @staticmethod
+    def _restore_tree_path(tree_dir: Optional[str], relative_path: str) -> str:
+        return f"{tree_dir or ''}/{relative_path}".strip("/")
+
+    async def _rollback_restore_ttl_preregistration(
+        self,
+        writes: Dict[str, _RestoreTTLMutation],
+        *,
+        real_ctx: RequestContext,
+        keep_paths: Optional[set[str]] = None,
+    ) -> None:
+        """Restore the prior projection for writes that did not reach VFS."""
+        keep = keep_paths or set()
+        for path, mutation in writes.items():
+            preregistered = mutation.preregistered
+            if path in keep or preregistered is None:
+                continue
+            current = await self.ttl_registry.get(
+                real_ctx.account_id, mutation.object_uri
+            )
+            expected_generations = {preregistered.generation}
+            if mutation.previous is not None:
+                expected_generations.add(mutation.previous.generation)
+            if current is None or current.generation not in expected_generations:
+                continue
+            if mutation.previous is not None:
+                await self.ttl_registry.upsert(mutation.previous)
+            else:
+                await self.ttl_registry.remove_if_generation(
+                    real_ctx.account_id,
+                    mutation.object_uri,
+                    preregistered.generation,
+                )
+
+    async def _prepare_restore_ttl_registry(
+        self,
+        plan: Dict[str, Any],
+        *,
+        tree_dir: Optional[str],
+        real_ctx: RequestContext,
+    ) -> tuple[Dict[str, _RestoreTTLMutation], Dict[str, _RestoreTTLMutation]]:
+        """Pre-register frozen snapshots before native restore publishes them.
+
+        The dry-run resolves ``source`` to an immutable commit OID. Only event
+        files and session ``.meta.json`` blobs are read; other restore paths do
+        not add work.
+        """
+        writes: Dict[str, _RestoreTTLMutation] = {}
+        deletes: Dict[str, _RestoreTTLMutation] = {}
+        source_oid = str(plan.get("source") or "")
+        if not source_oid:
+            raise ValueError("git restore dry-run did not return a source commit")
+        try:
+            for item in plan["diff"]["to_write"]:
+                tree_path = self._restore_tree_path(tree_dir, str(item["path"]))
+                target = self._restore_ttl_target(tree_path)
+                if target is None:
+                    continue
+                registration_uri, object_uri = target
+                previous = await self.ttl_registry.get(real_ctx.account_id, object_uri)
+                blob = await self._async_agfs.run(
+                    "git_show",
+                    account=real_ctx.account_id,
+                    target_ref=source_oid,
+                    path=tree_path,
+                )
+                if not isinstance(blob, dict) or "bytes" not in blob:
+                    raise TypeError(
+                        "git_show returned unexpected blob response during restore"
+                    )
+                preregistered = self._ttl_record_for_write(
+                    registration_uri, blob["bytes"], ctx=real_ctx
+                )
+                if preregistered is not None:
+                    if previous is None:
+                        await self.ttl_registry.upsert(preregistered)
+                    else:
+                        # Keep the live generation until native writeback. A
+                        # process crash must not lose the old object's cleanup
+                        # schedule. Wake at the earlier deadline; cleanup will
+                        # inspect authoritative metadata and either delete the
+                        # old object or repair the restored projection.
+                        earlier_expiry = min(
+                            (previous.expires_at, preregistered.expires_at),
+                            key=parse_iso_datetime,
+                        )
+                        await self.ttl_registry.upsert(
+                            TTLRecord(
+                                object_uri=previous.object_uri,
+                                object_type=previous.object_type,
+                                account_id=previous.account_id,
+                                user_id=previous.user_id,
+                                expires_at=earlier_expiry,
+                                generation=previous.generation,
+                            )
+                        )
+                writes[tree_path] = _RestoreTTLMutation(
+                    object_uri=object_uri,
+                    previous=previous,
+                    preregistered=preregistered,
+                )
+
+            for relative_path in plan["diff"]["to_delete"]:
+                tree_path = self._restore_tree_path(tree_dir, str(relative_path))
+                target = self._restore_ttl_target(tree_path)
+                if target is None:
+                    continue
+                _registration_uri, object_uri = target
+                deletes[tree_path] = _RestoreTTLMutation(
+                    object_uri=object_uri,
+                    previous=await self.ttl_registry.get(
+                        real_ctx.account_id, object_uri
+                    ),
+                )
+        except Exception:
+            await self._rollback_restore_ttl_preregistration(
+                writes, real_ctx=real_ctx
+            )
+            raise
+        return writes, deletes
+
+    async def _reconcile_restore_ttl_registry(
+        self,
+        *,
+        writes: Dict[str, _RestoreTTLMutation],
+        deletes: Dict[str, _RestoreTTLMutation],
+        written_paths: List[str],
+        deleted_paths: List[str],
+        real_ctx: RequestContext,
+        failed_paths: Optional[List[str]] = None,
+    ) -> None:
+        """Keep projections only for paths confirmed by native writeback."""
+        written = {str(path).strip("/") for path in written_paths}
+        deleted = {str(path).strip("/") for path in deleted_paths}
+        failed = {str(path).strip("/") for path in (failed_paths or [])}
+        await self._rollback_restore_ttl_preregistration(
+            writes, real_ctx=real_ctx, keep_paths=written
+        )
+        for path, mutation in writes.items():
+            if path not in written:
+                continue
+            if mutation.preregistered is not None and mutation.previous is not None:
+                await self.ttl_registry.upsert(mutation.preregistered)
+            elif mutation.previous is not None:
+                await self.ttl_registry.remove_if_generation(
+                    real_ctx.account_id,
+                    mutation.object_uri,
+                    mutation.previous.generation,
+                )
+        for path, mutation in deletes.items():
+            if path not in deleted or mutation.previous is None:
+                continue
+            object_tree_path = self._uri_to_tree_path(
+                mutation.object_uri, ctx=real_ctx
+            ).rstrip("/")
+            if mutation.previous.object_type == OBJECT_TYPE_SESSION and any(
+                item == object_tree_path or item.startswith(f"{object_tree_path}/")
+                for item in failed
+            ):
+                # If a partial native restore deleted the session metadata but
+                # left any child behind, retain the record. The normal TTL
+                # cleaner will observe the missing metadata and strictly clear
+                # the complete session scope, including orphan vectors.
+                continue
+            await self.ttl_registry.remove_if_generation(
+                real_ctx.account_id,
+                mutation.object_uri,
+                mutation.previous.generation,
+            )
 
     async def system_sync_status(
         self, uri: str, ctx: Optional[RequestContext] = None
@@ -439,6 +636,8 @@ class _SnapshotMixin:
             else f"/local/{account}"
         )
         partial_exc: Optional[GitRestoreWritebackPartialError] = None
+        ttl_writes: Dict[str, _RestoreTTLMutation] = {}
+        ttl_deletes: Dict[str, _RestoreTTLMutation] = {}
         try:
             lease = await self._async_agfs.pathlock_acquire_tree(lock_path)
         except LockAcquisitionError:
@@ -448,25 +647,65 @@ class _SnapshotMixin:
             )
 
         try:
+            # Native restore writes directly through the Rust VFS and cannot
+            # call the ordinary registry-first Python writer. Resolve the
+            # source ref once, pre-register only TTL-bearing blobs, then use
+            # that immutable OID for the real writeback.
+            plan = await self._async_agfs.run(
+                "git_restore",
+                **{**kwargs, "dry_run": True},
+            )
             if acl_project_dir is not None:
                 await self._ensure_access(acl_project_dir, real_ctx)
-                plan = await self._async_agfs.run(
-                    "git_restore",
-                    **{**kwargs, "dry_run": True},
-                )
                 await self._ensure_restore_plan_access(
                     plan,
                     tree_dir=tree_dir or "",
                     ctx=real_ctx,
                 )
+            ttl_writes, ttl_deletes = await self._prepare_restore_ttl_registry(
+                plan, tree_dir=tree_dir, real_ctx=real_ctx
+            )
+            apply_kwargs = {
+                **kwargs,
+                "source_commit": str(plan["source"]),
+            }
             try:
-                result = await self._async_agfs.run("git_restore", **kwargs)
+                result = await self._async_agfs.run("git_restore", **apply_kwargs)
             except GitRestoreWritebackPartialError as exc:
                 # The ref already advanced — capture the exception and
                 # finish the lock scope cleanly. Reindex scheduling and
                 # re-raise happen below, outside the tree lock.
                 partial_exc = exc
                 result = None
+                await self._reconcile_restore_ttl_registry(
+                    writes=ttl_writes,
+                    deletes=ttl_deletes,
+                    written_paths=exc.written_paths,
+                    deleted_paths=exc.deleted_paths,
+                    real_ctx=real_ctx,
+                    failed_paths=[
+                        str(path)
+                        for path, _error in (*exc.failed_writes, *exc.failed_deletes)
+                    ],
+                )
+            except Exception:
+                await self._rollback_restore_ttl_preregistration(
+                    ttl_writes, real_ctx=real_ctx
+                )
+                raise
+            else:
+                if result.get("result") == "applied":
+                    await self._reconcile_restore_ttl_registry(
+                        writes=ttl_writes,
+                        deletes=ttl_deletes,
+                        written_paths=list(result.get("written_paths") or []),
+                        deleted_paths=list(result.get("deleted_paths") or []),
+                        real_ctx=real_ctx,
+                    )
+                else:
+                    await self._rollback_restore_ttl_preregistration(
+                        ttl_writes, real_ctx=real_ctx
+                    )
         finally:
             await self._async_agfs.pathlock_release(lease)
 

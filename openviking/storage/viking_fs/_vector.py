@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 from openviking.core.ttl import expiry_filter_now
 from openviking.server.identity import RequestContext
-from openviking.storage.expr import And, FilterExpr, PathScope
+from openviking.storage.expr import And, Eq, FilterExpr, In, Or, PathScope
 from openviking.storage.viking_fs._base import logger
 
 if TYPE_CHECKING:
@@ -23,9 +23,9 @@ class _VectorMixin:
     ) -> Optional[FilterExpr]:
         """AND the TTL read barrier onto a filesystem read filter.
 
-        The barrier hides objects whose frozen ``expires_at`` is at/past now and
-        is a no-op (``None``) when TTL is disabled, so default behaviour and
-        non-TTL data are untouched. Used by the FS read paths (grep/glob/stat)
+        The barrier hides objects whose frozen ``expires_at`` is at/past now;
+        rows without a snapshot are preserved, so legacy and non-TTL data keep
+        their existing behavior. Used by the FS read paths (grep/glob/stat)
         that build their own filters instead of going through the backend's
         ``_build_scope_filter`` retrieval seam. Cleanup and maintenance paths
         deliberately do not call this — they must still see expired records.
@@ -38,7 +38,11 @@ class _VectorMixin:
         return And([filter_expr, barrier])
 
     async def _delete_from_vector_store(
-        self, uris: List[str], ctx: Optional[RequestContext] = None
+        self,
+        uris: List[str],
+        ctx: Optional[RequestContext] = None,
+        *,
+        recursive_uri: Optional[str] = None,
     ) -> None:
         """Delete records with specified URIs from vector store.
 
@@ -51,6 +55,8 @@ class _VectorMixin:
 
         try:
             await vector_store.delete_uris(real_ctx, uris)
+            if recursive_uri is not None:
+                await vector_store.delete_uri_scope(real_ctx, recursive_uri)
             for uri in uris:
                 logger.debug(f"[VikingFS] Deleted from vector store: {uri}")
         except Exception as e:
@@ -73,13 +79,35 @@ class _VectorMixin:
         if not vector_store:
             return
         residue = await vector_store.count(
-            filter=PathScope("uri", target_uri, depth=-1),
+            filter=Or(
+                [
+                    Eq("uri", target_uri),
+                    PathScope("uri", target_uri, depth=-1),
+                ]
+            ),
             ctx=self._ctx_or_default(ctx),
         )
         if residue:
             raise RuntimeError(
-                f"Vector records still present after delete: {target_uri} "
-                f"(residue={residue})"
+                f"Vector records still present after delete: {target_uri} (residue={residue})"
+            )
+
+    async def _confirm_vector_uris_cleared(
+        self, uris: List[str], ctx: Optional[RequestContext] = None
+    ) -> None:
+        """Strictly confirm exact URI rows are gone without touching children."""
+        vector_store = self._get_vector_store()
+        targets = list(dict.fromkeys(uri.rstrip("/") for uri in uris if uri))
+        if not vector_store or not targets:
+            return
+        residue = await vector_store.count(
+            filter=In("uri", targets),
+            ctx=self._ctx_or_default(ctx),
+        )
+        if residue:
+            raise RuntimeError(
+                "Vector records still present after delete: "
+                f"{', '.join(targets)} (residue={residue})"
             )
 
     async def _copy_vector_store_uris(

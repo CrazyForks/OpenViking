@@ -55,6 +55,7 @@ RETRIEVAL_OUTPUT_FIELDS = [
     "active_count",
     "updated_at",
     "expires_at",
+    "ttl_generation",
     "search_tags",
 ]
 
@@ -72,6 +73,7 @@ FETCH_BY_URI_OUTPUT_FIELDS = [
     "created_at",
     "updated_at",
     "expires_at",
+    "ttl_generation",
     "active_count",
     "level",
     "name",
@@ -1745,6 +1747,18 @@ class VikingVectorIndexBackend:
             backend = self._get_backend_for_context(ctx)
             await backend.delete_by_filter(And(conds))
 
+    async def delete_uri_scope(self, ctx: RequestContext, uri: str) -> None:
+        """Strictly delete one URI and every descendant in its tenant."""
+        backend = self._get_backend_for_context(ctx)
+        await backend.delete_by_filter(
+            And(
+                [
+                    Eq("account_id", ctx.account_id),
+                    Or([Eq("uri", uri), PathScope("uri", uri, depth=-1)]),
+                ]
+            )
+        )
+
     def _uri_transfer_filter(self, ctx: RequestContext, uri: str, *, recursive: bool) -> FilterExpr:
         scopes: List[FilterExpr] = [Eq("uri", uri)]
         if recursive:
@@ -2308,8 +2322,8 @@ class VikingVectorIndexBackend:
         # TTL read barrier: hide objects whose frozen expires_at is at/past now.
         # Injected here so every tenant query (search/filter/search_children) and
         # every retrieval level shares one predicate, applied before candidate
-        # budget/top-k truncation. Returns None (no-op) when TTL is disabled, so
-        # default behaviour is unchanged.
+        # budget/top-k truncation. Rows without expires_at are retained, which
+        # preserves legacy/non-TTL objects while frozen snapshots remain final.
         ttl_barrier = expiry_filter_now()
         if ttl_barrier is not None:
             filters.append(ttl_barrier)

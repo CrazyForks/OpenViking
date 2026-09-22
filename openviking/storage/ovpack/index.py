@@ -31,6 +31,7 @@ PORTABLE_VECTOR_SCALAR_FIELDS = [
     # Frozen TTL expiry travels with the record so export/import/restore keep an
     # object's original deadline (and its read-barrier invisibility) intact.
     "expires_at",
+    "ttl_generation",
 ]
 EXPORT_VECTOR_FIELDS = [*PORTABLE_VECTOR_SCALAR_FIELDS, "vector"]
 

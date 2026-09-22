@@ -81,3 +81,57 @@ def test_global_alias_round_trips():
     assert config.global_default.ttl_days == 3
     dumped = config.model_dump(by_alias=True)
     assert dumped["global"]["ttl_days"] == 3
+
+
+def test_nearest_directory_override_inherits_explicit_parent():
+    config = TTLConfig(
+        **{"global": {"mode": "days", "ttl_days": 7}},
+        user_events={"mode": "days", "ttl_days": 30},
+        directories={
+            "viking://user/u1/memories/events": {"mode": "days", "ttl_days": 14},
+            "viking://user/u1/memories/events/private/": {"mode": "disabled"},
+            "viking://user/u1/memories/events/private/shared": {"mode": "inherit"},
+        },
+    )
+    assert config.resolve_uri(
+        "viking://user/u1/memories/events/e.md", "user_events"
+    ) == 14
+    assert config.resolve_uri(
+        "viking://user/u1/memories/events/private/e.md", "user_events"
+    ) is None
+    assert config.resolve_uri(
+        "viking://user/u1/memories/events/private/shared/e.md", "user_events"
+    ) is None
+
+
+def test_directory_matching_respects_path_boundaries():
+    config = TTLConfig(
+        directories={
+            "viking://user/u1/memories/events/a": {"mode": "days", "ttl_days": 9}
+        }
+    )
+    assert config.resolve_uri(
+        "viking://user/u1/memories/events/abc/e.md", "user_events"
+    ) is None
+
+
+def test_directory_only_policy_enables_ttl_and_normalizes_slash():
+    config = TTLConfig(
+        directories={
+            "viking://user/u1/sessions/": {"mode": "days", "ttl_days": 2}
+        }
+    )
+    assert config.enabled is True
+    assert "viking://user/u1/sessions" in config.directories
+
+
+def test_directory_key_must_be_concrete_user_uri():
+    invalid_uris = [
+        "/local/a",
+        "viking://user/u1/resources/project",
+        "viking://user/u1/preferences",
+        "viking://user/u1/memories/entities",
+    ]
+    for uri in invalid_uris:
+        with pytest.raises(ValidationError):
+            TTLConfig(directories={uri: {"mode": "disabled"}})

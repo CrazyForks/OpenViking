@@ -21,7 +21,8 @@ the cleanup scan.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Mapping, Optional
+from uuid import uuid4
 
 from openviking.core.namespace import uri_parts
 from openviking.storage.expr import RawDSL
@@ -32,6 +33,10 @@ from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_conf
 # rules so callers do not re-derive them.
 OBJECT_TYPE_EVENT = "event"
 OBJECT_TYPE_SESSION = "session"
+TTL_GENERATION_FIELD = "ttl_generation"
+TTL_FIELD_NAMES = frozenset(
+    {"ttl_days", "received_at", "expires_at", TTL_GENERATION_FIELD}
+)
 
 
 def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
@@ -69,6 +74,28 @@ def object_type_for_scope(scope: TTLScope) -> str:
     return OBJECT_TYPE_SESSION if scope == "sessions" else OBJECT_TYPE_EVENT
 
 
+def ttl_object_for_uri(uri: str) -> Optional[tuple[str, str]]:
+    """Return ``(object_type, canonical_object_uri)`` for a TTL object path.
+
+    A session's root metadata controls its complete subtree.  Event containers
+    and their generated dot-files are not independently expiring objects.
+    """
+    scope = ttl_scope_for_uri(uri)
+    if scope is None:
+        return None
+    try:
+        parts = uri_parts(uri)
+    except ValueError:
+        return None
+    if scope == "sessions":
+        if len(parts) < 4:
+            return None
+        return OBJECT_TYPE_SESSION, "viking://" + "/".join(parts[:4])
+    if not parts or not parts[-1].endswith(".md") or parts[-1].startswith("."):
+        return None
+    return OBJECT_TYPE_EVENT, "viking://" + "/".join(parts)
+
+
 def resolve_ttl_days(uri: str, config: Optional[TTLConfig] = None) -> Optional[int]:
     """Resolve the effective ``ttl_days`` for a URI, or ``None`` when TTL is off."""
     scope = ttl_scope_for_uri(uri)
@@ -77,7 +104,7 @@ def resolve_ttl_days(uri: str, config: Optional[TTLConfig] = None) -> Optional[i
     ttl_config = config if config is not None else _current_ttl_config()
     if ttl_config is None:
         return None
-    return ttl_config.resolve_scope(scope)
+    return ttl_config.resolve_uri(uri, scope)
 
 
 def compute_expires_at(received_at: datetime, ttl_days: int) -> datetime:
@@ -110,7 +137,39 @@ def freeze_ttl_fields(
         "ttl_days": ttl_days,
         "received_at": format_iso8601(received),
         "expires_at": format_iso8601(expires),
+        # An incarnation fence, not a policy field.  A URI delete/recreate gets
+        # a new value so delayed cleanup/embedding work cannot touch the new
+        # object.  Ordinary updates and session renewal preserve it.
+        TTL_GENERATION_FIELD: str(uuid4()),
     }
+
+
+def apply_ttl_fields(
+    uri: str,
+    metadata: Mapping[str, Any],
+    *,
+    existing_fields: Optional[Mapping[str, Any]] = None,
+    received_at: Optional[datetime] = None,
+    config: Optional[TTLConfig] = None,
+) -> dict[str, Any]:
+    """Return metadata with system-owned TTL fields frozen or preserved.
+
+    On creation (``existing_fields is None``), caller-provided TTL fields are
+    discarded and a snapshot is derived from the effective policy. On update,
+    the existing object's fields are copied verbatim. This prevents public and
+    LLM write paths from choosing or changing expiry independently.
+    """
+    result = {key: value for key, value in metadata.items() if key not in TTL_FIELD_NAMES}
+    if existing_fields is None:
+        snapshot = freeze_ttl_fields(uri, received_at=received_at, config=config)
+        if snapshot:
+            result.update(snapshot)
+        return result
+    for field in TTL_FIELD_NAMES:
+        value = existing_fields.get(field)
+        if value is not None and value != "":
+            result[field] = value
+    return result
 
 
 def is_expired(expires_at: Optional[str], *, now: Optional[datetime] = None) -> bool:
@@ -134,11 +193,12 @@ def is_expired(expires_at: Optional[str], *, now: Optional[datetime] = None) -> 
 
 
 def ttl_enabled() -> bool:
-    """Whether the TTL read barrier is active. Cheap gate for read paths.
+    """Whether current policy creates TTL snapshots for new objects.
 
-    When this is ``False`` (the default), callers must behave exactly as before:
-    no expiry filtering, no extra metadata reads. It is the single switch that
-    keeps a disabled TTL config fully inert.
+    This switch is deliberately not consulted by visibility checks. Policy
+    changes only affect objects created afterwards; an object that already has
+    a frozen ``expires_at`` must not become visible again when policy is later
+    disabled.
     """
     config = _current_ttl_config()
     return config is not None and config.enabled
@@ -149,11 +209,10 @@ def hidden_by_ttl(expires_at: Optional[str], *, now: Optional[datetime] = None) 
 
     Scalar counterpart to :func:`expiry_filter_now` for code paths that already
     hold a frozen ``expires_at`` (session load/list, the idle scan) instead of
-    issuing a vector query. Gated on TTL being enabled so disabling TTL lifts the
-    barrier uniformly — a frozen expiry never hides an object while TTL is off.
+    issuing a vector query. Visibility follows the frozen object snapshot, not
+    current policy: disabling TTL stops new snapshots but cannot revive an
+    already-expired object. Objects without ``expires_at`` remain visible.
     """
-    if not ttl_enabled():
-        return False
     return is_expired(expires_at, now=now)
 
 
@@ -166,12 +225,12 @@ def _current_ttl_config() -> Optional[TTLConfig]:
 
 
 def expiry_filter_now(*, now: Optional[datetime] = None) -> Optional[RawDSL]:
-    """Return the read-barrier filter that hides expired objects, or ``None``.
+    """Return the read-barrier filter that hides expired object snapshots.
 
-    When TTL is disabled the barrier is skipped entirely (``None``), so nothing
-    is filtered and existing behaviour is untouched. When enabled, the predicate
-    keeps an object visible while ``expires_at`` is absent or strictly in the
-    future, and hides it once ``expires_at <= now``:
+    The predicate is always present because current policy only controls creation
+    of new snapshots. It keeps legacy/non-TTL objects visible while ``expires_at``
+    is absent or strictly in the future, and hides an object once
+    ``expires_at <= now``:
 
         ``{"op": "range_out", "field": "expires_at", "lte": <now RFC3339>}``
 
@@ -182,8 +241,6 @@ def expiry_filter_now(*, now: Optional[datetime] = None) -> Optional[RawDSL]:
     barrier is injected as a raw DSL node because the typed filter AST compiles
     ``Range``/``TimeRange`` down to ``range`` and has no ``range_out`` variant.
     """
-    if not ttl_enabled():
-        return None
     current = now or datetime.now(timezone.utc)
     return RawDSL(
         {

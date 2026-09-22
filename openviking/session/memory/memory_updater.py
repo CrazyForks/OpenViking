@@ -1158,17 +1158,16 @@ class MemoryUpdater:
 
             metadata["version"] = next_memory_version(old_content)
 
-            # Freeze TTL fields on event-memory creation only. New objects get a
-            # snapshot (ttl_days/received_at/expires_at) computed from the current
-            # scope policy; edits preserve the original snapshot via the
-            # system-managed extra-fields copy above, so later config changes never
-            # move an existing object's expiry. Non-event URIs resolve to no TTL.
-            if old_content is None:
-                from openviking.core.ttl import freeze_ttl_fields
+            # TTL is system-owned. The same helper is used by public content
+            # writes: creation freezes the current policy while updates retain
+            # the object's original snapshot and ignore LLM-supplied TTL fields.
+            from openviking.core.ttl import apply_ttl_fields
 
-                ttl_snapshot = freeze_ttl_fields(uri)
-                if ttl_snapshot:
-                    metadata.update(ttl_snapshot)
+            metadata = apply_ttl_fields(
+                uri,
+                metadata,
+                existing_fields=old_content.extra_fields if old_content is not None else None,
+            )
 
             # Handle links/backlinks fields: merge with existing
             incoming_links_by_uri = getattr(resolved_op, "_incoming_links_by_uri", {})
@@ -1506,6 +1505,7 @@ class MemoryUpdater:
                     user=ctx.user,
                     account_id=ctx.account_id,
                     expires_at=mf.extra_fields.get("expires_at"),
+                    ttl_generation=mf.extra_fields.get("ttl_generation"),
                 )
                 memory_context.set_vectorize(Vectorize(text=embedding_text))
 

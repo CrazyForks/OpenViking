@@ -156,6 +156,9 @@ class VikingFS(
         )
         self._background_tasks: set = set()
         self._deletion_guard: Optional[Callable[[str, str], bool]] = None
+        from openviking.storage.ttl_registry import TTLRegistry
+
+        self.ttl_registry = TTLRegistry(self._async_agfs)
 
 
 VikingFS.__module__ = __name__

@@ -46,6 +46,8 @@ class _SemanticMixin:
         file_path = f"{path}/.abstract.md"
         try:
             content_bytes = self._handle_agfs_read(await self._async_agfs.read(file_path))
+            if not await self._ttl_summary_visible(uri, content_bytes, self._ctx_or_default(ctx)):
+                return f"# {uri} [Directory abstract is not ready]"
             return body_for_preview(self._decode_bytes(content_bytes))
         except AbstractOverviewFormatError as exc:
             logger.warning("Malformed directory abstract for %s: %s", uri, exc)
@@ -178,6 +180,8 @@ class _SemanticMixin:
         file_path = f"{path}/.overview.md"
         try:
             content_bytes = self._handle_agfs_read(await self._async_agfs.read(file_path))
+            if not await self._ttl_summary_visible(uri, content_bytes, real_ctx):
+                return f"# {uri} [Directory overview is not ready]"
             return body_for_preview(self._decode_bytes(content_bytes))
         except AbstractOverviewFormatError as exc:
             logger.warning("Malformed directory overview for %s: %s", uri, exc)

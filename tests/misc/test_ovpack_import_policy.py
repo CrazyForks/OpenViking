@@ -748,6 +748,8 @@ async def test_restore_ovpack_applies_backup_manifest_scalar_metadata(
                     "abstract": "portable summary",
                     "description": "portable description",
                     "tags": ["portable"],
+                    "expires_at": "2030-01-02T00:00:00.000Z",
+                    "ttl_generation": "generation-1",
                 },
             }
         ],
@@ -771,6 +773,10 @@ async def test_restore_ovpack_applies_backup_manifest_scalar_metadata(
         "summary": "portable summary",
     }
     assert vectorized_files[0]["scalar_override"]["tags"] == ["portable"]
+    assert vectorized_files[0]["scalar_override"]["expires_at"] == (
+        "2030-01-02T00:00:00.000Z"
+    )
+    assert vectorized_files[0]["scalar_override"]["ttl_generation"] == "generation-1"
 
 
 @pytest.mark.asyncio
