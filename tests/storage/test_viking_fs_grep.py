@@ -362,6 +362,12 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
         (r"(?=foo)foo", "Invalid regex: look-around is not supported", "foobar", "foobar"),
         (r"(?a)\w+", "Invalid regular expression: unrecognized flag", "needle", "needle"),
         (
+            r"a{1000000000}|needle",
+            "rg failed: rg: compiled regex exceeds size limit of 104857600",
+            "needle",
+            "needle",
+        ),
+        (
             r"foo\nbar|needle",
             r'rg failed: rg: the literal "\n" is not allowed in a regex',
             "foo\nbar\nneedle",

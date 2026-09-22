@@ -289,6 +289,7 @@ class _GrepMixin:
                         "invalid regular expression",
                         "regex parse error",
                         r'the literal "\n" is not allowed in a regex',
+                        "compiled regex exceeds size limit",
                     )
                 ):
                     raise
