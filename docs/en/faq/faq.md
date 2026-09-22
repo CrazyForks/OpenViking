@@ -6,6 +6,8 @@
 
 OpenViking organizes an agent's resources, memories, and skills as files. Applications can browse paths, search semantically, and read content on demand. They can also retain preferences and experience extracted from sessions for later tasks.
 
+For example, an agent revising a deployment plan can search project documentation and read the relevant configuration. Constraints agreed in an earlier session can also be retrieved and reused if they were extracted as memories. The application must connect retrieval and session submission; installing the database alone does not give an agent this context. Start by [importing and searching a resource](../getting-started/02-quickstart.md), then connect an [agent tool](../agent-integrations/01-overview.md) if needed.
+
 ### What's the fundamental difference between OpenViking and traditional vector databases?
 
 A vector database primarily stores vectors and supports similarity search. OpenViking adds context directories, layered summaries, resource ingestion, sessions, and memory management. Vector database capabilities vary by product; compare them against your requirements.
@@ -17,6 +19,8 @@ A vector database primarily stores vectors and supports similarity search. OpenV
 | Control how much to read | Read directory abstracts or overviews before loading details |
 | Reuse session experience | Extract and update memories after a session is committed, following the memory policy |
 | Diagnose retrieval problems | Inspect processing and retrieval through logs and telemetry |
+
+If your application only needs similarity queries over existing vectors, evaluate whether its current database is sufficient. Consider OpenViking when you also need directory browsing, layered reading of summaries and details, or memory across sessions. Compare retrieved content, reading volume, latency, and processing cost using your own data and representative questions; benefits depend on the data, models, and configuration.
 
 ### What is the L0/L1/L2 layered model? Why is it needed?
 
@@ -310,10 +314,10 @@ Directory scores influence the ranking of descendants. Retrieval quality depends
 
 1. **Didn't wait for processing to complete**
    ```python
-   await client.add_resource(path="./doc.pdf")
-   task = await client.get_task("<task_id returned by the import>")
-   print(task["status"])  # Must wait
+   result = await client.add_resource(path="./doc.pdf", wait=True)
+   print(result)
    ```
+   Use `wait=True` for a new import. To inspect an import already submitted, query its returned `task_id` instead of importing it again. Keep waiting while its status is `pending` or `running`; inspect the task details if it is `failed` or `cancelled`. A request timeout alone does not mean the background task failed. See [Async Tasks](../api/17-tasks.md).
 
 2. **Embedding model configuration error**
    - Check if `api_key` in `~/.openviking/ov.conf` is correct

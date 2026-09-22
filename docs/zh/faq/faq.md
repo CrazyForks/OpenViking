@@ -6,6 +6,8 @@
 
 OpenViking 用文件系统组织 Agent 的资源、记忆和技能，支持按路径浏览、语义检索和按需读取。应用可以把会话中提取的偏好与经验保存下来，在后续任务中复用。
 
+例如，用户让 Agent 修改部署方案时，Agent 可以检索项目文档，再读取相关配置；上次会话中已确认的部署约束，如果已提取为记忆，也可以在这次任务中检索和复用。应用需要接入检索与会话提交流程，安装数据库本身不会让 Agent 自动获得这些上下文。首次使用可从[导入一份资料并检索](../getting-started/02-quickstart.md)开始，再按需要接入[Agent 工具](../agent-integrations/01-overview.md)。
+
 ### OpenViking 和传统向量数据库有什么本质区别？
 
 向量数据库主要提供向量存储和相似度检索。OpenViking 在向量检索之上，提供上下文目录、分层摘要、资源导入、会话和记忆管理。已有向量数据库的能力因产品而异，选型时应按具体需求比较。
@@ -17,6 +19,8 @@ OpenViking 用文件系统组织 Agent 的资源、记忆和技能，支持按�
 | 控制读取量 | 先读目录摘要或概览，再按需读取详细内容 |
 | 复用会话经验 | 提交会话后，按记忆策略提取和更新记忆 |
 | 排查检索问题 | 使用日志与 telemetry 查看处理和检索过程 |
+
+如果应用只需要对已有向量做相似度查询，应先评估现有数据库是否够用。需要目录浏览、摘要与详情分层读取，或跨会话记忆管理时，再评估 OpenViking。用自己的资料和代表性问题比较召回内容、读取量、延迟和处理成本；收益取决于数据、模型与配置。
 
 ### 什么是 L0/L1/L2 分层模型？为什么需要它？
 
@@ -308,10 +312,10 @@ overview = await client.overview(uri="viking://resources")
 
 1. **未等待处理完成**
    ```python
-   await client.add_resource(path="./doc.pdf")
-   task = await client.get_task("<导入时返回的 task_id>")
-   print(task["status"])  # 必须等待
+   result = await client.add_resource(path="./doc.pdf", wait=True)
+   print(result)
    ```
+   新导入时可用 `wait=True` 等待。排查已经提交的导入时，用返回的 `task_id` 查询任务，不必重复导入。状态仍为 `pending` 或 `running` 时需要继续等待；`failed` 或 `cancelled` 时查看任务详情。请求超时也不能据此判断后台任务已经失败，详见[异步任务](../api/17-tasks.md)。
 
 2. **Embedding 模型配置错误**
    - 检查 `~/.openviking/ov.conf` 中的 `api_key` 是否正确
