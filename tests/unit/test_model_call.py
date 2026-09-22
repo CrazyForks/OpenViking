@@ -9,11 +9,13 @@ import pytest
 from openviking.metrics.datasources.model_retry import ModelRetryEventDataSource
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
+from openviking.telemetry.context import bind_telemetry_stage, get_current_telemetry_stage
 from openviking.utils.model_call import (
     ModelCallError,
     current_model_workload,
     delegate_model_call,
     is_model_call_error,
+    model_stage,
     model_workload,
     run_model_async,
     run_model_sync,
@@ -29,6 +31,70 @@ def events(monkeypatch):
     )
     monkeypatch.setattr("openviking.utils.model_call.random.uniform", lambda *_: 0)
     return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["file_summary", "directory_overview"])
+async def test_model_stage_overrides_legacy_stage_without_changing_policy_or_delegation(
+    events, stage
+):
+    adapter = object()
+    deadline = time.time() + 60
+    scopes = []
+
+    async def request():
+        scopes.append(current_model_workload())
+        assert get_current_telemetry_stage() == "semantic_execute"
+        raise TimeoutError()
+
+    async def backend():
+        with delegate_model_call(adapter):
+            return await run_model_async(request, model_type="vlm", adapter=adapter)
+
+    with model_workload("add_resource", stage="parse", deadline_at=deadline):
+        with model_stage(stage), bind_telemetry_stage("semantic_execute"):
+            with pytest.raises(TimeoutError):
+                await run_model_async(backend, model_type="vlm")
+        assert current_model_workload().stage == "parse"
+    assert len(scopes) == 4
+    assert all(
+        (scope.stage, scope.operation, scope.workload, scope.deadline_at)
+        == (stage, "add_resource", "offline", deadline)
+        for scope in scopes
+    )
+    assert all(payload["stage"] == stage for _, payload in events)
+    assert len([event for event, _ in events if event == "model_retry.logical_call"]) == 1
+
+
+@pytest.mark.parametrize(
+    "stage", ["archive_summary", "memory_extract", "skill_extract", "working_memory"]
+)
+def test_session_stages_keep_existing_telemetry_fallback(events, stage):
+    with model_workload("session_commit"), bind_telemetry_stage(stage):
+        assert run_model_sync(lambda: "ok", model_type="vlm") == "ok"
+        assert current_model_workload().stage == get_current_telemetry_stage() == stage
+    assert all(payload["stage"] == stage for _, payload in events)
+
+
+@pytest.mark.asyncio
+async def test_model_stage_is_task_local_and_restores_after_cancellation():
+    async def inspect(stage):
+        with model_stage(stage):
+            await asyncio.sleep(0)
+            assert current_model_workload().stage == stage
+            try:
+                with model_stage("working_memory"):
+                    raise asyncio.CancelledError()
+            except asyncio.CancelledError:
+                pass
+            return current_model_workload().stage
+
+    with bind_telemetry_stage("semantic_execute"):
+        assert await asyncio.gather(inspect("file_summary"), inspect("directory_overview")) == [
+            "file_summary",
+            "directory_overview",
+        ]
+        assert current_model_workload().stage == "semantic_execute"
 
 
 @pytest.mark.asyncio

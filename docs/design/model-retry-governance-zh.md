@@ -71,6 +71,8 @@ ExtractLoop 的工具轮次、格式/patch repair 仍由业务层控制，每次
 
 operation 统一为 `add_resource` / `session_commit` / `find` / `search` 等固定枚举。当前源码已有 `resources.add_resource`、`add_resource_job`、`session_commit_phase2` 等名字，需要明确映射；队列不能只依赖进程内 telemetry 对象，恢复时从消息继承。stage 同样固定枚举。result、error_class、reason、owner 用受控值；task/session/logical_call/credential ID 以及原始异常内容只进日志或 trace，不进 label。
 
+文件摘要和目录概览通过独立的 `model_stage` 上下文标记为 `file_summary` / `directory_overview`，优先于内层 legacy telemetry stage；未显式标记时沿用现有阶段归因，例如 session 的 `archive_summary`。该上下文只影响新模型指标，原有 operation Token 的 `semantic_execute` 标签保持不变，不修改次数、deadline 或 credential 委托。
+
 Dashboard 先展示 attempts / logical calls 与 exhausted / logical calls，按 operation 和 stage 拆分。两类计数都按结束记录；短窗口因跨窗/在途会有偏差，精确收益使用同一批已完成 logical calls 的回放数据，不将分钟级比率当账单或严格不变量。进程崩溃可能丢失进程内事件，Prometheus 也不是预算账本。
 
 若展示重试 Token 占比，再补 `openviking_model_attempt_tokens_total{model_type,operation,stage,attempt_kind,token_type}`，attempt_kind 至少区分 initial/retry/failover。只累加 provider 真实返回的 usage，并展示 usage 覆盖情况；没有 usage 的失败请求标为未知，不能记作零成本。未接入该指标前不展示“已节省 Token”。不依赖客户部署的私有 Metrics，也不新增遥测回传。

@@ -34,6 +34,8 @@ from openviking.telemetry import (
     bind_telemetry,
     get_current_telemetry,
 )
+from openviking.telemetry.context import bind_telemetry_stage
+from openviking.utils.model_call import model_workload, run_model_async
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -171,6 +173,57 @@ def _patch_semantic_config(monkeypatch, *, overview_sample_limit=32):
             semantic=SimpleNamespace(overview_sample_limit=overview_sample_limit)
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_executor_attributes_model_stages_without_changing_token_stages(monkeypatch):
+    from openviking.metrics.datasources.model_retry import ModelRetryEventDataSource
+
+    root_uri = "viking://resources/root"
+    fake_fs = _FakeVikingFS({root_uri: [{"name": "a.txt", "isDir": False}]})
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
+    _patch_semantic_config(monkeypatch)
+    events = []
+    monkeypatch.setattr(
+        ModelRetryEventDataSource, "_emit", lambda name, payload: events.append((name, payload))
+    )
+
+    class Processor(_FakeProcessor):
+        async def _model_request(self):
+            # SemanticProcessor uses this legacy stage inside both generation
+            # methods. It must not override the executor's model-only stage.
+            with bind_telemetry_stage("semantic_execute"):
+
+                async def request():
+                    get_current_telemetry().add_token_usage(3, 2)
+                    return "summary"
+
+                return await run_model_async(request, model_type="vlm")
+
+        async def _generate_single_file_summary(self, file_path, **kwargs):
+            return {"name": "a.txt", "summary": await self._model_request()}
+
+        async def _generate_overview(self, *args, **kwargs):
+            return await self._model_request()
+
+    processor = Processor()
+    telemetry = OperationTelemetry(operation="add_resource", enabled=True)
+    ctx = RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER)
+    with bind_telemetry(telemetry), model_workload("add_resource"):
+        executor = SemanticTreeExecutor(processor, "resource", 2, ctx)
+        await executor.run(root_uri)
+
+    for event in ("model_retry.logical_call", "model_retry.attempt"):
+        assert sorted(payload["stage"] for name, payload in events if name == event) == [
+            "directory_overview",
+            "file_summary",
+        ]
+    tokens = telemetry.finish().summary["tokens"]
+    assert set(tokens["stages"]) == {"semantic_execute"}
+    assert tokens["stages"]["semantic_execute"]["llm"]["input"] == 6
+    assert tokens["stages"]["semantic_execute"]["llm"]["output"] == 4
 
 
 @pytest.mark.asyncio

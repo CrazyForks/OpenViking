@@ -66,6 +66,22 @@ class ModelWorkload:
 
 
 _workload: ContextVar[ModelWorkload | None] = ContextVar("model_workload", default=None)
+_model_stage: ContextVar[str | None] = ContextVar("model_call_stage", default=None)
+
+
+@contextmanager
+def model_stage(stage: str):
+    """Attribute model calls without changing existing operation/token stages.
+
+    An explicit model stage takes precedence over legacy telemetry stages. The
+    latter remain the fallback for callers such as session commit that already
+    provide suitable stage labels. Policy, deadline, and delegation are untouched.
+    """
+    token = _model_stage.set(stage if stage in STAGES else "other")
+    try:
+        yield
+    finally:
+        _model_stage.reset(token)
 
 
 def _execution_identity() -> tuple[int, object]:
@@ -120,7 +136,9 @@ def current_model_workload() -> ModelWorkload:
     bound = _workload.get()
     operation = bound.operation if bound else get_current_telemetry().operation
     operation = _OPERATION_ALIASES.get(operation, operation)
-    stage = get_current_telemetry_stage() or (bound.stage if bound else "other")
+    stage = _model_stage.get()
+    if stage is None:
+        stage = get_current_telemetry_stage() or (bound.stage if bound else "other")
     return ModelWorkload(
         operation=operation if operation in OPERATIONS else "other",
         workload=bound.workload if bound else "online",

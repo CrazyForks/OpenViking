@@ -90,3 +90,33 @@ These exercise real adapter/SDK HTTP requests with MockTransport, real queue
 handlers, Phase-2 failure handling with in-memory storage, and the actual metric
 router/exporter. They do not prove native-engine E2E or durable crash budgets.
 The baseline report is historical evidence, not a measurement of this branch.
+
+## Native service and queue validation
+
+`native_e2e.py` runs an actual in-process OpenViking service with native RAGFS,
+SQLite QueueFS, filesystem PathLock and the local vector engine. It does not use
+pytest fixtures or replace native storage. It requires an installed OpenViking
+runtime with working native bindings, and uses the real OpenAI SDK against a
+loopback-only HTTP fixture. No real provider credentials are required.
+
+```sh
+PYTHONPATH=. python benchmark/model_retry/native_e2e.py \
+  --case resource-success --output /tmp/resource-success.json
+```
+
+Run each case in a separate process: `resource-success`,
+`resource-embedding-429`, `resource-embedding-401`, `session-success`,
+`session-vlm-429`, `session-vlm-401`, and `resource-cancel`.
+The JSON records task state, physical HTTP requests, model events, queue drain,
+archive markers and resource lock reacquisition. Persistent 429 allows four
+attempts per logical call; 401 allows one. Initialization vectors are drained
+and counted separately before fault injection. Resource success also checks
+file/directory retry stages while preserving the existing Token stage.
+
+The session fixture enables working-memory summary and disables long-term
+extraction. It verifies actual Phase 1 delivery and the SessionCommit consumer,
+not ExtractLoop protocols. The 120-second test timeout is not production policy.
+This does not cover HTTP ingress, multiple Pods, Redis, process crashes, real
+model interoperability or billing. Record both the Python source revision and
+native runtime image when using binaries built from another revision; a passing
+test does not establish that those binaries were rebuilt from the tested source.

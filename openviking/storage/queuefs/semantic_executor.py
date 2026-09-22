@@ -35,9 +35,9 @@ from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.index_action import FieldPatch
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry import bind_telemetry, get_current_telemetry
-from openviking.telemetry.context import bind_telemetry_stage
 from openviking.utils.content_hash import content_md5
 from openviking.utils.ingest_options import IngestOptions
+from openviking.utils.model_call import model_stage
 from openviking_cli.utils import VikingURI
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
@@ -1131,7 +1131,7 @@ class SemanticTreeExecutor:
                 }
                 if file_content is not None:
                     summary_kwargs["file_content"] = file_content
-                with bind_telemetry_stage("file_summary"):
+                with model_stage("file_summary"):
                     summary_dict = await self._processor._generate_single_file_summary(
                         file_path, **summary_kwargs
                     )
@@ -1451,7 +1451,7 @@ class SemanticTreeExecutor:
                     overview = self._select_direct_media_overview(node, file_summaries)
                 if overview is None:
                     async with self._llm_sem:
-                        with bind_telemetry_stage("directory_overview"):
+                        with model_stage("directory_overview"):
                             overview = await self._processor._generate_overview(
                                 dir_uri,
                                 file_summaries,
