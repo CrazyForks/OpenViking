@@ -798,7 +798,7 @@ Set the number of concurrent workers per Resource Compile task and stage, for bo
 |-------|---------|-------------|
 | `map_concurrency` | Inherits `vlm.max_concurrent` | Concurrent Map extraction jobs |
 | `shuffle_concurrency` | Inherits `vlm.max_concurrent` | Concurrent Shuffle routing jobs and embedding batches |
-| `shuffle_batch_size` | `4` | Maximum primary records per routing request, independent of concurrency; oversized batches split to fit the input budget |
+| `shuffle_batch_size` | `4` | Maximum primary records per routing request, independent of concurrency and the soft character budget |
 | `reduce_concurrency` | Inherits `vlm.max_concurrent` | Concurrent Reduce jobs; final same-path candidate merges reuse this value |
 
 Concurrency values must be positive integers; omitted or `null` values inherit the default. `shuffle_batch_size` must be a positive integer, defaults to `4`, and does not accept `null`. Routing saves valid decisions individually and re-batches only failed records; the final retry uses single-record requests, with at most three rounds per record. Restart VikingBot after changing these settings. All Compile tasks within one VikingBot service still share the model-request capacity set by `vlm.max_concurrent`, so raising stage concurrency cannot exceed that total limit. Embedding requests also obey the embedding service's own concurrency limit. Recovery uses the same reduce setting by default; an explicit `--concurrency` overrides recovery concurrency.

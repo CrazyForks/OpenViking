@@ -42,7 +42,7 @@ class CompileLimits(BaseModel):
     source_concurrency: int = Field(default=6, ge=1)
     # Per-task Shuffle routing workers and embedding batches.
     shuffle_concurrency: int = Field(default=6, ge=1)
-    # Maximum primary records per routing request; oversized batches split further.
+    # Maximum primary records per routing request; the final retry uses single records.
     shuffle_batch_size: int = Field(default=4, ge=1, strict=True)
     # Per-task Reduce workers, also used for consolidating same-path candidate files.
     merge_concurrency: int = Field(default=10, ge=1)

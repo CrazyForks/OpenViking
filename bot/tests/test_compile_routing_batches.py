@@ -162,12 +162,15 @@ async def test_unparseable_envelope_retries_once_per_round(monkeypatch):
     assert r.metrics["repairs"] == 0  # No hidden whole-batch repair inside JsonModel.
 
 
-async def test_oversized_batch_splits_and_cancellation_propagates(monkeypatch):
+async def test_routing_batch_preserves_size_above_soft_character_budget(monkeypatch):
     r, shuffle, node, records, calls = setup_runtime(monkeypatch, valid)
-    r.model.fits = lambda system, data, schema: len(data["records"]) <= 2
+    r.system = "Routing rules.\n" * 5000
+    assert len(r.system) > r.model.budget
     assert len(await shuffle.run(node, records)) == 4
-    assert [len(c["records"]) for c in calls] == [2, 2]
+    assert [len(c["records"]) for c in calls] == [4]
 
+
+async def test_routing_cancellation_propagates(monkeypatch):
     r, shuffle, node, records, calls = setup_runtime(
         monkeypatch, lambda *_: asyncio.CancelledError()
     )

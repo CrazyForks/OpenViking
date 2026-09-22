@@ -328,13 +328,6 @@ class Shuffle:
                 "candidates": candidates,
                 "inputs": list(evidence.values()),
             }
-            attachments = getattr(r.model.resources, "snapshots", {})
-            budget_system = system + json.dumps(attachments, ensure_ascii=False)
-            if len(indices) > 1 and not r.model.fits(budget_system, request, RouteBatchResponse):
-                middle = len(indices) // 2
-                await route(indices[:middle])
-                await route(indices[middle:])
-                return
             entries = {}
             primary_ids = {item["record"] for item in data}
             for index in indices:
