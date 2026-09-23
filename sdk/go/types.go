@@ -22,6 +22,7 @@ type Config struct {
 
 // AddResourceOptions controls AddResource.
 type AddResourceOptions struct {
+	ACL                 *ACLSpec
 	To                  string
 	Parent              string
 	CreateParent        *bool
@@ -223,6 +224,7 @@ type RemoveOptions struct {
 
 // WriteOptions controls Write.
 type WriteOptions struct {
+	ACL            *ACLSpec
 	Mode           string
 	Wait           bool
 	Timeout        *float64
