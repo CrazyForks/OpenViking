@@ -112,11 +112,13 @@ Dashboard 先展示 attempts / logical calls 与 exhausted / logical calls，按
 
 当前覆盖 OpenAI / Volcengine / LiteLLM 的非流式 text / vision、Embedding 公共调用入口，以及实际配置使用的 MultiCredentialVLM / FailoverEmbedder。多凭证成功路由仍保持 sticky；短暂错误在候选凭证间切换，auth / quota 错误禁用当前 call 内的失败凭证，均消费统一总次数。原始 SDK 异常类型、status 与 body 保留，通过附加 `model_call_error` 终止信息阻止外层重新获得预算；无上游异常的 deadline / breaker 拒绝使用 ModelCallError。
 
-Ark、OpenAI-compatible Embedding、Gemini、MiniMax 和 LiteLLM 的可见隐式重试已显式关闭。HTTP 请求次数已用真实 SDK + mock HTTP 验证 Ark Embedding、Volcengine VLM、OpenAI VLM 和 Gemini Embedding 的目标场景；Cohere 同步入口也已接入 owner，并补充空消息 transport timeout 的统一分类；其他 provider 不能仅凭配置修改就声称通过 transport 一对一验证。流式、音视频上传/轮询/生成流程、Codex 401 刷新重发、旧 FailoverVLM 直接调用，以及第三方 adapter 仍需单独迁移/验证；配置中的旧 backup 语法已由工厂转换到 MultiCredentialVLM，不等同于直接使用旧 wrapper。
+Ark、OpenAI-compatible Embedding、Gemini、MiniMax 和 LiteLLM 的可见隐式重试已显式关闭。HTTP 请求次数已用真实 SDK 与本地 HTTP 故障注入验证 Ark Embedding、Volcengine VLM、OpenAI VLM、Gemini Embedding 及 MiniMax 同步 Embedding 的目标场景；Cohere 同步入口也已接入 owner，并补充空消息 transport timeout 的统一分类；其他 provider 不能仅凭配置修改就声称通过 transport 一对一验证。流式、音视频上传/轮询/生成流程、Codex 401 刷新重发、旧 FailoverVLM 直接调用，以及第三方 adapter 仍需单独迁移/验证；配置中的旧 backup 语法已由工厂转换到 MultiCredentialVLM，不等同于直接使用旧 wrapper。
 
 Embedding 与 Semantic 共用有限的熔断准入等待；等待结束仍被拒绝才返回 FAILED 并通知 wait tracker。Semantic 提前拒绝或取消时释放尚未接管的移交锁，开始执行后不因模型或存储异常重放整条消息。单条输入的参数、过长与内容安全错误不再影响共享 breaker 健康状态。文件摘要原有空摘要降级仍保留。Session Phase 2 去掉整步骤重试，working-memory creation/update 不再吞掉终止的模型错误；失败写 `.failed.json`，保留已完成步骤，恢复看到终态后直接结束。
 
 四个指标已通过现有 datasource / collector 路由导出，operation / stage 为固定枚举，call ID 留在异常及日志。当前 attempts 是进入 adapter 的尝试数：本地准备失败、等待 semaphore 时取消，或特殊 SDK 内部认证重发，都可能使它与 HTTP 请求数不完全相等。只在已验证 transport 契约的路径上用它近似物理调用放大，不将其当计费账本。Retry-After 在 30 秒等待上限内被尊重，超过则以 backoff_limit 终止，避免无限等待或提前重试；该上限是首版策略值，后续需结合离线完成率评估。
+
+MiniMax 同步 HTTP 使用 `HTTPAdapter(max_retries=0)`，不保留 urllib3 的状态重试规则，由 `response.raise_for_status()` 保留 `HTTPError.response` 和 `Retry-After`。否则即使 `total=0`，状态重试规则仍会把 429/503 包装为没有响应头的 `RetryError`，导致统一 owner 跳过服务端要求的等待。该 adapter 沿用统一的 30 秒等待上限，不新增 provider 专属策略。
 
 ### 验证结果
 
@@ -197,3 +199,5 @@ K8s 按约定在本地与 adapter 回归之后执行。按部署文档新建独�
 native 验证发现文件/目录的新指标曾被内层 legacy `semantic_execute` 覆盖；已通过独立 `model_stage` 上下文修正。本次成功导入记录 1 个 `file_summary`、2 个 `directory_overview`，原 Token 指标仍为 `semantic_execute`；session 仍记为 `archive_summary`。修复不改变调用预算或原仪表盘标签，并通过 86 项 owner/executor/metrics/session 回归。
 
 以上是 native 服务入口和真实后台队列的集成验证，不是完整产品 E2E：未覆盖 HTTP server/Ingress、多 Pod、Redis、进程崩溃、真实模型互通、长期记忆 ExtractLoop 协议与质量。Session 场景仅开启 working-memory summary；有限重试对长故障窗口成功率的影响仍需灰度观察。测试 context 保留供后续使用，临时测试 Pod 已删除；共享 QA 服务未改动。
+
+2026-09-23 修复 PR 评审发现的 MiniMax 同步响应头丢失问题。新增 10 个真实 requests/urllib3 与 loopback HTTP 场景：429/503 携带 `Retry-After: 60` 时只发送 1 次并以 `backoff_limit` 终止；携带 2 秒或 30 秒时，校验 owner 先选择对应等待值再发送恢复请求；无响应头时离线仍最多 4 次、在线和 401 仍 1 次。测试替换 owner 的 sleep 记录等待值，不进行真实的 30 秒等待；传输层保持真实。修复前 6 项失败、4 项通过，修复后这 10 项及相关 owner/provider/config 回归共 85 项通过。此次未重跑 K8s/STG，前述 7 个 native 场景仍对应 `a13c3e6b2`，不能作为本次修复的 STG 验收结果。

@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 import httpx
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from openviking.models.embedder.base import DenseEmbedderBase, EmbedResult
 from openviking.utils.async_client_cache import LoopScopedAsyncClientCache
@@ -78,7 +77,7 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
         if not self.api_key:
             raise ValueError("api_key is required for MiniMax embedder")
 
-        # Initialize session with retry logic
+        # The shared model owner handles retries for both sync and async calls.
         self.session = self._create_session()
         self._async_client_cache = LoopScopedAsyncClientCache()
 
@@ -93,13 +92,8 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
     def _create_session(self) -> requests.Session:
         """Create an execute-once transport; the model owner handles retries."""
         session = requests.Session()
-        retry_strategy = Retry(
-            total=0,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["POST"],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        # Let raise_for_status preserve the response and Retry-After for the owner.
+        adapter = HTTPAdapter(max_retries=0)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
