@@ -31,8 +31,14 @@ def apply_file(draft: FileDraft, old: str | None) -> str:
     Bytes outside patch anchors are preserved exactly, including whitespace and frontmatter.
     """
     if old is None:
-        if draft.base_hash is not None or draft.patches or draft.content is None:
-            raise ValueError("New files require content without a base revision or patches")
+        if draft.base_hash is not None or draft.patches:
+            raise ValueError("New files must not include base_hash or patches")
+        if draft.content is None:
+            raise ValueError(
+                f'File "{draft.path}" is missing content. '
+                "Provide inline content, or set content_ref to the file you wrote with write_file, "
+                "relative to your scratch root."
+            )
         return draft.content
     if draft.base_hash != content_hash(old):
         raise ValueError("Old target revision does not match the requested change")

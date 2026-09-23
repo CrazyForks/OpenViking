@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-PROCESSING_VERSION = "compile-pipeline-30"
+PROCESSING_VERSION = "compile-pipeline-31"
 # Explicit output-token fallback when the configured VLM provides no value.
 DEFAULT_MAX_TOKENS = 32_000
 
@@ -21,7 +21,6 @@ DEFAULT_PLAN = (
     "changes = p.reduce(groups, task=contract.reduce)\n"
     "p.finalize(changes, into=target)"
 )
-_PLANNER_CORE_FIELDS = {"extract", "reduce", "routing", "distinguish"}
 
 
 def digest(value: Any) -> str:
@@ -52,7 +51,10 @@ class Transform(StrictModel):
     execution: Literal["direct", "agent"] = "direct"
     input_unit: Literal["range", "file"] = Field(
         default="range",
-        description="Source Map assignment boundary; intermediate records stay separate.",
+        description="Source Map assignment boundary. Use range for partial evidence "
+        "that later stages synthesize; use file when the Map result requires "
+        "whole-document context. State that dependency in instructions. "
+        "Intermediate records stay separate.",
     )
     fields: dict[str, str] = Field(
         default_factory=lambda: {"text": "Facts extracted from the source."},
@@ -145,22 +147,11 @@ class Contract(StrictModel):
 
     @model_validator(mode="before")
     @classmethod
-    def expand_options(cls, value):
-        """Expand planner options, rejecting unknown or duplicate settings; flat contracts stay valid.
-
-        Omitted reduce output means files; an intermediate reducer explicitly requests records.
-        """
+    def apply_transform_defaults(cls, value):
+        """Default Reduce output to files while preserving explicit output choices."""
         if not isinstance(value, dict):
             return value
         value = dict(value)
-        options = value.pop("options", {})
-        if (
-            not isinstance(options, dict)
-            or set(options) - (cls.model_fields.keys() - _PLANNER_CORE_FIELDS - {"version"})
-            or set(options) & value.keys()
-        ):
-            raise ValueError("Contract options must contain only distinct optional settings")
-        value.update(options)
         if isinstance(value.get("reduce"), dict):
             value["reduce"] = {"output": "files", **value["reduce"]}
         return value
@@ -183,41 +174,6 @@ class PlanProposal(StrictModel):
     contract: Contract
     plan: str = Field(default=DEFAULT_PLAN, min_length=1, max_length=8000)
 
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_result(cls, value: Any) -> Any:
-        """Unwrap JSON results and relocate known contract fields without mutating input.
-
-        Explicit inner values win, including invalid values that validation rejects.
-        Unknown fields and ambiguous options remain errors; plan programs stay intact.
-        JSON decoding errors propagate to the existing model-repair path.
-        """
-        if isinstance(value, str):
-            value = json.loads(value)
-        if not isinstance(value, dict):
-            return value
-        if set(value) == {"plan"} and isinstance(value["plan"], str):
-            try:
-                wrapped = json.loads(value["plan"])
-            except ValueError:
-                wrapped = None
-            if isinstance(wrapped, dict) and "contract" in wrapped:
-                value = wrapped
-        value = dict(value)
-        contract = value.get("contract", {})
-        if isinstance(contract, str):
-            contract = json.loads(contract)
-        if not isinstance(contract, dict):
-            return value
-        contract = Contract.expand_options(contract)
-        misplaced = {
-            key: value.pop(key)
-            for key in list(value)
-            if key in Contract.model_fields or key == "options"
-        }
-        value["contract"] = {**Contract.expand_options(misplaced), **contract}
-        return value
-
 
 @dataclass(frozen=True)
 class Node:
@@ -233,8 +189,9 @@ class Node:
 def parse_plan(program: str, contract: Contract) -> list[Node]:
     """Compile a small AST whitelist into typed nodes; no Python objects are evaluated.
 
-    Plans have at most 12 nodes, a single terminal finalize, no unused datasets, rebinding,
-    implicit fan-out or literals. Each Shuffle record belongs to one work set.
+    Plan text is limited to 8,000 characters before parsing. Plans have a single terminal
+    finalize, no unused datasets, rebinding, implicit fan-out or literals.
+    Each Shuffle record belongs to one work set. Invalid plans raise ValueError.
     """
     if len(program) > 8000:
         raise ValueError("Plan exceeds 8000 characters")
@@ -242,20 +199,25 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
         tree = ast.parse(program)
     except (SyntaxError, RecursionError) as exc:
         raise ValueError("Invalid plan syntax") from exc
-    if not 1 <= len(tree.body) <= 12 or sum(1 for _ in ast.walk(tree)) > 300:
-        raise ValueError("Plan exceeds node limit")
+    if not tree.body:
+        raise ValueError("Plan must contain at least one operation")
     handles = {"sources": "sources"}
     used: set[str] = set()
     nodes = []
 
-    def reference(value: ast.AST, owner: str, allowed: set[str]) -> str:
+    def reference(value: ast.AST, owner: str, allowed: set[str], field: str) -> str:
+        """Resolve a direct reference or report its source line, field and allowed expressions."""
         if not (
             isinstance(value, ast.Attribute)
             and isinstance(value.value, ast.Name)
             and value.value.id == owner
             and value.attr in allowed
         ):
-            raise ValueError(f"Expected {owner} reference from {sorted(allowed)}")
+            expected = ", ".join(f"{owner}.{name}" for name in sorted(allowed))
+            raise ValueError(
+                f"plan line {value.lineno}, {field}: received {ast.unparse(value)}. "
+                f"Expected one of: {expected}."
+            )
         return value.attr
 
     for index, statement in enumerate(tree.body):
@@ -273,7 +235,7 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
             raise ValueError(f"Rebinding forbidden: {name}")
         if not isinstance(call, ast.Call):
             raise ValueError("Expected pipeline call")
-        op = reference(call.func, "p", {"map", "shuffle", "reduce", "finalize"})
+        op = reference(call.func, "p", {"map", "shuffle", "reduce", "finalize"}, "operator")
         if len(call.args) != 1 or not isinstance(call.args[0], ast.Name):
             raise ValueError("An operator takes one dataset handle")
         source = call.args[0].id
@@ -284,23 +246,26 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
             raise ValueError("Duplicate or expanded keywords forbidden")
         task, against = "", False
         if op in {"map", "reduce"}:
-            required = {"task"} if op == "map" else {"task", "overflow"}
-            if op == "reduce" and "overflow" not in kwargs:
-                # There is exactly one runtime overflow policy, owned by the contract.
-                kwargs["overflow"] = ast.Attribute(value=ast.Name(id="contract"), attr="overflow")
+            required = {"task"}
             if set(kwargs) != required:
-                raise ValueError(
-                    f"Node {index + 1} ({name} = p.{op}): keywords={sorted(kwargs)}; "
-                    f"missing={sorted(required - set(kwargs))}; unexpected={sorted(set(kwargs) - required)}. "
-                    f"Use p.{op}({source}, task=contract.{op if op == 'reduce' else 'extract'}"
-                    + (", overflow=contract.overflow)" if op == "reduce" else ")")
+                hint = (
+                    " Configure overflow at contract.overflow; remove the overflow keyword "
+                    "from this call."
+                    if "overflow" in kwargs
+                    else ""
                 )
-            task = reference(kwargs["task"], "contract", {"extract", "reduce", "synthesize"})
+                raise ValueError(
+                    f"plan line {call.lineno}, node {name}: p.{op} accepts only the task keyword; "
+                    f"missing={sorted(required - set(kwargs))}; unexpected={sorted(set(kwargs) - required)}. "
+                    f"Received {ast.unparse(call)}.{hint}"
+                )
+            task = reference(
+                kwargs["task"], "contract", {"extract", "reduce", "synthesize"}, "task"
+            )
             transform = getattr(contract, task)
             if transform is None:
                 raise ValueError(f"Missing transform: {task}")
             if op == "reduce":
-                reference(kwargs["overflow"], "contract", {"overflow"})
                 valid = handles[source] == "groups"
             else:
                 valid = handles[source] in {"sources", "records"}
@@ -308,7 +273,7 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
         elif op == "shuffle":
             if set(kwargs) not in ({"by"}, {"by", "against"}):
                 raise ValueError("shuffle requires by and optional against=target")
-            task = reference(kwargs["by"], "contract", {"routing", "final_routing"})
+            task = reference(kwargs["by"], "contract", {"routing", "final_routing"}, "by")
             if not getattr(contract, task):
                 raise ValueError(f"Missing routing requirements: {task}")
             if "against" in kwargs:
@@ -412,19 +377,6 @@ def result_schema(schema, data):
     # remain available to Shuffle so valid neighbours survive a partial response.
     result = (RouteResponse if schema is RouteBatchResponse else schema).model_json_schema()
     if schema is PlanProposal:
-        # Keep common decisions prominent while retaining typed, opt-in advanced settings.
-        contract = result["$defs"]["Contract"]
-        properties = contract["properties"]
-        properties.pop("version")
-        options = {
-            key: properties.pop(key) for key in sorted(properties.keys() - _PLANNER_CORE_FIELDS)
-        }
-        properties["options"] = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": options,
-            "description": "Only settings required beyond the common flow and original Skill.",
-        }
         output = result["$defs"]["Transform"]["properties"]["output"]
         output.pop("default")
         output["description"] = "Defaults to records; contract.reduce defaults to files."
@@ -507,9 +459,13 @@ class FileDraft(StrictModel):
     records and verifies content_sha256; callers may supply it to assert a version.
     """
 
-    path: str
+    path: str = Field(description="Destination path relative to the compile target.")
     content: str | None = None
-    content_ref: str | None = None
+    content_ref: str | None = Field(
+        default=None,
+        description="Existing file to read, relative to your scratch root. "
+        "Use this after write_file; omit inline content.",
+    )
     content_sha256: str | None = None
     patches: list[Patch] = Field(default_factory=list, max_length=32)
     base_hash: str | None = None

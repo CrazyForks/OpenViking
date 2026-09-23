@@ -14,20 +14,16 @@ from typing import Any, TypeVar
 
 import json_repair
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from vikingbot.compile.models import COMPILE_STAGING_ROOT
 from vikingbot.compile.plan import (
     DEFAULT_MAX_TOKENS,
-    DEFAULT_PLAN,
     PROCESSING_VERSION,
-    Contract,
     FileResponse,
     MissingReadyPathError,
     RouteBatchResponse,
-    Transform,
     digest,
-    parse_plan,
     result_schema,
 )
 from vikingbot.compile.skill_resources import EvidenceReader
@@ -424,20 +420,14 @@ class JsonModel:
                     validate(result)
                 return result
             except (ValueError, TypeError) as exc:
-                error = str(exc)[:1600]
-                if stage == "plan" and isinstance(raw, dict):
-                    # Diagnose AST independently of schema errors so the single repair
-                    # sees invalid dataflow as well as malformed contract fields.
-                    try:
-                        contract = Contract.expand_options(raw.get("contract", {}))
-                        for name in ("extract", "reduce", "synthesize", "combine"):
-                            if isinstance(contract.get(name), dict):
-                                contract[name] = Transform.model_construct(**contract[name])
-                        parse_plan(
-                            raw.get("plan", DEFAULT_PLAN), Contract.model_construct(**contract)
-                        )
-                    except (ValueError, TypeError, AttributeError) as plan_error:
-                        error += f"\nPlan: {str(plan_error)[:800]}"
+                if isinstance(exc, ValidationError):
+                    error = "\n".join(
+                        f"{'.'.join(str(part) for part in item['loc']) or '$'}: "
+                        f"{item['type']}: {item['msg']}"
+                        for item in exc.errors(include_url=False, include_input=False)
+                    )[:1600]
+                else:
+                    error = str(exc)[:1600]
                 failures += 1
                 candidate = json.dumps(raw, ensure_ascii=False) if raw is not None else ""
                 await self.files.put(
@@ -470,7 +460,14 @@ class JsonModel:
                         + candidate
                         + "\nError: "
                         + error
-                        + "\nReturn the COMPLETE corrected result, including unchanged valid entries."
+                        + "\nSubmit the COMPLETE corrected result with one emit tool call matching "
+                        "the provided schema, including unchanged valid entries."
+                        + (
+                            "\nAll contract settings belong directly inside the contract object. "
+                            "The plan is a DSL string; do not wrap the result or contract in a JSON string."
+                            if stage == "plan"
+                            else ""
+                        )
                         + "\nOnly remove an unsupported requirement if a listed runtime capability "
                         "actually satisfies it. Otherwise retain it and report failure.",
                     }
