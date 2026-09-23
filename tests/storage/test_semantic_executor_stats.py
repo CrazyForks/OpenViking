@@ -35,7 +35,12 @@ from openviking.telemetry import (
     get_current_telemetry,
 )
 from openviking.telemetry.context import bind_telemetry_stage
-from openviking.utils.model_call import model_workload, run_model_async
+from openviking.utils.model_call import (
+    current_model_workload,
+    model_stage,
+    model_workload,
+    run_model_async,
+)
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -71,6 +76,7 @@ class _FakeProcessor:
         self.vectorized_dirs = []
         self.vectorized_files = []
         self.vectorized_contexts = {}
+        self.vectorized_workloads = {}
         self.summarized_files = []
         self.overview_inputs = []
         self.verify_streaming = verify_streaming
@@ -126,6 +132,7 @@ class _FakeProcessor:
             task_context.task_id if task_context is not None else None,
             get_current_telemetry().telemetry_id,
         )
+        self.vectorized_workloads[file_path] = current_model_workload()
 
     async def _vectorize_directory_simple(self, uri, context_type, abstract, overview, ctx=None):
         await self._vectorize_directory(uri, context_type, abstract, overview, ctx=ctx)
@@ -462,6 +469,7 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
     with (
         bind_task_context("task-a", "acc1", "user1"),
         bind_telemetry(telemetry_a),
+        model_workload("add_resource", deadline_at=111),
     ):
         executor_a = SemanticTreeExecutor(
             processor=processor,
@@ -472,6 +480,7 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
     with (
         bind_task_context("task-b", "acc1", "user1"),
         bind_telemetry(telemetry_b),
+        model_workload("session_commit", workload="online", deadline_at=222),
     ):
         executor_b = SemanticTreeExecutor(
             processor=processor,
@@ -480,7 +489,9 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
             ctx=ctx,
         )
 
-    await asyncio.gather(executor_a.run(root_a), executor_b.run(root_b))
+    with model_workload("search", deadline_at=333), model_stage("archive_summary"):
+        await asyncio.gather(executor_a.run(root_a), executor_b.run(root_b))
+        assert current_model_workload().deadline_at == 333
 
     assert processor.max_active_summaries == 1
     assert executor_a.get_stats().done_nodes == 21
@@ -491,6 +502,17 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
     assert {processor.vectorized_contexts[f"{root_b}/b-{idx}.txt"] for idx in range(20)} == {
         ("task-b", telemetry_b.telemetry_id)
     }
+    for root, operation, workload, deadline in [
+        (root_a, "add_resource", "offline", 111),
+        (root_b, "session_commit", "online", 222),
+    ]:
+        scopes = [
+            scope for path, scope in processor.vectorized_workloads.items() if path.startswith(root)
+        ]
+        assert len(scopes) == 20
+        assert {(s.operation, s.workload, s.stage, s.deadline_at) for s in scopes} == {
+            (operation, workload, "other", deadline)
+        }
 
 
 @pytest.mark.asyncio

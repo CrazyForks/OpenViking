@@ -1,12 +1,15 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from openviking.storage.queuefs import semantic_processor as semantic_processor_module
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
+from openviking.utils.model_call import ModelCallError
 
 
 class RecordingVLM:
@@ -29,6 +32,47 @@ class MergePlaceholderVLM(RecordingVLM):
         if len(self.prompts) == 2:
             return "[second](viking://input_sample_f2)"
         return "[first](viking://input_sample_f1) and [second](viking://input_sample_f2)"
+
+
+@pytest.mark.asyncio
+async def test_terminal_batch_cancels_and_drains_sibling_requests(monkeypatch):
+    started = asyncio.Event()
+    drained = asyncio.Event()
+    calls = 0
+
+    async def completion(prompt):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await started.wait()
+            raise ModelCallError("max_attempts", "transient", 4, "fixture")
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            drained.set()
+
+    config = SimpleNamespace(
+        vlm=SimpleNamespace(
+            is_available=lambda: True, get_completion_async=AsyncMock(side_effect=completion)
+        ),
+        semantic=SimpleNamespace(max_overview_prompt_chars=1, overview_batch_size=1),
+        output_language_override="en",
+    )
+    monkeypatch.setattr(semantic_processor_module, "get_openviking_config", lambda: config)
+    monkeypatch.setattr(semantic_processor_module, "render_prompt", lambda *_: "prompt")
+    processor = SemanticProcessor(max_concurrent_llm=2)
+    with pytest.raises(ModelCallError, match="max_attempts"):
+        await asyncio.wait_for(
+            processor._generate_overview(
+                "viking://resources/root",
+                [{"name": "a", "summary": "a"}, {"name": "b", "summary": "b"}],
+                [],
+            ),
+            timeout=1,
+        )
+    assert drained.is_set()
+    assert calls == 2
 
 
 @pytest.mark.asyncio

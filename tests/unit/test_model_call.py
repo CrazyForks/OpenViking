@@ -288,6 +288,31 @@ async def test_deadline_and_retry_after_do_not_start_an_extra_request(events):
     assert sent == 1
 
 
+@pytest.mark.parametrize("elapsed", [0.01, 0.02, 0.06])
+def test_sync_request_cannot_publish_a_result_after_deadline(events, monkeypatch, elapsed):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr("openviking.utils.model_call.time", SimpleNamespace(time=lambda: clock.now))
+    sent = 0
+
+    def request():
+        nonlocal sent
+        sent += 1
+        clock.now += elapsed
+        return "ok"
+
+    with model_workload("add_resource", deadline_at=100.02):
+        if elapsed < 0.02:
+            assert run_model_sync(request, model_type="embedding") == "ok"
+        else:
+            with pytest.raises(ModelCallError, match="deadline") as caught:
+                run_model_sync(request, model_type="embedding")
+            assert caught.value.attempts == 1
+    assert sent == 1
+    expected = "ok" if elapsed < 0.02 else "error"
+    assert [p["result"] for e, p in events if e == "model_retry.logical_call"] == [expected]
+    assert [p["result"] for e, p in events if e == "model_retry.attempt"] == [expected]
+
+
 @pytest.mark.asyncio
 async def test_cancellation_during_backoff_has_no_extra_attempt(events, monkeypatch):
     started = asyncio.Event()

@@ -986,6 +986,8 @@ class SemanticProcessor(DequeueHandlerBase):
                     )
                     logger.debug(f"Generated summary for {file_name}")
                 except Exception as e:
+                    if get_model_call_error(e) is not None:
+                        raise
                     logger.warning(f"Failed to generate summary for {file_path}: {e}")
                     summary_dict = {"name": file_name, "summary": ""}
 
@@ -1011,7 +1013,14 @@ class SemanticProcessor(DequeueHandlerBase):
                     f"{(len(pending_indices) + batch_size - 1) // batch_size} "
                     f"({len(batch)} files)"
                 )
-                await asyncio.gather(*[_gen(i, fp) for i, fp in batch])
+                tasks = [asyncio.create_task(_gen(i, fp)) for i, fp in batch]
+                try:
+                    await asyncio.gather(*tasks)
+                except BaseException:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
 
         completed_summaries = [s for s in file_summaries if s is not None]
         sample_limit = getattr(
@@ -1715,6 +1724,8 @@ class SemanticProcessor(DequeueHandlerBase):
             return overview.strip()
 
         except Exception as e:
+            if get_model_call_error(e) is not None:
+                raise
             logger.error(
                 f"Failed to generate overview for {dir_uri}: {e}",
                 exc_info=True,
@@ -1791,12 +1802,21 @@ class SemanticProcessor(DequeueHandlerBase):
                 partial = self._replace_link_references(partial, batch_link_map)
                 partial_overviews[batch_idx] = partial.strip()
             except Exception as e:
+                if get_model_call_error(e) is not None:
+                    raise
                 logger.warning(
                     f"Failed to generate partial overview batch "
                     f"{batch_idx + 1}/{len(batches)} for {dir_uri}: {e}"
                 )
 
-        await asyncio.gather(*[_run_batch(*bp) for bp in batch_prompts])
+        tasks = [asyncio.create_task(_run_batch(*bp)) for bp in batch_prompts]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         partial_overviews = [p for p in partial_overviews if p is not None]
 
         if not partial_overviews:
@@ -1827,6 +1847,8 @@ class SemanticProcessor(DequeueHandlerBase):
             overview = self._replace_link_references(overview, link_map)
             return overview.strip()
         except Exception as e:
+            if get_model_call_error(e) is not None:
+                raise
             logger.error(
                 f"Failed to merge partial overviews for {dir_uri}: {e}",
                 exc_info=True,

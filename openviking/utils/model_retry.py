@@ -277,6 +277,20 @@ def classify_api_error(error: Exception) -> str:
 
     # Check quota_exceeded *before* transient so that "429 … AccountQuotaExceeded"
     # is classified as quota_exceeded, not transient.
+    for exc in chain:
+        codes = [getattr(exc, "code", None), getattr(exc, "type", None)]
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            codes.extend([body.get("code"), body.get("type")])
+            nested = body.get("error")
+            if isinstance(nested, dict):
+                codes.extend([nested.get("code"), nested.get("type")])
+        for code in codes:
+            if isinstance(code, str) and (
+                code.lower() == "insufficient_quota"
+                or any(pattern in code.lower() for pattern in QUOTA_EXCEEDED_PATTERNS)
+            ):
+                return ERROR_CLASS_QUOTA_EXCEEDED
     for text in texts:
         text_lower = text.lower()
         for pattern in QUOTA_EXCEEDED_PATTERNS:

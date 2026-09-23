@@ -131,6 +131,7 @@ def _take_delegation(adapter: object | None) -> bool:
 
 
 def current_model_workload() -> ModelWorkload:
+    """Return the effective policy, attribution, and deadline for this context."""
     from openviking.telemetry.context import get_current_telemetry, get_current_telemetry_stage
 
     bound = _workload.get()
@@ -158,8 +159,9 @@ def model_workload(
     """Bind policy to this execution context, never to a shared model instance.
 
     Unbound calls are online (one attempt). An optional absolute deadline is
-    enforced around async calls and before sync calls; sync I/O still relies on
-    the adapter's transport timeout. This is not a durable operation budget.
+    enforced around async calls and before/after sync calls. Sync I/O still
+    relies on the adapter's transport timeout to interrupt a blocking request;
+    results arriving after the deadline are rejected. This is not a durable budget.
     """
     if workload not in {"online", "offline"}:
         raise ValueError("workload must be online or offline")
@@ -200,6 +202,7 @@ def get_model_call_error(error: BaseException) -> ModelCallError | None:
 
 
 def is_model_call_error(error: BaseException) -> bool:
+    """Return whether the exception chain carries a terminal model outcome."""
     return get_model_call_error(error) is not None
 
 
@@ -335,6 +338,11 @@ def run_model_sync(
     logger=None,
     operation_name: str = "",
 ) -> T:
+    """Run one logical sync call with a shared attempt and credential budget.
+
+    ``logger`` and ``operation_name`` are retained for adapter compatibility;
+    model events use the bound workload and the owner's logger.
+    """
     if _take_delegation(adapter):
         return func()
     callbacks = [func, *alternatives]
@@ -350,6 +358,10 @@ def run_model_sync(
             call.finish("cancelled")
             raise
         else:
+            remaining = call.remaining()
+            if remaining is not None and remaining <= 0:
+                call.emit("attempt", result="error", error_class="transient")
+                call.stop("deadline", "transient")
             call.emit("attempt", result="ok", error_class="none")
             call.finish("ok")
             return result
@@ -366,6 +378,11 @@ async def run_model_async(
     logger=None,
     operation_name: str = "",
 ) -> T:
+    """Run one logical async call within its attempt budget and deadline.
+
+    ``logger`` and ``operation_name`` are retained for adapter compatibility;
+    model events use the bound workload and the owner's logger.
+    """
     if _take_delegation(adapter):
         return await func()
     callbacks = [func, *alternatives]

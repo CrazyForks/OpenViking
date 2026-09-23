@@ -5,31 +5,36 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from openviking.storage.collection_schemas import TextEmbeddingHandler
 from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.storage.queuefs.process_result import ProcessOutcome
+from openviking.storage.queuefs.semantic_executor import SemanticTreeExecutor
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from openviking.utils.model_call import ModelCallError, run_model_async
+from tests.storage.test_semantic_executor_stats import _FakeVikingFS
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "message,attempts",
+    "message,attempts,provider",
     [
-        ("429 TooManyRequests", 4),
-        ("401 Unauthorized", 1),
-        ("content safety", 1),
-        ("unknown provider failure", 1),
+        ("429 TooManyRequests", 4, "fixture"),
+        ("401 Unauthorized", 1, "fixture"),
+        ("content safety", 1, "fixture"),
+        ("unknown provider failure", 1, "fixture"),
+        ("429", 4, "vikingdb"),
+        ("401", 1, "vikingdb"),
     ],
 )
 async def test_embedding_terminal_failure_settles_wait_without_requeue(
-    monkeypatch, message, attempts
+    monkeypatch, message, attempts, provider
 ):
     sent = 0
 
@@ -45,6 +50,27 @@ async def test_embedding_terminal_failure_settles_wait_without_requeue(
 
             return await run_model_async(once, model_type="embedding")
 
+    embedder = Embedder()
+    if provider == "vikingdb":
+        from openviking.models.embedder.vikingdb_embedders import VikingDBDenseEmbedder
+
+        embedder = VikingDBDenseEmbedder(
+            "fixture", ak="fixture", sk="fixture", host="fixture.invalid"
+        )
+
+        async def request(**kwargs):
+            nonlocal sent
+            sent += 1
+            return httpx.Response(
+                int(message),
+                json={"error": {"message": "provider failure"}},
+                request=httpx.Request("POST", kwargs["url"]),
+            )
+
+        monkeypatch.setattr(
+            embedder._async_client_cache, "get", lambda _: SimpleNamespace(request=request)
+        )
+
     config = SimpleNamespace(
         storage=SimpleNamespace(vectordb=SimpleNamespace(name="context")),
         embedding=SimpleNamespace(
@@ -53,7 +79,7 @@ async def test_embedding_terminal_failure_settles_wait_without_requeue(
             dense=None,
             sparse=None,
             hybrid=None,
-            get_embedder=lambda: Embedder(),
+            get_embedder=lambda: embedder,
             circuit_breaker=SimpleNamespace(
                 failure_threshold=5, reset_timeout=60, max_reset_timeout=600
             ),
@@ -62,7 +88,11 @@ async def test_embedding_terminal_failure_settles_wait_without_requeue(
     monkeypatch.setattr("openviking_cli.utils.config.get_openviking_config", lambda: config)
     monkeypatch.setattr("openviking.utils.model_call.random.uniform", lambda *_: 0)
     backend = SimpleNamespace(
-        is_closing=False, has_queue_manager=True, enqueue_embedding_msg=AsyncMock()
+        is_closing=False,
+        has_queue_manager=True,
+        enqueue_embedding_msg=AsyncMock(),
+        uses_content_field=False,
+        upsert=AsyncMock(),
     )
     handler = TextEmbeddingHandler(backend)
     msg = EmbeddingMsg(
@@ -83,6 +113,7 @@ async def test_embedding_terminal_failure_settles_wait_without_requeue(
         assert result.outcome == ProcessOutcome.FAILED
         assert sent == attempts
         backend.enqueue_embedding_msg.assert_not_awaited()
+        backend.upsert.assert_not_awaited()
         await asyncio.wait_for(tracker.wait_for_request(msg.telemetry_id), timeout=1)
         status = tracker.build_queue_status(msg.telemetry_id)["Embedding"]
         assert status["error_count"] == 1
@@ -197,6 +228,77 @@ def semantic_delivery(monkeypatch):
         executor=executor,
     )
     tracker.cleanup(msg.telemetry_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["single", "batch", "merge", "file_summary", "memory_summary"])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_semantic_model_failure_propagates_through_real_executor(
+    semantic_delivery, monkeypatch, stage, wrapped
+):
+    env = semantic_delivery
+    if stage == "memory_summary":
+        env.msg.context_type = "memory"
+    root = env.msg.uri
+    fake_fs = _FakeVikingFS(
+        {root: [{"name": "a.txt", "isDir": False}, {"name": "b.txt", "isDir": False}]}
+    )
+    fake_fs.read_file = AsyncMock(return_value="fixture")
+    fake_fs.exists = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_processor.get_viking_fs", lambda: fake_fs
+    )
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_processor.SemanticTreeExecutor", SemanticTreeExecutor
+    )
+    error = ModelCallError("max_attempts", "transient", 4, "fixture")
+    if wrapped:
+        provider_error = RuntimeError("provider failed")
+        provider_error.model_call_error = error
+        error = RuntimeError("adapter failed")
+        error.__cause__ = provider_error
+    responses = ["partial one", "partial two", error] if stage == "merge" else error
+    vlm = SimpleNamespace(
+        get_completion_async=AsyncMock(side_effect=responses), is_available=lambda: True
+    )
+    config = SimpleNamespace(
+        vlm=vlm,
+        semantic=SimpleNamespace(
+            overview_sample_limit=32,
+            max_overview_prompt_chars=1 if stage in {"batch", "merge"} else 10000,
+            overview_batch_size=1,
+        ),
+        output_language_override="en",
+    )
+    for module in ("semantic_processor", "semantic_executor"):
+        monkeypatch.setattr(
+            f"openviking.storage.queuefs.{module}.get_openviking_config", lambda: config
+        )
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_processor.render_prompt", lambda *_: "prompt"
+    )
+
+    async def summary(path, **kwargs):
+        if stage in {"file_summary", "memory_summary"}:
+            raise error
+        return {"name": path.rsplit("/", 1)[-1], "summary": "summary"}
+
+    env.processor._generate_single_file_summary = summary
+    env.processor._vectorize_single_file = AsyncMock()
+    env.processor._vectorize_directory = AsyncMock()
+    result = await env.processor.on_dequeue(env.msg.to_dict())
+    assert result.outcome is ProcessOutcome.FAILED
+    assert ("adapter failed" if wrapped else "max_attempts") in result.error
+    assert not fake_fs.writes
+    env.processor._vectorize_directory.assert_not_awaited()
+    env.processor._reenqueue_semantic_msg.assert_not_awaited()
+    env.close.assert_awaited_once()
+    await asyncio.wait_for(env.tracker.wait_for_request(env.msg.telemetry_id), timeout=1)
+    status = env.tracker.build_queue_status(env.msg.telemetry_id)["Semantic"]
+    assert (status["error_count"], status["requeue_count"]) == (1, 0)
 
 
 @pytest.mark.asyncio

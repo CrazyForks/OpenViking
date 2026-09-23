@@ -11,7 +11,7 @@ Production code does not import this prototype.
 The policy acceptance suite uses only Python's standard library:
 
 ```sh
-python3 -m unittest discover -s benchmark/model_retry -p 'test_*.py' -v
+python3 -m unittest discover -s test_scripts/model_retry -p 'test_*.py' -v
 ```
 
 The replay requires an existing OpenViking development environment, including
@@ -19,7 +19,7 @@ The replay requires an existing OpenViking development environment, including
 commit `611f5c469b2bb8dc6d072b215251379e780d3f23`, not the migrated working tree:
 
 ```sh
-PYTHONPATH=/path/to/clean/baseline python benchmark/model_retry/replay.py --output /tmp/model-retry-baseline.json
+PYTHONPATH=/path/to/clean/baseline python test_scripts/model_retry/replay.py --output /tmp/model-retry-baseline.json
 ```
 
 The recorded baseline uses commit `611f5c469b2bb8dc6d072b215251379e780d3f23` and
@@ -91,6 +91,53 @@ handlers, Phase-2 failure handling with in-memory storage, and the actual metric
 router/exporter. They do not prove native-engine E2E or durable crash budgets.
 The baseline report is historical evidence, not a measurement of this branch.
 
+## Review corrections after PR head `176fa9304`
+
+The owner now recognizes structured `insufficient_quota` codes/types and removes
+exhausted credentials from the call. VikingDB sync/async HTTP errors preserve the
+response instead of returning empty vectors. Semantic overview and file-summary
+paths propagate terminal model errors, cancel and drain failed batches, and settle
+the consumer without requeue. Shared workers restore each executor's workload,
+stage and deadline. Sync calls reject results that arrive after the deadline;
+interrupting blocking I/O still depends on the transport timeout.
+
+Validation on macOS/Python 3.13.5, OpenAI 2.24.0, google-genai 2.25.0, httpx 0.28.1:
+
+- Before the fix, 47 assertions failed across quota, VikingDB transport, Semantic
+  outcome/context and sync deadline cases; the pre-deadline control passed.
+- Final expanded regression: **600 passed, 2 failed, 2 skipped**. This includes
+  42 Gemini tests, the provider transport suites, owner/breaker/credential
+  tests, Session resume, Semantic consumers/executors, collection schemas and
+  metrics. Both failures reproduce on clean pre-fix head `176fa9304`: the
+  `test_memory_directory_summarizes_all_uncached_files` and
+  `test_memory_directory_vectorizes_changed_files_with_generated_summary`
+  fixtures omit the existing `total_files` argument.
+- `test_semantic_processor_permanent_storage_error.py` was excluded after its
+  collection failed on an import of the already-removed `semantic_dag` module;
+  that import is also present in the pre-fix head.
+- All 14 standalone prototype cases pass from the relocated directory. Ruff
+  checks/formatting and `git diff --check` pass. Mypy on the five changed source
+  files reports the same 36 diagnostics as `176fa9304`, with no additions.
+- Native E2E stops at preflight: `native vector engine is unavailable`. No native
+  or STG success is claimed for this correction; the earlier native results
+  below remain historical evidence for their recorded revision.
+
+The expanded command uses an **absolute** `PYTHONPATH` so the clean-process queue
+import check can change directories without losing the source checkout:
+
+```sh
+PYTHONPATH="$PWD" python -m pytest --no-cov -q --tb=short \
+  tests/unit/test_model_call.py tests/unit/test_model_retry.py \
+  tests/unit/test_circuit_breaker.py tests/unit/test_failover_embedder_permanent_advance.py \
+  tests/unit/test_gemini_embedder.py tests/unit/session/test_session_commit_resume.py \
+  tests/models/test_model_retry_transport.py tests/models/test_cohere_retry_transport.py \
+  tests/models/test_gemini_retry_transport.py tests/models/test_minimax_retry_transport.py \
+  tests/storage/test_model_retry_terminal.py tests/storage/test_collection_schemas.py \
+  tests/storage/test_queue_manager.py tests/metrics/integration/test_model_retry.py \
+  $(rg --files tests/storage -g 'test_semantic*.py' \
+    -g '!test_semantic_processor_permanent_storage_error.py')
+```
+
 ## Native service and queue validation
 
 `native_e2e.py` runs an actual in-process OpenViking service with native RAGFS,
@@ -100,7 +147,7 @@ runtime with working native bindings, and uses the real OpenAI SDK against a
 loopback-only HTTP fixture. No real provider credentials are required.
 
 ```sh
-PYTHONPATH=. python benchmark/model_retry/native_e2e.py \
+PYTHONPATH=. python test_scripts/model_retry/native_e2e.py \
   --case resource-success --output /tmp/resource-success.json
 ```
 

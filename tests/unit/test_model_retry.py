@@ -145,6 +145,21 @@ def test_classify_account_quota_exceeded():
     assert classify_api_error(error) == ERROR_CLASS_QUOTA_EXCEEDED
 
 
+@pytest.mark.parametrize("field", ["code", "type"])
+@pytest.mark.parametrize("shape", ["attribute", "body", "nested_body"])
+def test_structured_quota_classification_without_message_hint(field, shape):
+    error = RuntimeError("TooManyRequests")
+    error.status_code = 429
+    if shape == "attribute":
+        setattr(error, field, "insufficient_quota")
+    else:
+        body = {field: "insufficient_quota"}
+        error.body = {"error": body} if shape == "nested_body" else body
+    wrapper = RuntimeError("request failed")
+    wrapper.__cause__ = error
+    assert classify_api_error(wrapper) == ERROR_CLASS_QUOTA_EXCEEDED
+
+
 def test_classify_quota_limit():
     """'quota limit' is classified as quota_exceeded."""
     assert classify_api_error(RuntimeError("quota limit reached")) == ERROR_CLASS_QUOTA_EXCEEDED

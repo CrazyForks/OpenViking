@@ -4,13 +4,14 @@
 
 import httpx
 import pytest
+import requests
 
 from openviking.models.embedder.base import FailoverEmbedder
 from openviking.models.embedder.volcengine_embedders import VolcengineDenseEmbedder
 from openviking.models.vlm.backends.openai_vlm import OpenAIVLM
 from openviking.models.vlm.backends.volcengine_vlm import VolcEngineVLM
 from openviking.models.vlm.base import MultiCredentialVLM
-from openviking.utils.model_call import is_model_call_error, model_workload
+from openviking.utils.model_call import get_model_call_error, is_model_call_error, model_workload
 
 
 class FaultTransport:
@@ -56,6 +57,8 @@ class FaultTransport:
         (401, "Unauthorized", "offline", 1, 1),
         (400, "ContentSafety", "offline", 2, 1),
         (429, "AccountQuotaExceeded", "offline", 1, 1),
+        (429, "insufficient_quota", "offline", 1, 1),
+        (429, "insufficient_quota", "offline", 2, 2),
     ],
 )
 async def test_http_attempt_cap(
@@ -144,3 +147,95 @@ async def test_two_bad_routes_then_recovery_preserves_result_and_active_credenti
     finally:
         for c in clients:
             await c.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("kind", ["dense", "sparse", "hybrid"])
+@pytest.mark.parametrize(
+    "status,retry_after,recover,expected,reason",
+    [
+        (429, "0", False, 4, "max_attempts"),
+        (503, "0", False, 4, "max_attempts"),
+        (401, "0", False, 1, "auth"),
+        (429, "60", False, 1, "backoff_limit"),
+        (429, "0", True, 2, None),
+    ],
+)
+async def test_vikingdb_http_failures_reach_retry_owner(
+    monkeypatch, asynchronous, kind, status, retry_after, recover, expected, reason
+):
+    import json
+
+    from openviking.models.embedder.vikingdb_embedders import (
+        VikingDBDenseEmbedder,
+        VikingDBHybridEmbedder,
+        VikingDBSparseEmbedder,
+    )
+
+    sent = []
+    error_body = {"error": {"message": "provider rejected request"}}
+
+    def response_data():
+        code = 200 if recover and sent else status
+        sent.append(code)
+        dense_field = "dense" if kind == "hybrid" else "dense_embedding"
+        body = (
+            {"result": {"data": [{dense_field: [0.1, 0.2], "sparse": {"a": 1.0}}]}}
+            if code == 200
+            else error_body
+        )
+        return code, json.dumps(body).encode()
+
+    class Transport(requests.adapters.BaseAdapter):
+        def send(self, request, **kwargs):
+            response = requests.Response()
+            response.status_code, response._content = response_data()
+            response.request = request
+            response.url = request.url
+            response.headers["Retry-After"] = retry_after
+            return response
+
+        def close(self):
+            pass
+
+    def async_transport(request):
+        code, content = response_data()
+        return httpx.Response(code, content=content, headers={"Retry-After": retry_after})
+
+    model = {
+        "dense": VikingDBDenseEmbedder,
+        "sparse": VikingDBSparseEmbedder,
+        "hybrid": VikingDBHybridEmbedder,
+    }[kind]("fixture", ak="fixture", sk="fixture", host="fixture.invalid")
+    model.client._session.mount("https://", Transport())
+    monkeypatch.setattr("openviking.utils.model_call.random.uniform", lambda *_: 0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(async_transport)) as client:
+        monkeypatch.setattr(model._async_client_cache, "get", lambda factory: client)
+        try:
+            with model_workload("add_resource"):
+                if reason is None:
+                    result = (
+                        await model.embed_async("fixture")
+                        if asynchronous
+                        else model.embed("fixture")
+                    )
+                    if kind != "sparse":
+                        assert result.dense_vector == [0.1, 0.2]
+                    if kind != "dense":
+                        assert result.sparse_vector == {"a": 1.0}
+                else:
+                    error_type = httpx.HTTPStatusError if asynchronous else requests.HTTPError
+                    with pytest.raises(error_type) as caught:
+                        if asynchronous:
+                            await model.embed_async("fixture")
+                        else:
+                            model.embed("fixture")
+                    terminal = get_model_call_error(caught.value)
+                    assert (terminal.reason, terminal.attempts) == (reason, expected)
+                    assert caught.value.response.status_code == status
+                    assert caught.value.response.json() == error_body
+                    assert caught.value.response.headers["Retry-After"] == retry_after
+            assert len(sent) == expected
+        finally:
+            model.client._session.close()
