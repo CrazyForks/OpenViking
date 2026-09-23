@@ -397,6 +397,10 @@ async def test_ls_and_tree_forward_pagination_to_filesystem_service(monkeypatch)
     )
     await filesystem.tree(
         uri="viking://resources",
+        directories_only=True,
+        include_abstract=False,
+        include_overview=True,
+        overview_limit=512,
         offset=3,
         limit=5,
         _ctx=RequestContext(user=UserIdentifier("acct", "alice"), role=Role.USER),
@@ -407,3 +411,7 @@ async def test_ls_and_tree_forward_pagination_to_filesystem_service(monkeypatch)
     assert seen["ls"]["node_limit"] == 9
     assert seen["tree"]["offset"] == 3
     assert seen["tree"]["node_limit"] == 5
+    assert seen["tree"]["directories_only"] is True
+    assert seen["tree"]["include_abstract"] is False
+    assert seen["tree"]["include_overview"] is True
+    assert seen["tree"]["overview_limit"] == 512

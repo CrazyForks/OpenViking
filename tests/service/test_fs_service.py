@@ -837,6 +837,45 @@ async def test_tree_tag_filter_keeps_zero_node_limit_unbounded(request_context):
 
 
 @pytest.mark.asyncio
+async def test_tree_combines_directory_filter_tags_and_summary_enrichment(request_context):
+    directory = {"uri": "viking://resources/docs", "isDir": True}
+    finalized = [{**directory, "abstract": "L0", "overview": "L1"}]
+    viking_fs = SimpleNamespace(
+        tree=AsyncMock(return_value=[directory]),
+        _finalize_listing_entries=AsyncMock(return_value=finalized),
+    )
+
+    class FakeVikingDB:
+        async def filter(self, **_kwargs):
+            return [
+                {
+                    "uri": directory["uri"],
+                    "level": 0,
+                    "search_tags": ["team=search"],
+                }
+            ]
+
+    service = FSService(viking_fs=viking_fs, vikingdb=FakeVikingDB())
+    result = await service.tree(
+        "viking://resources",
+        ctx=request_context,
+        tags=["team=search"],
+        directories_only=True,
+        include_abstract=True,
+        include_overview=True,
+        overview_limit=512,
+    )
+
+    assert result == finalized
+    assert viking_fs.tree.await_args.kwargs["directories_only"] is True
+    assert viking_fs.tree.await_args.kwargs["output"] == "original"
+    finalize_kwargs = viking_fs._finalize_listing_entries.await_args.kwargs
+    assert finalize_kwargs["include_abstract"] is True
+    assert finalize_kwargs["include_overview"] is True
+    assert finalize_kwargs["overview_limit"] == 512
+
+
+@pytest.mark.asyncio
 async def test_resource_rm_enqueues_parent_delete_refresh_and_waits(request_context):
     viking_fs = _FakeVikingFS()
     service = FSService(viking_fs=viking_fs)

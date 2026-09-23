@@ -441,6 +441,37 @@ async def test_iter_visible_tree_entries_offset_and_node_limit_after_acl(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_iter_visible_tree_entries_filters_directories_before_pagination(monkeypatch, fs):
+    entries = [
+        make_entry(
+            f"/local/test_account/resources/{name}",
+            name,
+            is_dir=is_dir,
+        )
+        for name, is_dir in [
+            ("file-a.md", False),
+            ("dir-a", True),
+            ("file-b.md", False),
+            ("dir-b", True),
+            ("dir-c", True),
+        ]
+    ]
+    patch_tree_env(monkeypatch, fs, entries)
+
+    results = []
+    async for entry, _entry_uri in fs._iter_visible_tree_entries(
+        "viking://resources",
+        directories_only=True,
+        offset=1,
+        node_limit=2,
+        ctx=_default_ctx(),
+    ):
+        results.append(entry)
+
+    assert [entry["info"]["name"] for entry in results] == ["dir-b", "dir-c"]
+
+
+@pytest.mark.asyncio
 async def test_iter_visible_tree_entries_reads_next_page_when_filtering_is_sparse(monkeypatch, fs):
     """PY-ITER-004: sparse visible results advance the RagFS offset."""
     node_limit = 2
@@ -594,6 +625,7 @@ async def test_tree_original_dfs_order(monkeypatch, fs):
         ),
     ]
     patch_tree_env(monkeypatch, fs, entries)
+
     async def acl_enabled(_account_id):
         return True
 
@@ -724,6 +756,7 @@ async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
     monkeypatch.setattr(fs, "_is_accessible", lambda _uri, _ctx: True)
     monkeypatch.setattr(fs, "_batch_fetch_abstracts", default_batch_fetch)
     monkeypatch.setattr(viking_fs_module, "datetime", _FixedDatetime)
+
     async def acl_enabled(_account_id):
         return True
 
@@ -832,3 +865,83 @@ async def test_tree_agent_node_limit_before_enrichment(monkeypatch, fs):
     )
     assert len(result) == 2
     assert enriched_count == 2
+
+
+@pytest.mark.asyncio
+async def test_tree_explicit_summary_controls_apply_after_node_limit(monkeypatch, fs):
+    entries = [
+        make_entry(f"/local/test_account/resources/{name}", name, is_dir=True)
+        for name in ["a", "b", "c"]
+    ]
+    abstract_calls = []
+    overview_calls = []
+    patch_tree_env(monkeypatch, fs, entries)
+
+    async def fake_abstracts(entries_arg, limit, **_kwargs):
+        abstract_calls.append(([entry["uri"] for entry in entries_arg], limit))
+        for entry in entries_arg:
+            entry["abstract"] = "abstract"
+
+    async def fake_overviews(entries_arg, limit, **_kwargs):
+        overview_calls.append(([entry["uri"] for entry in entries_arg], limit))
+        for entry in entries_arg:
+            entry["overview"] = "overview"
+
+    monkeypatch.setattr(fs, "_batch_fetch_abstracts", fake_abstracts)
+    monkeypatch.setattr(fs, "_batch_fetch_overviews", fake_overviews)
+
+    result = await fs.tree(
+        "viking://resources",
+        output="original",
+        include_abstract=True,
+        include_overview=True,
+        abs_limit=64,
+        overview_limit=512,
+        node_limit=2,
+        ctx=_default_ctx(),
+    )
+
+    assert len(result) == 2
+    assert abstract_calls == [(["viking://resources/a", "viking://resources/b"], 64)]
+    assert overview_calls == [(["viking://resources/a", "viking://resources/b"], 512)]
+    assert all(entry["abstract"] == "abstract" for entry in result)
+    assert all(entry["overview"] == "overview" for entry in result)
+
+
+@pytest.mark.asyncio
+async def test_tree_explicit_false_disables_agent_abstracts(monkeypatch, fs):
+    entries = [make_entry("/local/test_account/resources/sub", "sub", is_dir=True)]
+    patch_tree_env(monkeypatch, fs, entries)
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("abstract enrichment must be disabled")
+
+    monkeypatch.setattr(fs, "_batch_fetch_abstracts", fail_if_called)
+
+    result = await fs.tree(
+        "viking://resources",
+        output="agent",
+        include_abstract=False,
+        ctx=_default_ctx(),
+    )
+
+    assert "abstract" not in result[0]
+
+
+@pytest.mark.asyncio
+async def test_batch_fetch_overviews_only_enriches_directories_and_truncates(monkeypatch, fs):
+    entries = [
+        {"uri": "viking://resources/docs", "isDir": True},
+        {"uri": "viking://resources/readme.md", "isDir": False},
+    ]
+
+    async def fake_read_overview(uri, **_kwargs):
+        assert uri == "viking://resources/docs"
+        return "abcdefgh"
+
+    monkeypatch.setattr(fs, "_read_overview_for_known_dir", fake_read_overview)
+
+    await fs._batch_fetch_overviews(entries, overview_limit=5, ctx=_default_ctx())
+
+    assert entries[0]["overview"] == "ab..."
+    assert entries[1]["overview"] == ""

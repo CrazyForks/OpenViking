@@ -527,6 +527,7 @@ class _AccessMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        directories_only: bool = False,
     ):
         """Yield one visible tree page after namespace and ACL filtering."""
         real_ctx = self._ctx_or_default(ctx)
@@ -574,6 +575,8 @@ class _AccessMixin:
                     real_ctx,
                     acl_enabled=acl_enabled,
                 ):
+                    continue
+                if directories_only and not entry.get("info", {}).get("isDir", False):
                     continue
                 if not await self._read_path_visible(uri, entry["path"], primary_path, real_ctx):
                     continue
