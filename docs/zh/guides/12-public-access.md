@@ -127,6 +127,7 @@ OV 服务的 1933 端口。
 ```nginx
 server {
     listen 443 ssl;
+    http2 on;  # nginx < 1.25.1：删除此行，改用 `listen 443 ssl http2;`
     server_name ov.your-domain.com;
 
     ssl_certificate     /etc/letsencrypt/live/ov.your-domain.com/fullchain.pem;

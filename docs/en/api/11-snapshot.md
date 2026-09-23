@@ -456,6 +456,7 @@ curl -X POST "http://localhost:1933/api/v1/snapshot/restore" \
 **CLI**
 
 ```bash
+# Positional args are <source_commit> then <project_dir>
 # Preview first
 ov snapshot restore 3f2a1b9c viking://resources/my_project --dry-run -o json
 

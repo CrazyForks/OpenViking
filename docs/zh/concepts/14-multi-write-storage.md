@@ -40,7 +40,7 @@ backup 未配置 `operations` 时默认参与写入。这样可以用最少配�
 
 异步模式下，backup 可能落后于 primary，恢复时间取决于后端可用性和重试结果。同步模式下，可以通过 `write_ack_count` 和 `write_ack_timeout_ms` 控制需要等待多少 backup 确认，以及等待多久。
 
-同步模式未达到所需确认数时会返回错误，但 primary 可能已经写入成功，不会因此自动回滚。未同步的副本需结合同步状态和重试结果检查，见[多写存储指南](../guides/13-multi-write-storage.md)。
+同步模式未达到所需确认数时会返回错误，但 primary 可能已经写入成功，不会因此自动回滚。未确认的 backup 仍会在后台重试；同步状态的检查方法见[多写存储指南](../guides/13-multi-write-storage.md)。
 
 ## 读取路径
 

@@ -75,7 +75,7 @@ OpenViking 通过 Rust 绑定（`ragfs_python` / `RAGFSBindingClient`）在 Pyth
 
 ### 遇到 "AGFS binding library not found" 错误怎么办？
 
-这通常表示 RAGFS 共享库缺失或无法加载。先检查 Python 版本和平台是否有对应的预编译 wheel，并尝试重新安装。只有平台缺少 wheel 或需要修改源码时才[从源码构建](../getting-started/04-setup-for-agent.md)，届时需准备原生编译工具链。
+这通常表示 RAGFS 共享库缺失或无法加载。先检查 Python 版本和平台是否有对应的预编译 wheel，并尝试重新安装。只有平台缺少 wheel 或需要修改源码时才[从源码构建](https://github.com/volcengine/OpenViking/blob/main/CONTRIBUTING_CN.md)，届时需准备原生编译工具链。
 
 ### 如何安装 OpenViking？
 
@@ -162,7 +162,7 @@ Embedding、VLM、存储等服务配置由 OpenViking Server 通过 `ov.conf` �
 await client.add_resource(
     path="./document.pdf",
     parent="viking://resources",  # 存到这个目录下面，文件名由来源决定
-    options={"reason": "项目技术文档"},  # 描述导入原因，供资源相关记忆提取使用
+    options={"reason": "项目技术文档"},  # 未传 instruction 时用于生成 L0/L1 摘要，也用于资源相关的记忆提取
 )
 
 # 添加网页
@@ -279,7 +279,7 @@ overview = await client.overview(uri="viking://resources")
 1. **评估 Rerank 模型**：对代表性查询比较排序结果，再决定是否启用
 2. **检查摘要**：确认 L0/L1 是否准确反映来源；需要调整时使用导入的 `instruction` 或摘要模板
 3. **组织目录结构**：导入时用 `parent` 指定现有父目录，或用 `to` 指定最终 URI
-4. **使用会话上下文**：需要查询规划时启用意图分析，并向 `search()` 传入有内容的会话
+4. **使用会话上下文**：保持 `retrieval.enable_intent` 开启（默认），并向 `search()` 传入有内容的会话
 5. **选择合适的 Embedding 模式**：多模态内容使用 `multimodal` 输入
 
 ### 检索结果的分数是如何计算的？

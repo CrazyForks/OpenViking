@@ -124,7 +124,7 @@ scrape_configs:
 | `context_type` | retrieval context type | `resource` |
 | `provider` | model or external service provider | `volcengine` |
 | `model_name` | model name | `doubao-seed-1-8-251228` |
-| `stage` | stage label (defined by each metric family) | resource stage: `parse`; token attribution stage: `embed_query` |
+| `stage` | stage label (defined by each metric family) | resource stage: `parse_artifact`; token attribution stage: `embed_query` |
 | `valid` | whether the current sample is fresh and valid | `1` / `0` |
 
 Notes:
@@ -132,7 +132,7 @@ Notes:
 - `account_id` is only enabled on controlled allowlisted metric families to prevent high-cardinality growth
 - `valid=0` means the current state/probe sample is a fallback or stale value, not that the label itself is malformed
 - `stage` semantics depend on the metric family:
-  - `openviking_resource_stage_*`: resource ingestion pipeline stages (for example `parse/target_resolve/content_commit`)
+  - `openviking_resource_stage_*`: resource ingestion pipeline stages (for example `parse_artifact/target_resolve/content_commit`)
   - `openviking_operation_tokens_total`: token attribution stages (for example `embed_query/rerank/vlm`)
 
 ## Key Metric Families
@@ -170,8 +170,8 @@ Typical usage:
 
 Typical `stage` values include:
 
-- `request`
-- `parse`
+- `source_prepare`
+- `parse_artifact`
 - `target_resolve`
 - `update_plan`
 - `content_commit`

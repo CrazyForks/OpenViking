@@ -1063,7 +1063,7 @@ POST /v1/rollouts/execute
 - `policy_set.root_uri` 告诉 runtime 当前 experiences 根目录；tau2 rollout 期间
   VikingBot 会通过 OpenViking recall 读取这里的最新经验。
 - `execution_context.policy_snapshot_id` 必须原样写入返回的 `Rollout.policy_snapshot_id`，
-  用于关联这次 rollout 的训练批次。若 runtime 读取的是实时 memories，这个标识本身不能保证使用了不可变的内容快照；可复现评测还需固定数据版本并隔离并发写入。
+  用于追踪这次 rollout 使用的是哪次 policy snapshot（rollout 前 ExperienceSet 的内容哈希）。若 runtime 读取的是实时 memories，这个标识本身不能保证使用了不可变的内容快照；可复现评测还需固定数据版本并隔离并发写入。
 
 tau2 中对应实现是：
 

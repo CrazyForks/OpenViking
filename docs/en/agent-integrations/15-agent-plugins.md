@@ -36,7 +36,7 @@ OpenViking already speaks streamable HTTP at `/mcp`, but a `streamable-http` ent
 
 ## Credential resolution
 
-This package resolves credentials from the following sources. It shares credential files with the CLI; plugin-specific fallbacks are listed explicitly:
+This package resolves credentials from the following sources, highest to lowest priority. It shares credential files with the CLI; plugin-specific fallbacks are listed explicitly:
 
 1. Environment variables: `OPENVIKING_URL` (or `OPENVIKING_BASE_URL`), `OPENVIKING_MCP_URL`, `OPENVIKING_API_KEY` (or `OPENVIKING_BEARER_TOKEN`), `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`, `OPENVIKING_PEER_ID`, `OPENVIKING_AUTH_MODE`
 2. `~/.openviking/ovcli.conf` (`url`, `api_key`, `account` / `account_id`, `user` / `user_id`, `actor_peer_id` / `peer_id`), then its `plugin.agent_plugins` and shared `plugin` keys (`apiKey`, `accountId`, `userId`, `authMode`) — override the path with `OPENVIKING_CLI_CONFIG_FILE`

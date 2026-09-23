@@ -12,7 +12,7 @@ OpenViking manages three types of context: resources provide reference material,
 
 ## Example Setup
 
-The examples below use the synchronous Python SDK and an existing server. Imports and session commits can return before indexing finishes; this helper polls the specific task before dependent searches. A polling timeout does not cancel the server task.
+The examples below use the synchronous Python SDK and an existing server. `add_resource` and `add_skill` take `wait=True` to block until processing finishes. Session commits return before memory extraction finishes and have no built-in wait, so this helper polls the commit task before dependent searches. A polling timeout does not cancel the server task.
 
 ```python
 import time
@@ -25,6 +25,8 @@ def wait_for_task(task_id):
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         task = client.get_task(task_id)
+        if task is None:
+            raise RuntimeError(f"Task {task_id} not found")
         if task["status"] == "completed":
             return task
         if task["status"] in {"failed", "cancelled"}:
@@ -53,12 +55,12 @@ Resources are external knowledge that Agents can reference.
 
 ```python
 # Add resource
-added = client.add_resource(
+client.add_resource(
     path="https://docs.example.com/api.pdf",
     options={"reason": "API documentation"},
+    wait=True,
+    timeout=300,
 )
-
-wait_for_task(added["task_id"])
 
 # Search resources
 results = client.find(
@@ -159,15 +161,15 @@ The table below lists the design categories for shared capabilities. Skills are 
 
 ```python
 # Add skill (defaults to viking://~/skills/)
-added = client.add_skill(
+client.add_skill(
     data={
         "name": "search-web",
         "description": "Search the web for information",
         "content": "# search-web\n...",
     },
+    wait=True,
+    timeout=300,
 )
-
-wait_for_task(added["task_id"])
 
 # Search user skills
 results = client.find(

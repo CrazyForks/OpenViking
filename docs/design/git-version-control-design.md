@@ -87,9 +87,9 @@ GitService · ObjectStore · RefStore"]
     MFS --> Plugins
     Plugins --> Local
     Plugins --> S3
-    GitMod -- "直接持有 struct
+    GitMod -- "tokio::fs
 (不经过 MountableFS)" --> Local
-    GitMod -- "直接持有 struct
+    GitMod -- "aws_sdk_s3::Client
 (不经过 MountableFS)" --> S3
 ```
 

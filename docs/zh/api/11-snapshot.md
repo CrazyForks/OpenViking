@@ -456,6 +456,7 @@ curl -X POST "http://localhost:1933/api/v1/snapshot/restore" \
 **CLI**
 
 ```bash
+# 位置参数依次为 <source_commit> <project_dir>
 # 先预演
 ov snapshot restore 3f2a1b9c viking://resources/my_project --dry-run -o json
 

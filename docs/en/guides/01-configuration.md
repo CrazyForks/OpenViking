@@ -458,7 +458,7 @@ Get your API key at https://jina.ai
 
 Text models include `voyage-4-lite`, `voyage-4`, and `voyage-4-large`. See [Voyage Text Embeddings](https://docs.voyageai.com/docs/embeddings) for available models and output dimensions.
 
-If `dimension` is omitted, OpenViking uses its built-in model table, falling back to 1024 for an unrecognized model. Set a supported output dimension explicitly for a new model. The current adapter sends plain text `input`; it does not send Voyage's `input_type`, expose quantized output, or implement specialized contextual embedding calls.
+If `dimension` is omitted, OpenViking uses its built-in model table (`voyage-3`, `voyage-3-large`, `voyage-3.5`, `voyage-3.5-lite`, `voyage-4`, `voyage-4-lite`, `voyage-4-large`, `voyage-code-3`, `voyage-context-3`, `voyage-finance-2`, `voyage-law-2`), falling back to 1024 for an unrecognized model. Set a supported output dimension explicitly for a new model. The current adapter sends plain text `input`; it does not send Voyage's `input_type`, expose quantized output, or implement specialized contextual embedding calls.
 
 **Local deployment (GGUF/MLX):** Jina embedding models are open-weight and available in GGUF and MLX formats on [Hugging Face](https://huggingface.co/jinaai). You can run them locally with any OpenAI-compatible server (e.g. llama.cpp, MLX, vLLM) and point the `api_base` to your local endpoint:
 
@@ -1700,7 +1700,8 @@ Config file for the HTTP client (`SyncHTTPClient` / `AsyncHTTPClient`) and CLI t
 | Field | Description | Default |
 |-------|-------------|---------|
 | `url` | Server address | (required) |
-| `api_key` | User/admin key for data access; CLI administration uses a separate `root_api_key` with `--sudo` | `null` (no auth) |
+| `api_key` | Normally a user/admin key for data access. A root key here only works for admin APIs in API Key mode | `null` (no auth) |
+| `root_api_key` | Root key used when a command runs with `--sudo`; also used when `api_key` is unset | `null` |
 | `account` | Optional trusted-mode account identity header value | `null` |
 | `user` | Optional trusted-mode user identity header value | `null` |
 | `profile` | Whether to append `profile=1` to HTTP requests by default. Applies to both the Python HTTP client and the `ov` CLI; `ov --profile` can enable it per invocation. Actual effect still depends on the server enabling `server.profile_enabled`. | `false` |

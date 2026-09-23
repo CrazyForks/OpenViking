@@ -133,7 +133,7 @@ Explain the processing steps and link to the implementation, router, or CLI hand
 
 ### API Reference Section
 
-Use the following sections for each API. Add implementation details after the response contract when they help explain behavior.
+Use the following sections for each API. Add implementation details after the response contract when they help explain behavior. Existing pages still use the legacy `API Implementation Overview` section with code entries; follow this structure for new pages and when migrating a page.
 
 <a id="1-api-implementation-introduction"></a>
 
@@ -163,9 +163,8 @@ When an operation presents all transports together, prefer this order:
 Example tabs are generated from bold labels. Put each invocation label in its own
 paragraph and use one of these fixed base forms: `**Python SDK**`, `**TypeScript SDK**`,
 `**Go SDK**`, `**HTTP API**`, or `**CLI**`. When a transport qualifier is useful,
-put it inside the same bold label with ASCII parentheses, for example
-`**Python SDK (Async)**`. Do not put the qualifier after the bold label
-or use full-width parentheses. Show only surfaces that are actually
+put it inside the same bold label, for example `**Python HTTP SDK**`.
+Do not put the qualifier after the bold label. Show only surfaces that are actually
 implemented. If an SDK or CLI does not expose the capability, omit that tab and
 briefly identify the available alternative. Do not wrap a handwritten HTTP request
 and present it as a nonexistent SDK method.
@@ -202,7 +201,7 @@ Add resources to the knowledge base, supporting various sources such as local fi
 **Notes**
 
 - SDK/CLI can directly pass local paths; raw HTTP requires `temp_upload` first
-- An existing `to` target is replaced. For a directory, files absent from the new import are removed. Use `parent` to add a new resource below an existing directory.
+- An existing `to` target is replaced. For a directory, files absent from the new import may be removed; unchanged content is reused for semantic and vector processing. Use `parent` to add a new resource below an existing directory.
 
 #### 3. Usage Examples
 

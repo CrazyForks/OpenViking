@@ -6,7 +6,7 @@ Give TRAE, TRAE CN, and TraeCode CLI 2.0 long-term memory across projects and se
 
 Prerequisites: macOS or Linux, Node.js 18+, and a TRAE/TRAE CN release that supports the `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `Stop` Hooks. TraeCode CLI 2.0 uses the Codex-compatible plugin format directly. The installer guides you through the OpenViking connection settings.
 
-When prompted for the connection, Volcengine Cloud users should select **Volcengine OpenViking Cloud** and enter their API key. Select **Self-hosted / local** for your own server, whether it runs on this machine or remotely, and enter its reachable URL.
+When prompted for the connection, Volcengine Cloud users should select **Volcengine OpenViking Cloud** and enter their API key. Select **Self-hosted / local** for a server on this machine (`http://127.0.0.1:1933`); for a remote self-hosted server, select **Custom URL / keep current** and enter its URL.
 
 ```bash
 # TRAE
@@ -41,9 +41,21 @@ Quit and restart the corresponding client after installation.
 
 ### TraeCode CLI 2.0: trust the hooks on first launch
 
-TraeCode CLI 2.0 uses the Codex-format plugin. In `/hooks`, review the OpenViking commands, then trust and enable the hooks you want to use. Confirm `openviking-memory` is enabled in `/plugins`. Modified definitions may need review again. MCP connectivity alone does not verify recall or capture; see the [Codex hook setup](04-codex.md#first-launch-trust-the-hooks).
+TraeCode CLI 2.0 uses the Codex-format plugin. Starting `trae-cli` shows a hook review prompt similar to the one below; the exact layout varies by version. Pick **Trust all and continue**; *Continue without trusting* leaves the hooks off.
 
-TRAE and TRAE CN use the installed `hooks.json`; restart the corresponding client after installation.
+```text
+Hooks need review
+6 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+
+  1. Review hooks
+> 2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+```
+
+You can also use `/hooks` to review the OpenViking commands and trust and enable the hooks you want to use. Confirm `openviking-memory` is enabled in `/plugins`. Modified definitions may need review again. MCP connectivity alone does not verify recall or capture; see the [Codex hook setup](04-codex.md#first-launch-trust-the-hooks).
+
+TRAE and TRAE CN use the installed `hooks.json` and need no hook approval; restart the corresponding client after installation.
 
 ## What gets installed
 

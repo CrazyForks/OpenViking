@@ -30,7 +30,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 |---|---|
 | 没有上下文注入，也没有 OpenViking 工具 | 执行 `dsh --profile web --dump-config`，确认输出中包含 `openviking-memory`；若缺失，重新运行安装器或执行 `dsh plugin --profile web add @openviking/dsh-memory-plugin` |
 | 插件安装到了错误的 profile | 安装器默认使用 `web`；通过 `--dsh-profile <name>` 重新运行 |
-| 安装时报 `ERESOLVE @deepseek-ai/dsh-*` | 核对 DSH 版本与插件声明的依赖，按插件 README 对齐宿主包版本 |
+| 安装时报 `ERESOLVE @deepseek-ai/dsh-*` | 使用受支持的 `@deepseek-ai/dsh` 版本（`0.1.0-rc.6`、`0.1.5-rc.1`、`0.1.5-rc.2` 或稳定版 `0.1.x`），并让所有 `@deepseek-ai/dsh-*` 宿主包保持同一版本 |
 | 安装时提示包不在 npm registry 中 | 检查该 profile 的 pnpm 是否设置了 24 小时的最小发布年龄；可稍后重试，或把精确版本加入 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` |
 | 无法召回历史记忆 | 先执行 `curl "{{OPENVIKING_BASE_URL}}/health"` 确认服务端正常；再检查端点配置，并确认 prompt 不少于 3 个字符 |
 | OpenViking 返回 401 / 403 | 检查 API Key；可信模式部署还需检查 `OPENVIKING_ACCOUNT` 与 `OPENVIKING_USER` |

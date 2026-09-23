@@ -33,7 +33,19 @@ codex
 
 ### 首次启动：信任 hooks
 
-安装插件不会自动信任它的 hooks。在 `/hooks` 中检查 OpenViking 命令，信任并启用准备使用的条目；同时在 `/plugins` 中确认 `openviking-memory` 已启用。当前插件声明了 6 个 hook，新增或修改定义后需要重新审阅。不同 Codex 版本的提示界面可能不同，规则见[官方 hook 信任说明](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)。
+安装插件不会自动信任它的 hooks。首次启动时 Codex 会显示类似下面的审阅提示，具体界面随 Codex 版本变化。选 **Trust all and continue**，或先选 **Review hooks** 查看命令。选 *Continue without trusting* 后 hooks 不会运行，直到在 `/hooks` 中开启。
+
+```text
+Hooks need review
+6 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+
+  1. Review hooks
+> 2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+```
+
+也可以在 `/hooks` 中检查 OpenViking 命令，信任并启用准备使用的条目；同时在 `/plugins` 中确认 `openviking-memory` 已启用。当前插件声明了 6 个 hook，新增或修改定义后需要重新审阅，规则见[官方 hook 信任说明](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)。
 
 Hook 关闭时，MCP 工具仍可能正常使用。自动召回需要 `UserPromptSubmit`，捕获需要 `Stop`，其余生命周期提交见下表。之前跳过设置的，可以回到 `/hooks` 启用相关条目。
 

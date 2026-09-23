@@ -457,7 +457,7 @@ OpenAI 已于 2026 年 8 月 31 日[停止在 ChatGPT 登录的 Codex 中提供 
 
 可使用 `voyage-4-lite`、`voyage-4`、`voyage-4-large` 等文本模型。可用模型与维度见 [Voyage 文本 Embedding 文档](https://docs.voyageai.com/docs/embeddings)。
 
-省略 `dimension` 时，OpenViking 按内置模型表选择维度；未识别的模型回退为 1024。使用新模型时，请显式填写其支持的输出维度。当前适配器发送普通文本 `input`，不传递 Voyage 的 `input_type`，也不支持量化输出或需要专用上下文接口的调用方式。
+省略 `dimension` 时，OpenViking 按内置模型表（`voyage-3`、`voyage-3-large`、`voyage-3.5`、`voyage-3.5-lite`、`voyage-4`、`voyage-4-lite`、`voyage-4-large`、`voyage-code-3`、`voyage-context-3`、`voyage-finance-2`、`voyage-law-2`）选择维度；未识别的模型回退为 1024。使用新模型时，请显式填写其支持的输出维度。当前适配器发送普通文本 `input`，不传递 Voyage 的 `input_type`，也不支持量化输出或需要专用上下文接口的调用方式。
 
 **本地部署 (GGUF/MLX):** Jina 嵌入模型是开源的, 在 [Hugging Face](https://huggingface.co/jinaai) 上提供 GGUF 和 MLX 格式。可以使用任何 OpenAI 兼容的推理服务器 (如 llama.cpp、MLX、vLLM) 本地运行, 并将 `api_base` 指向本地端点:
 
@@ -1695,7 +1695,8 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | `url` | 服务端地址 | （必填） |
-| `api_key` | 日常数据访问使用的 user/admin key；CLI 管理操作另用 `root_api_key` 配合 `--sudo` | `null`（无认证） |
+| `api_key` | 通常填写用于数据访问的 user/admin key。API Key 模式下，这里填 root key 只能调用管理 API | `null`（无认证） |
+| `root_api_key` | 命令带 `--sudo` 时使用的 root key；`api_key` 未设置时也会使用它 | `null` |
 | `account` | 可选的 trusted 模式 account 身份 header | `null` |
 | `user` | 可选的 trusted 模式 user 身份 header | `null` |
 | `profile` | 是否默认给 HTTP 请求追加 `profile=1`。对 Python HTTP client 和 `ov` CLI 都生效；也可通过 CLI 的 `--profile` 单次开启。是否真正生效还取决于服务端是否开启 `server.profile_enabled`。 | `false` |

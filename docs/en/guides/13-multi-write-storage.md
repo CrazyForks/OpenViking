@@ -99,7 +99,7 @@ Match these `s3` fields to the endpoint and object-store configuration:
 | Field | Required? | Description |
 | --- | --- | --- |
 | `use_path_style` | Optional; default `true` | Use path-style URLs (`http://host/bucket/key`); select the style your endpoint supports. |
-| `directory_marker_mode` | Optional; default `"empty"` | `none` creates no marker, `empty` creates a zero-byte marker, and `nonempty` creates a marker with content. |
+| `directory_marker_mode` | Yes for backup items | `none` creates no marker, `empty` creates a zero-byte marker, and `nonempty` creates a marker with content. Set it explicitly in each S3 backup item; if omitted, startup fails with `AGFSConfigError: invalid directory_marker_mode: null`. |
 | `use_ssl` | Optional | Set to `false` for HTTP endpoints (e.g. `http://localhost:9000`). |
 
 **Minimal S3-compatible example (RustFS/MinIO):**
@@ -121,7 +121,7 @@ Match these `s3` fields to the endpoint and object-store configuration:
 }
 ```
 
-The example chooses `none` deliberately. Older versions could pass an invalid null marker value; if you encounter that error, set a valid value explicitly and check the deployed version. Current Python configuration defaults to `empty`.
+The example uses `none`, which suits S3-compatible services that do not use directory markers (RustFS, MinIO, Ceph, etc.). Backup items do not get a default for this field. The top-level `storage` S3 configuration defaults to `empty`.
 
 ### Docker Networking for S3 Backup
 

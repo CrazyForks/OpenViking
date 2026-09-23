@@ -1253,7 +1253,7 @@ ov --sudo admin set-role acme bob admin
 **处理流程：**
 1. 验证请求者具有 ROOT 权限，或为本账户的 ADMIN
 2. 调用 API Key Manager 重新生成用户密钥
-3. 旧密钥立即失效
+3. 随机生成或使用新 seed 时，旧密钥立即失效
 4. 返回新的用户密钥
 
 **代码入口：**
@@ -1273,7 +1273,7 @@ ov --sudo admin set-role acme bob admin
 
 **说明：**
 - ADMIN 只能为自己所属的 account 中的用户重新生成密钥
-- 旧密钥会立即失效，需要更新使用该密钥的客户端
+- 随机生成或使用新 seed 时，旧密钥立即失效，需要更新使用该密钥的客户端
 - 省略 `seed` 时随机生成新密钥。确定性示例使用 `OV_KEY_SEED` 或 `OV_NEW_KEY_SEED`，运行前需将其设为安全生成的秘密值；Go 示例需导入 `os`。不要把示例变量名直接当作 seed。
 
 #### 3. 使用示例

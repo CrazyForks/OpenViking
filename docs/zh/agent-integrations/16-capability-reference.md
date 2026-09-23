@@ -105,7 +105,7 @@ per-harness 章节（档案卡）只写差异；所有共享事实均在本章�
 | 12 | `cancel_watch` | 按 `to_uri` 取消，商业版尚未支持 | 刻意不暴露 pause/resume/trigger/update（`:1653`） |
 | 13 | `grep` | 正则内容检索 | 多 pattern 并发（信号量 10），`node_limit=10`（`:1696`） |
 | 14 | `glob` | 文件名 glob | `node_limit=100`（`:1765`） |
-| 15 | `forget` | 删除 URI（不提供自动撤销） | 默认 `recursive=False`；类型边界详见 [§3.5](#_3-5-写入与删除的类型边界)（`:1791`） |
+| 15 | `forget` | 永久删除 URI（不可恢复） | 默认 `recursive=False`；类型边界详见 [§3.5](#_3-5-写入与删除的类型边界)（`:1791`） |
 | 16 | `health` | 健康检查 | 无参（`:1808`） |
 
 配套机制：
@@ -281,7 +281,7 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 
 | harness | 触发点 | query 构造 | session_id | 服务端路径 | 注入格式 / 位置 | 再摘要（客户端）* |
 |---|---|---|---|---|---|---|
-| claude-code | 每轮 `UserPromptSubmit` | prompt 原文 trim | ✅ `cc-` | A（context face） | `<openviking-context>` → `hookSpecificOutput.additionalContext` | ✅ 本地（默认 auto，[§3.2.5](#_3-2-5-召回再摘要)） |
+| claude-code | 每轮 `UserPromptSubmit` | prompt 原文 trim | ✅ `cc-` | A（context face） | `<openviking-context>` → `hookSpecificOutput.additionalContext` | ✅ 本地/服务端（默认 auto，[§3.2.5](#_3-2-5-召回再摘要)） |
 | codex / trae-cli | 每轮 `UserPromptSubmit`（整 hook 120s 硬截止） | prompt 原文 | ✅ `cx-`（确定性推导，不读 state） | A；二级降级 searchScope 落入 B | `<openviking-context source="auto-recall" format="digest">` | ✅ 本地 `codex exec`（[§3.2.5](#_3-2-5-召回再摘要)） |
 | cursor | `beforeSubmitPrompt` | prompt 原文；基于事件 id 与 500ms 窗口去重，同 promptHash 复用缓存块 | ✅ `cu-` | A | `additional_context` | ❌ |
 | trae / trae-cn | `UserPromptSubmit` | 剥离历史注入块后的 prompt（只认 `input.prompt`） | ✅ `tr-`/`trcn-` | A | `additionalContext` | ❌ |
@@ -339,6 +339,11 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 | `auto` | Claude Code 和 Codex 优先使用可用的本地压缩器，否则发送 `rewrite: "auto"`；没有本地压缩器的集成直接请求服务端自动判断。 |
 
 Claude Code 和 Codex 默认 `auto`，其他集成默认 `off`。Claude Code、Codex、OpenCode、DSH、Pi、Cursor、TRAE、TRAE CN、ZCode、OpenClaw 和 Hermes 均可显式启用服务端压缩；旧布尔值 `1` / `0` 分别对应 `auto` / `off`。`stats.rewrite="no_relevant"` 表示本轮不注入，不能再回退到原始块。
+
+本地压缩器细节：
+
+- **claude-code**：用 `claude --version` 探测本地压缩器（结果缓存 7 天）。可用时执行 `claude -p --model sonnet --effort low --strict-mcp-config`，超时 30s；输入少于 1500 字符时跳过（`recallCompressMinInputChars`）；按 digest 缓存；引用的 URI 按编辑距离修正为本次命中的有效 URI，无法修复的 bullet 会被丢弃。子进程失败时回落未压缩的块。
+- **codex**：从 `~/.codex/models_cache.json` 选模型（先 `gpt-5.3-codex-spark`，其次 `gpt-5.6-luna` + low，缓存 7 天），执行 `codex --sandbox read-only --ask-for-approval never exec --ephemeral --ignore-user-config --skip-git-repo-check --output-last-message <tmp> -`，默认超时为 `recallTimeoutMs - 10s`（110s）。运行失败后本会话不再做本地压缩，下次 `SessionStart` 重新探测。输出经规范化并截断到 4000 字符；压缩关闭或失败时使用确定性的回退 digest。
 
 这些设置只控制自动召回，显式 MCP 调用使用调用方传入的参数。服务端需支持 context-search rewrite；旧服务回退行为、压缩器探测和宿主时间预算见 [共享插件说明](https://github.com/volcengine/OpenViking/blob/main/examples/memory-plugin-shared/README.md#cloud-recall-compression)及各集成页。
 
@@ -606,7 +611,7 @@ MCP `write` / REST `content/write` 的三道 guard（`content_write.py`）：可
 - **集成文档**：[pi Coding Agent 扩展](./11-pi.md)
 - **形态**：pi 原生扩展（目录装载，jiti 直译 TS）。扩展使用 `@modelcontextprotocol/client`，把服务端 `tools/list` 的每个描述符注册成名为 `openviking_<tool>` 的 pi 工具，当前 16 个（[§2.1](#_2-1-服务端-mcp-工具面)）。扩展里没有任何工具目录，服务端增删工具，pi 下一次会话即跟上，不需要发插件版本。召回、会话同步、profile 注入与 takeover 仍走 REST。9 事件 + `/viking` 命令；tool_call 拦截路径是 `viking://` URI 的 read/grep/find/ls/write/edit，bash 命令带 `viking://` URI 时，tool_result 在结果末尾追加提示。版本 0.4.0。
 - **能力亮点**：takeover 压缩接管（默认开，[§3.4.2](#_3-4-2-pi-takeover)）；两段式召回（before_agent_start 排队 + context 事件同步检索，当前轮 prompt 拿当前轮记忆）；statusline；支持的正常退出路径会 await `session_shutdown`；`kill -9` 等强制终止不会执行 handler。
-- **行为要点**：默认 takeover 下退出不 commit（handler 持久化本地状态，归档靠下次续跑攒满阈值或 `/viking commit`，[§3.3.3](#_3-3-3-关闭方式-×-harness-终局矩阵)）；takeover 阈值 30000 token + 保留 3 轮（keep 3，服务端按消息条数解释）；非 takeover 阈值 20000/keep 10、退出无条件 commit；工具注册需 health、ensureSession 与 `/mcp` 握手三项前置（[§1.1](#_1-1-主动工具面-agentic-调用能力)），ROOT 角色的 API key 访问 `/mcp` 会被 403 拒绝，凭据链最终落到 `ov.conf` 的 `server.root_api_key` 时本次会话就没有工具——0.4.0 之前是 REST 工具照常注册、每次调用静默返回 "No results found."；`openviking_remember` 走 MCP 面，即自建一次性会话并立即提交，不再并入 pi 的会话（[§2.1](#_2-1-服务端-mcp-工具面)）；`openviking_add_resource` 可直接摄取远端 URL，本地路径则由服务端返回一条上传指引，需要模型用 `bash` 把文件 POST 上去，与其他 MCP harness 一致；`openviking_read` 只返回全文，目录 URI 会得到 `Cannot render …: URI points to a directory`，旧的 `level="abstract"/"overview"` 两档在 MCP 面没有对应工具，替代路径是 `openviking_search(mode="context", detail="overview")` 或 `openviking_tree(include_abstract=true)`，takeover 的归档 overview 仍由扩展自己经 REST 注入；单次工具调用受共享的 `timeoutMs` 约束（15000ms，`OPENVIKING_TIMEOUT_MS` 可调），`write`/`edit` 带 `wait=true` 或 `add_resource` 同步 ingest 有可能超过，而超时或 ESC 只让本地调用失败，已经发出的请求会跑完，写入仍可能已经生效；从 0.3.x 升级时全部工具改名且没有别名期，`--tools` / `--exclude-tools` 白名单里写死的 `viking_*` 必须手工替换，否则工具会静默消失；非 takeover 模式下 `pi -c` 续跑会重新上报整条 branch。
+- **行为要点**：默认 takeover 下退出不 commit（handler 持久化本地状态，归档靠下次续跑攒满阈值或 `/viking commit`，[§3.3.3](#_3-3-3-关闭方式-×-harness-终局矩阵)）；takeover 阈值 30000 token + 保留 3 轮（keep 3，服务端按消息条数解释）；非 takeover 阈值 20000/keep 10、退出无条件 commit；工具注册需 health、ensureSession 与 `/mcp` 握手三项前置（[§1.1](#_1-1-主动工具面-agentic-调用能力)），ROOT 角色的 API key 访问 `/mcp` 会被 403 拒绝，凭据链最终落到 `ov.conf` 的 `server.root_api_key` 时本次会话就没有工具——0.4.0 之前是 REST 工具照常注册、每次调用静默返回 "No results found."；`openviking_remember` 走 MCP 面，即自建一次性会话并立即提交，不再并入 pi 的会话（[§2.1](#_2-1-服务端-mcp-工具面)）；`openviking_add_resource` 可直接摄取远端 URL，本地路径则由服务端返回一条上传指引，需要模型用 `bash` 把文件 POST 上去，与其他 MCP harness 一致；`openviking_read` 读取文件正文，支持按行分页（`offset`/`limit`），目录 URI 会得到 `Cannot render …: URI points to a directory`，旧的 `level="abstract"/"overview"` 两档在 MCP 面没有对应工具，替代路径是 `openviking_search(mode="context", detail="overview")` 或 `openviking_tree(include_abstract=true)`，takeover 的归档 overview 仍由扩展自己经 REST 注入；单次工具调用受共享的 `timeoutMs` 约束（15000ms，`OPENVIKING_TIMEOUT_MS` 可调），`write`/`edit` 带 `wait=true` 或 `add_resource` 同步 ingest 有可能超过，而超时或 ESC 只让本地调用失败，已经发出的请求会跑完，写入仍可能已经生效；从 0.3.x 升级时全部工具改名且没有别名期，`--tools` / `--exclude-tools` 白名单里写死的 `viking_*` 必须手工替换，否则工具会静默消失；非 takeover 模式下 `pi -c` 续跑会重新上报整条 branch。
 - **配置**：env + ovcli.conf `plugin.pi` + workspace 文件（凭据统一走凭据链，[§3.1.3](#_3-1-3-凭据体系)）；bypass 走共享 `isBypassed` 的 glob 匹配，键名 `bypassSessionPatterns`（旧名 `bypassPatterns` 仍可读）；共享键 `mcpEnabled: false` 现在对 pi 也生效：不发起桥接、不注册工具，`/viking` 标注成配置而非故障。
 - **维度索引**：工具面 [§1.1](#_1-1-主动工具面-agentic-调用能力) ｜召回 [§3.2](#_3-2-自动召回与注入) ｜takeover [§3.4.2](#_3-4-2-pi-takeover) ｜commit [§3.3.2](#_3-3-2-常规-commit-触发条件)/[§3.3.3](#_3-3-3-关闭方式-×-harness-终局矩阵)。
 

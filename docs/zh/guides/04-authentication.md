@@ -659,7 +659,7 @@ OpenViking CLI (`ov`) 支持通过 LDAP 进行认证。配置完成后，所有 
 
 #### 2. 混合配置
 
-用 `OPENVIKING_CLI_CONFIG_FILE` 选择另一份完整配置文件。`ov` 不读取 `OPENVIKING_URL` 或 `OPENVIKING_ACCOUNT` 作为连接覆盖值；这些变量属于 Agent 插件配置。
+用 `OPENVIKING_CLI_CONFIG_FILE` 选择另一份完整配置文件。`ov` 不读取 `OPENVIKING_URL` 或 `OPENVIKING_ACCOUNT` 作为连接覆盖值（`ov chat` 例外，它用 `OPENVIKING_URL` 拼出 bot endpoint）；这些变量属于 Agent 插件配置。
 
 ### 使用 CLI
 

@@ -169,7 +169,7 @@ else:
 
 ### Backend Support
 
-Supported provider settings include `vikingdb` (Volcengine), `cohere`, `openai` (compatible endpoints), `litellm`, and `jev`. Model names and authentication depend on the provider; see the [Configuration Guide](../guides/01-configuration.md).
+Supported provider settings include `vikingdb` (Volcengine), `cohere`, `openai` (compatible endpoints), `litellm`, and `jev` (default model for `vikingdb`: `doubao-seed-rerank`). Model names and authentication depend on the provider; see the [Configuration Guide](../guides/01-configuration.md).
 
 ## Retrieval Results
 

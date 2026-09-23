@@ -36,7 +36,7 @@ OpenViking 服务端本身在 `/mcp` 上就是 streamable HTTP，但 `mcp.json` 
 
 ## 凭据解析顺序
 
-该包按以下来源解析凭据，与 CLI 共用凭据文件；插件专用的回退规则列在下面：
+该包按以下来源解析凭据，优先级从高到低，与 CLI 共用凭据文件；插件专用的回退规则列在下面：
 
 1. 环境变量：`OPENVIKING_URL`（或 `OPENVIKING_BASE_URL`）、`OPENVIKING_MCP_URL`、`OPENVIKING_API_KEY`（或 `OPENVIKING_BEARER_TOKEN`）、`OPENVIKING_ACCOUNT`、`OPENVIKING_USER`、`OPENVIKING_PEER_ID`、`OPENVIKING_AUTH_MODE`
 2. `~/.openviking/ovcli.conf`（`url`、`api_key`、`account` / `account_id`、`user` / `user_id`、`actor_peer_id` / `peer_id`），其后是它的 `plugin.agent_plugins` 与共享 `plugin` 键（`apiKey`、`accountId`、`userId`、`authMode`）—— 可用 `OPENVIKING_CLI_CONFIG_FILE` 覆盖路径

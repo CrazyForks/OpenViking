@@ -30,7 +30,19 @@
 
 **TRAE / TRAE CN**：在「设置 → MCP → 已配置的 MCP Servers」中确认能够看到 `openviking` 条目即表示接入成功。
 
-**TraeCode CLI 2.0**：启动 `trae-cli`，在 `/hooks` 中检查并开启 OpenViking hooks，再执行 `trae-cli plugin list` 确认插件已启用。新增或变更的 hooks 需要重新检查；不同版本支持的会话生命周期见完整文档。
+**TraeCode CLI 2.0**：启动 `trae-cli`，在 hook 审阅提示中选 **Trust all and continue**（具体界面随版本变化）：
+
+```text
+Hooks need review
+6 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+
+  1. Review hooks
+> 2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+```
+
+如果跳过了提示或选了第 3 项，在 `/hooks` 中检查并开启 OpenViking hooks。执行 `trae-cli plugin list` 确认插件已启用。新增或变更的 hooks 需要重新检查；不同版本支持的会话生命周期见完整文档。
 
 MCP 条目可见只说明配置存在。让助手调用 OpenViking 的 `health` 和 `list` 验证连接；自动召回需另行检查：等之前的会话提交并处理完成后，在同一工作目录中新建会话，询问已保存的信息。
 

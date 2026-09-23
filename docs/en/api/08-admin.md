@@ -1313,7 +1313,7 @@ fmt.Println(result["role"])
 **CLI**
 
 ```bash
-# Requires ROOT privileges, use --sudo
+# ROOT example; an acme ADMIN can use `ov admin set-role` without --sudo
 ov --sudo admin set-role acme bob admin
 ```
 
@@ -1341,7 +1341,7 @@ Generate and store a user API key. With the default random generation, the old k
 **Processing Flow:**
 1. Verify requester has ROOT privileges or is an ADMIN of the account
 2. Call API Key Manager to regenerate user key
-3. Old key is immediately invalidated
+3. With random generation or a new seed, the old key stops working immediately
 4. Return new user key
 
 **Code Entry Points:**
@@ -1361,7 +1361,7 @@ Generate and store a user API key. With the default random generation, the old k
 
 **Notes:**
 - ADMIN can only regenerate keys for users in their own account
-- Old key is immediately invalidated, clients using it need to be updated
+- With random generation or a new seed, the old key stops working immediately; update clients that use it
 - Omit `seed` for the default random regenerated key. Deterministic examples use `OV_KEY_SEED` or `OV_NEW_KEY_SEED`; set these to a securely generated secret before use. In Go, import `os`. Do not use the example variable names as seed values.
 
 #### 3. Usage Examples

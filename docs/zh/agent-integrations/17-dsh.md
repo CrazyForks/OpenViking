@@ -115,9 +115,9 @@ patch 中写的凭证优先于环境变量。行为配置按优先级从高到�
 |------|----------|
 | 没有注入，也没有 OpenViking 工具 | `dsh --profile web --dump-config` 里应能看到 `openviking-memory`；重新运行安装器或 `dsh plugin --profile web add …` |
 | 装到了错误的 profile | 安装器默认 `web`；用 `--dsh-profile <name>` 重新运行 |
-| 安装时报 `ERESOLVE` | 核对 DSH 版本与插件声明的依赖，按插件 README 对齐宿主包版本；旧预发布版本的固定值不能作为通用升级方案。 |
+| 安装时报 `ERESOLVE` | 使用受支持的 `@deepseek-ai/dsh` 版本：`0.1.0-rc.6`、`0.1.5-rc.1`、`0.1.5-rc.2` 或稳定版 `0.1.x`（peer 范围 `>=0.1.0-rc.6 <0.2.0 \|\| ^0.1.5-rc.1`），并让所有 `@deepseek-ai/dsh-*` 宿主包保持同一版本。 |
 | 安装时报包「不在 npm registry 中」 | 检查该 profile 的 pnpm 是否设置了 24 小时的最小发布年龄（`minimumReleaseAge`）。等一等，或把该精确版本加进 profile 的 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` |
-| 召不回任何内容 | `ov health`；检查端点配置，以及 prompt 是否长于最小查询长度（3 个字符） |
+| 召不回任何内容 | `curl "<OpenViking 服务地址>/health"`；检查端点配置，以及 prompt 是否长于最小查询长度（3 个字符） |
 | OpenViking 返回 401 / 403 | 检查 `OPENVIKING_API_KEY`；可信模式部署还要检查 `OPENVIKING_ACCOUNT` 与 `OPENVIKING_USER` |
 | 串入了其他项目的记忆 | 设置 `OPENVIKING_RECALL_PEER_SCOPE=actor`，将 peer 记忆限定为当前 peer；用户级记忆仍会共享 |
 | 崩溃后没有 commit | commit 由 token 阈值和 teardown 触发；排队的写入会在下次会话开始时重放 |

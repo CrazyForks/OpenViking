@@ -103,7 +103,7 @@ viking://user/alice/peers/web-visitor-alice/resources/
 /local/{account_id}/user/alice/peers/web-visitor-alice/resources/
 ```
 
-同一个公共 URI 在不同 account 下指向不同数据；服务端按请求身份解析路径并校验 user 权限。
+因此多租户隔离不是靠“不同 URI 前缀”，而是靠请求上下文中的 `account_id` 和 `user_id` 共同生效。
 
 ### 文件系统与检索层
 

@@ -143,9 +143,9 @@ curl -G "http://localhost:1933/api/v1/fs/ls" \
 **CLI**
 
 ```bash
-ov ls viking://resources/
-ov tree viking://resources/my-project/
-ov glob "**/*.md"
+ov ls viking://resources/ [--simple] [--recursive] [--tags team=search,env=prod] [-f FIELDS]
+ov tree viking://resources/my-project/ [--simple] [--tags team=search,env=prod] [-f FIELDS]
+ov glob "**/*.md" [--uri viking://resources/] [--simple] [--tags team=search,env=prod] [-f FIELDS]
 
 # 在对齐的表格中显示名称和 tags
 ov ls viking://resources/ --fields name,tags
@@ -640,7 +640,7 @@ curl -X DELETE "http://localhost:1933/api/v1/fs?uri=viking://resources/old-proje
 **CLI**
 
 ```bash
-ov rm viking://resources/old.md
+ov rm viking://resources/old.md [--recursive]
 ```
 
 

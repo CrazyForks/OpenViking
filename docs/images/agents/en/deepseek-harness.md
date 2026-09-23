@@ -30,7 +30,7 @@ The installer asks for the language, harness, download source, and OpenViking cr
 |---|---|
 | No context injection or OpenViking tools | Run `dsh --profile web --dump-config` and confirm it contains `openviking-memory`; otherwise rerun the installer or run `dsh plugin --profile web add @openviking/dsh-memory-plugin` |
 | Installed into the wrong profile | The installer defaults to `web`; rerun it with `--dsh-profile <name>` |
-| `ERESOLVE @deepseek-ai/dsh-*` during install | Check the installed DSH version against the plugin’s declared dependencies; use the bundle README to align host packages |
+| `ERESOLVE @deepseek-ai/dsh-*` during install | Use a supported `@deepseek-ai/dsh` version (`0.1.0-rc.6`, `0.1.5-rc.1`, `0.1.5-rc.2`, or a stable `0.1.x`) and keep all `@deepseek-ai/dsh-*` host packages on the same version |
 | Package reported missing from npm | Check whether the profile sets a pnpm minimum release age of 24 hours; wait and retry, or add the exact version to `minimumReleaseAgeExclude` in `pnpm-workspace.yaml` |
 | Recall returns no history | Run `curl "{{OPENVIKING_BASE_URL}}/health"` to confirm the server is healthy, then check the endpoint and make sure the prompt is at least 3 characters long |
 | OpenViking returns 401 / 403 | Check the API key; trusted-mode deployments must also check `OPENVIKING_ACCOUNT` and `OPENVIKING_USER` |

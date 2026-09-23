@@ -6,7 +6,7 @@
 
 前置条件：macOS 或 Linux、Node.js 18+，以及支持 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`Stop` Hook 的 TRAE/TRAE CN 版本。TraeCode CLI 2.0 直接使用兼容 Codex 的插件格式。安装过程中会引导配置 OpenViking 连接信息。
 
-安装器询问连接方式时，火山引擎云服务用户请选择 **火山引擎 OpenViking 云服务** 并填写 API Key。使用自己部署的服务时选择 **自建 / 本地**，本机或远程部署都可以，填写当前机器可访问的 URL。
+安装器询问连接方式时，火山引擎云服务用户请选择 **火山引擎 OpenViking 云服务** 并填写 API Key。服务运行在本机时选择 **自建 / 本地**（`http://127.0.0.1:1933`）；远程自建服务请选择 **自定义 URL / 保持当前** 并填写其 URL。
 
 ```bash
 # TRAE
@@ -41,9 +41,21 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 ### TraeCode CLI 2.0：首次启动信任 hooks
 
-TraeCode CLI 2.0 使用 Codex 格式插件。在 `/hooks` 中检查 OpenViking 命令，信任并启用准备使用的条目；同时在 `/plugins` 确认插件已启用。定义变化后可能需要重新审阅。MCP 连通不能证明自动召回和捕获已生效，详见 [Codex hook 设置](04-codex.md#首次启动-信任-hooks)。
+TraeCode CLI 2.0 使用 Codex 格式插件。启动 `trae-cli` 时会显示类似下面的 hook 审阅提示，具体界面随版本变化。选 **Trust all and continue**；选 *Continue without trusting* 后 hooks 不会运行。
 
-TRAE 和 TRAE CN 使用安装后的 `hooks.json`，安装后重启对应客户端。
+```text
+Hooks need review
+6 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+
+  1. Review hooks
+> 2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+```
+
+也可以在 `/hooks` 中检查 OpenViking 命令，信任并启用准备使用的条目；同时在 `/plugins` 确认插件已启用。定义变化后可能需要重新审阅。MCP 连通不能证明自动召回和捕获已生效，详见 [Codex hook 设置](04-codex.md#首次启动-信任-hooks)。
+
+TRAE 和 TRAE CN 使用安装后的 `hooks.json`，不需要审阅 hook，安装后重启对应客户端。
 
 ## 安装内容
 

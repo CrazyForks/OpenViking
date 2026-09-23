@@ -107,7 +107,7 @@ viking://~/memories/entities/                 # 实体记忆
 viking://~/memories/events/                   # 事件记忆
 viking://~/resources/                         # 自己的私有资源
 viking://~/resources/docs/                    # 自己的私有资源目录
-viking://user/{user_id}/memories/             # 显式用户路径（访问权限取决于当前认证身份）
+viking://user/{user_id}/memories/             # 显式用户路径（只能访问自己的 user_id，ADMIN 也不例外；ROOT 在 api_key 模式以外可访问任意用户）
 ```
 
 `viking://resources/...` 是当前 account 的共享区，可通过 [资源访问控制（ACL）](./15-acl.md) 细化目录或文件权限。`viking://user/{user}/resources/...` 是个人私有区；分享资源需要将其移动到共享区。

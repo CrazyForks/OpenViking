@@ -7,9 +7,11 @@
 
 ## 概述
 
-Session 写入阶段会将超过阈值的 tool output 保存到 `ToolResultStore`，在消息中保留摘要和 `tool_output_ref`。本文说明按 JSON、表格、代码等类型生成规则化摘要的实现，以及通过 ref 读取、搜索和列出原始结果的方法。
+Session 写入阶段会将超过阈值的 tool output 保存到 `ToolResultStore`，把原 `ToolPart.tool_output` 替换为 stub 文本并保留 `tool_output_ref`，之后可通过 `read/search/list` 按 ref 回溯原文。这套 externalize 链路在本次改动前已存在。
 
-摘要生成不调用 LLM。原始输出的存储位置和 externalize 触发条件保持不变；`preview_chars` 仅用于无法规则化时的 head/tail 回退。
+本次改动只替换 stub 中的 preview 生成方式：从 `head + tail` 截断改为按内容类型和 MIME 生成规则化摘要（JSON、表格、代码等）。externalize 的触发条件、存储位置和回溯方式不变。
+
+摘要生成不调用 LLM。`preview_chars` 仅用于无法规则化时的 head/tail 回退。
 
 ---
 

@@ -10,7 +10,7 @@ This page is for OpenViking server setup. For client-only CLI setup, use the [Op
 
 - Default to the normal end-user installation path; do not default to source builds
 - Default to prebuilt packages; do not assume Go / Rust / C++ / CMake are required
-- Read existing configuration and supplied requirements first; ask only for missing model, authentication, or data-directory choices
+- Read existing configuration and supplied requirements first; ask the user about missing or uncertain values. Do not guess provider, model, api_base, api_key, or workspace
 - Preserve existing configuration and unrelated fields; inspect the actual changes before updating it
 - Only move to the source-build path when installation clearly falls back to local compilation, or when the user explicitly asks for a source install
 
@@ -151,7 +151,7 @@ If the user is on Windows, also confirm:
 
 ### 3. Generate the config
 
-Once the required values are available, write or update `~/.openviking/ov.conf`, retaining a copy of existing configuration. The placeholder values below are not a working configuration.
+Only write or update `~/.openviking/ov.conf` after the user has confirmed all required values, and keep a copy of existing configuration. The placeholder values below are not a working configuration.
 
 #### Minimal config shape
 
@@ -271,7 +271,7 @@ The Dockerfile also supports injecting the full JSON config via `OPENVIKING_CONF
 
 ##### Docker validation
 
-`/health` only confirms a responsive process; a container without configuration returns `503 pending_initialization`, so receiving a curl response alone does not establish health. Check logs and `/ready`, then try a small document import:
+`/health` only confirms a responsive process; a container without configuration returns `503 pending_initialization`, so receiving a curl response alone does not establish health. Check logs and `/ready`:
 
 ```bash
 curl http://localhost:1933/health

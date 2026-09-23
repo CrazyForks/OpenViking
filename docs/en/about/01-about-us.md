@@ -24,11 +24,11 @@ This work involves three related problems: extracting searchable information fro
 
 ### Academic Collaboration and Industry–Academia Integration
 
-The following researchers contributed to OpenViking's founding, research, and technical direction:
+We sincerely thank the following scholars for their contributions and guidance in launching OpenViking:
 
-- Renmin University of China: Sun Yahui
-- Zhejiang University: Gao Yunjun, Zhu Yifan, and Ge Congcong
-- Shanghai Jiao Tong University and Wuwen Xinqiong: Dai Guohao
+- Associate Professor Sun Yahui, School of Information, Renmin University of China
+- Professor Gao Yunjun, School of Software, Zhejiang University; Researchers Zhu Yifan and Ge Congcong
+- Associate Professor Dai Guohao, School of Artificial Intelligence, Shanghai Jiao Tong University; Co‑founder and Chief Scientist of Wuwen Xinqiong
 
 ## Open-Source Organization
 
@@ -71,20 +71,8 @@ You can also join [Discord](https://discord.com/invite/eHvx8E9XF3) or follow pro
 - **Build an integration:** add a plugin for an agent tool or framework using the [plugin development guide](../agent-integrations/18-plugin-development.md).
 - **Share experience:** post usage examples and troubleshooting notes, or help other users in the community.
 
-### What to Include
-
-Include enough information for maintainers to reproduce a problem, evaluate a proposal, or reuse your findings:
-
-| Contribution | Suggested material |
-| --- | --- |
-| Usage question or bug | Version, deployment method, reproduction steps, expected and actual results, and logs or configuration with credentials and personal information removed |
-| Feature or research proposal | Use case, limitations of existing approaches, proposed design and tradeoffs; for quality or performance claims, include the data scope, evaluation method, and runtime conditions |
-| Documentation or translation | Page link, where readers get stuck, and suggested wording; include validation steps and results for changed examples |
-| Agent integration | Target tool and version, connection method, verification steps, and known limitations |
-| Usage example | Task and data types, integration steps, observed results, and unresolved problems |
-
-Check existing issues and pull requests before contributing code. Keep each change focused on one complete problem and include the necessary tests and documentation. Discuss the scope of large changes first; split parts that can be understood and verified independently.
+For what to include in issues and pull requests, see the [contribution guide](https://github.com/volcengine/OpenViking/blob/main/CONTRIBUTING.md).
 
 ## Discussion and Collaboration
 
-The [GitHub repository](https://github.com/volcengine/OpenViking) holds code, documentation, and review records. Use chat for immediate discussion and an issue or pull request for work that needs tracking.
+The [GitHub repository](https://github.com/volcengine/OpenViking) holds code, documentation, and review records. Use [GitHub Discussions](https://github.com/volcengine/OpenViking/discussions) for design discussions and community exchange, chat for immediate discussion, and an issue or pull request for work that needs tracking.

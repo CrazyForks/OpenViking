@@ -724,7 +724,7 @@ Edit `~/.openviking/ovcli.conf` to add LDAP authentication settings:
 
 #### 2. Mixed Configuration
 
-Use `OPENVIKING_CLI_CONFIG_FILE` to select another complete configuration file. The `ov` CLI does not use `OPENVIKING_URL` or `OPENVIKING_ACCOUNT` as connection overrides; those variables configure Agent plugins.
+Use `OPENVIKING_CLI_CONFIG_FILE` to select another complete configuration file. The `ov` CLI does not use `OPENVIKING_URL` or `OPENVIKING_ACCOUNT` as connection overrides (except `ov chat`, which derives the bot endpoint from `OPENVIKING_URL`); those variables configure Agent plugins.
 
 ### Using the CLI
 

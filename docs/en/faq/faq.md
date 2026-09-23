@@ -76,7 +76,7 @@ directly within the Python process; remote storage backends still make network r
 
 ### What should I do if I encounter "AGFS binding library not found"?
 
-This usually means the RAGFS shared library is missing or cannot be loaded. Check whether a prebuilt wheel exists for your Python version and platform, then try reinstalling. [Build from source](../getting-started/04-setup-for-agent.md) only if no wheel is available or you need to change the source; that path requires the native build toolchain.
+This usually means the RAGFS shared library is missing or cannot be loaded. Check whether a prebuilt wheel exists for your Python version and platform, then try reinstalling. [Build from source](https://github.com/volcengine/OpenViking/blob/main/CONTRIBUTING.md) only if no wheel is available or you need to change the source; that path requires the native build toolchain.
 
 ### How do I install/upgrade OpenViking?
 
@@ -164,7 +164,7 @@ Embedding, VLM, storage, and other service configuration is managed by the OpenV
 await client.add_resource(
     path="./document.pdf",
     parent="viking://resources",  # Store under this directory; the name comes from the source
-    options={"reason": "Project technical documentation"},  # Describe the import reason for resource-related memory extraction
+    options={"reason": "Project technical documentation"},  # Used for L0/L1 summaries when no instruction is given, and for resource-linked memory extraction
 )
 
 # Add web page
@@ -281,7 +281,7 @@ overview = await client.overview(uri="viking://resources")
 1. **Evaluate reranking**: Compare ranking results on representative queries before enabling it
 2. **Check summaries**: Verify that L0/L1 represent the source accurately; adjust the import `instruction` or summary templates when needed
 3. **Organize directories**: Import with `parent` for an existing parent directory or `to` for an exact target URI
-4. **Use session context**: When query planning is needed, enable intent analysis and pass a session with content to `search()`
+4. **Use session context**: Keep `retrieval.enable_intent` on (default) and pass a session with content to `search()`
 5. **Choose appropriate Embedding mode**: Use `multimodal` input for multimodal content
 
 ### How is the retrieval result score calculated?

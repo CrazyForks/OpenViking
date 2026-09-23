@@ -12,7 +12,7 @@ OpenViking 管理三类上下文：资源提供参考资料，记忆保存交互
 
 ## 示例准备
 
-以下示例使用同步 Python SDK，需先启动服务端。导入和会话提交可能在索引完成前返回，因此先用下面的函数查询对应任务，再检索新内容。轮询超时不会取消服务端任务。
+以下示例使用同步 Python SDK，需先启动服务端。`add_resource` 和 `add_skill` 可传 `wait=True`，等处理完成后再返回。会话提交会在记忆提取完成前返回，且没有内置等待参数，因此先用下面的函数查询提交任务，再检索新内容。轮询超时不会取消服务端任务。
 
 ```python
 import time
@@ -25,6 +25,8 @@ def wait_for_task(task_id):
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         task = client.get_task(task_id)
+        if task is None:
+            raise RuntimeError(f"Task {task_id} not found")
         if task["status"] == "completed":
             return task
         if task["status"] in {"failed", "cancelled"}:
@@ -53,12 +55,12 @@ def wait_for_task(task_id):
 
 ```python
 # 添加资源
-added = client.add_resource(
+client.add_resource(
     path="https://docs.example.com/api.pdf",
     options={"reason": "API 文档"},
+    wait=True,
+    timeout=300,
 )
-
-wait_for_task(added["task_id"])
 
 # 搜索资源
 results = client.find(
@@ -159,15 +161,15 @@ viking://agent/skills/{skill-name}/  # 通过 -p/--parent-auto-create 覆盖，�
 
 ```python
 # 添加技能（默认写入 viking://~/skills/）
-added = client.add_skill(
+client.add_skill(
     data={
         "name": "search-web",
         "description": "搜索网络获取信息",
         "content": "# search-web\n...",
     },
+    wait=True,
+    timeout=300,
 )
-
-wait_for_task(added["task_id"])
 
 # 搜索用户技能
 results = client.find(

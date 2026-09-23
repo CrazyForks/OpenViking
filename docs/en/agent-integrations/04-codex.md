@@ -34,7 +34,19 @@ codex
 
 ### First launch: trust the hooks
 
-Installing the plugin does not automatically trust its hooks. Open `/hooks`, review the OpenViking commands, and trust and enable the hooks you intend to use. In `/plugins`, also confirm that `openviking-memory` is enabled. The plugin currently declares six hooks. New or changed definitions require another review; the prompt layout varies by Codex version. See the [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+Installing the plugin does not automatically trust its hooks. On first launch Codex shows a review prompt similar to the one below; the exact layout varies by Codex version. Pick **Trust all and continue**, or **Review hooks** to read the commands first. *Continue without trusting* leaves the hooks off until you enable them in `/hooks`.
+
+```text
+Hooks need review
+6 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+
+  1. Review hooks
+> 2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+```
+
+You can also open `/hooks`, review the OpenViking commands, and trust and enable the hooks you intend to use. In `/plugins`, also confirm that `openviking-memory` is enabled. The plugin currently declares six hooks. New or changed definitions require another review. See the [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 
 MCP tools can work while hooks are disabled. Automatic recall requires `UserPromptSubmit`; capture requires `Stop`, with lifecycle commits handled by the other hooks listed below. If setup was skipped, return to `/hooks` to enable the relevant entries.
 

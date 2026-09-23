@@ -40,7 +40,7 @@ Multi-write supports two consistency modes.
 
 In async mode, backups may lag behind the primary; recovery depends on backend availability and retry outcomes. In sync mode, `write_ack_count` and `write_ack_timeout_ms` control how many backup acknowledgements are required and how long the system waits.
 
-If sync mode fails to reach the required acknowledgement count, the call returns an error even though the primary may already have committed; that write is not automatically rolled back. Inspect sync state and retry outcomes for unsynchronized replicas; see the [Multi-Write Storage Guide](../guides/13-multi-write-storage.md).
+If sync mode fails to reach the required acknowledgement count, the call returns an error even though the primary may already have committed; that write is not automatically rolled back. Backups that did not acknowledge are still retried in the background; to inspect sync state, see the [Multi-Write Storage Guide](../guides/13-multi-write-storage.md).
 
 ## Read Path
 

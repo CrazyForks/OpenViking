@@ -114,7 +114,7 @@ viking://~/memories/entities/                 # Entity memories
 viking://~/memories/events/                   # Event memories
 viking://~/resources/                         # Your private resources
 viking://~/resources/docs/                    # Your private resource directory
-viking://user/{user_id}/memories/             # Explicit user path (access depends on the authenticated identity)
+viking://user/{user_id}/memories/             # Explicit user path (own user_id only, ADMIN included; ROOT can read any user except in api_key mode)
 ```
 
 `viking://resources/...` is the shared scope for the current account and supports per-directory or per-file [ACLs](./15-acl.md). `viking://user/{user}/resources/...` is private; move a resource into the shared scope to share it.

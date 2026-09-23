@@ -127,9 +127,9 @@ curl -X GET "http://localhost:1933/api/v1/fs/ls?uri=viking://resources/&recursiv
 **CLI**
 
 ```bash
-ov ls viking://resources/
-ov tree viking://resources/my-project/
-ov glob "**/*.md"
+ov ls viking://resources/ [--simple] [--recursive] [--tags team=search,env=prod] [-f FIELDS]
+ov tree viking://resources/my-project/ [--simple] [--tags team=search,env=prod] [-f FIELDS]
+ov glob "**/*.md" [--uri viking://resources/] [--simple] [--tags team=search,env=prod] [-f FIELDS]
 ```
 
 `-f`/`--fields` accepts a comma-separated list of columns to display (ps `-o` style), producing a column-aligned table with a header row. Available fields: `name`, `uri`, `path`, `type`, `size`, `mode`, `mtime`, `locked`, `id`, `count`, `abstract`, `tags`. Combining `--simple` with `-f` outputs comma-separated values (no header, no tree indentation), one entry per line — suitable for scripting pipelines. When `--simple` is used without `-f`, each line contains a URI. If none of `name`, `uri`, or `path` is selected, the CLI adds `name` for lists or `path` for trees. Selected columns request the corresponding `extra_fields`; the `tags` column requests `include_tags=true`.
@@ -593,7 +593,7 @@ curl -X DELETE "http://localhost:1933/api/v1/fs?uri=viking://resources/old-proje
 **CLI**
 
 ```bash
-ov rm viking://resources/old.md
+ov rm viking://resources/old.md [--recursive]
 ```
 
 

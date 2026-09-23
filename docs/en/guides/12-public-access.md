@@ -131,6 +131,7 @@ This example assumes nginx and OpenViking share a host. The upstream timeout is 
 ```nginx
 server {
     listen 443 ssl;
+    http2 on;  # nginx < 1.25.1: remove this line and use `listen 443 ssl http2;`
     server_name ov.your-domain.com;
 
     ssl_certificate     /etc/letsencrypt/live/ov.your-domain.com/fullchain.pem;

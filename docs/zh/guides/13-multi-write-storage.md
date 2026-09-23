@@ -99,7 +99,7 @@
 | 字段 | 是否必填 | 说明 |
 | --- | --- | --- |
 | `use_path_style` | 可选，默认 `true` | 使用路径风格 URL（`http://host/bucket/key`），按 endpoint 支持的方式选择。 |
-| `directory_marker_mode` | 可选，默认 `"empty"` | `none` 不创建标记，`empty` 创建零字节标记，`nonempty` 创建带内容的标记。 |
+| `directory_marker_mode` | backup 项必填 | `none` 不创建标记，`empty` 创建零字节标记，`nonempty` 创建带内容的标记。每个 S3 backup 项都要显式设置；省略时启动会报 `AGFSConfigError: invalid directory_marker_mode: null`。 |
 | `use_ssl` | 可选 | HTTP 端点（如 `http://localhost:9000`）需要设置为 `false`。 |
 
 **S3 兼容存储最小示例（RustFS/MinIO）：**
@@ -121,7 +121,7 @@
 }
 ```
 
-上面的示例主动选择 `none`。旧版本可能传入无效的 null marker 值；遇到该错误时，显式设置合法值，并核对部署版本。当前 Python 配置默认使用 `empty`。
+上面的示例使用 `none`，适用于不使用目录标记的 S3 兼容服务（RustFS、MinIO、Ceph 等）。backup 项的这个字段没有默认值；顶层 `storage` 的 S3 配置默认使用 `empty`。
 
 ### Docker 网络配置
 

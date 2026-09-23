@@ -38,7 +38,7 @@ Every integration on this page connects to a running OpenViking server. If you d
 Query expansion and recall compression add model calls. Disable both when response time takes priority; retrieval, budgets, and cross-turn deduplication remain enabled:
 
 ```bash
-export OPENVIKING_RECALL_QUERY_EXPANSION=0
+export OPENVIKING_RECALL_QUERY_EXPANSION=off
 export OPENVIKING_RECALL_COMPRESS=off
 ```
 
@@ -47,7 +47,7 @@ Or configure them in `~/.openviking/ovcli.conf`:
 ```json
 {
   "plugin": {
-    "recallQueryExpansion": false,
+    "recallQueryExpansion": "off",
     "recallCompress": "off"
   }
 }
@@ -66,10 +66,10 @@ Claude Code and Codex default to `auto`. Other integrations that support cloud c
 
 These settings control automatic recall. Explicit MCP `search` calls use the arguments supplied in that call. See the [shared plugin documentation](https://github.com/volcengine/OpenViking/blob/main/examples/memory-plugin-shared/README.md#cloud-recall-compression) for details and older-server fallback behavior.
 
-Shared plugins read the `plugin` section in `ovcli.conf`; `plugin.<harness>` overrides a setting for one client. Environment variables take precedence. See [Plugin settings](../configuration/02-client.md#plugin-settings). Restart the agent after changing settings so its hooks load the new configuration.
+Shared plugins read the `plugin` section in `ovcli.conf`; `plugin.<harness>` overrides a setting for one client. Environment variables take precedence; the older `OPENVIKING_RECALL_REWRITE` still works as an alias for `OPENVIKING_RECALL_COMPRESS`. See [Plugin settings](../configuration/02-client.md#plugin-settings). Restart the agent after changing settings so its hooks load the new configuration.
 
 ### Request timeout
 
 Query expansion, retrieval, and digest compression run in sequence. Query expansion defaults to a 5-second timeout (`retrieval.recall_intent_timeout_s`); digest rewriting defaults to 30 seconds (`retrieval.recall_rewrite_timeout_s`).
 
-`OPENVIKING_RECALL_CONTEXT_TIMEOUT_MS` or `plugin.recallContextTimeoutMs` sets the client's timeout for the entire context request. Allow time for retrieval and content reads, while staying below the host's hook timeout. Ending the request early discards the entire response.
+`OPENVIKING_RECALL_CONTEXT_TIMEOUT_MS` or `plugin.recallContextTimeoutMs` sets the client's timeout for the entire context request. When unset, the client waits the plugin's ordinary timeout, raised to at least 15 seconds when the request carries a session (query expansion) and at least 45 seconds when it asks for a digest. An override should exceed the server timeouts the request will spend and stay below the host's hook timeout. Ending the request early discards the entire response.

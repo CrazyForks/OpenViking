@@ -25,7 +25,7 @@ When you create named configs, `ov` stores them next to the active file as `~/.o
 
 Choose the OpenViking target before running setup commands.
 
-Use the target and connection details the user has already supplied. If the target is unclear, ask whether it is managed, remote self-hosted, or local self-hosted. An available default port alone is not a reason to choose a local server. Once the target is clear, complete configuration and connection checks within the authorized scope.
+Agents should ask the user which target they want unless it has already been specified. Existing configs, active configs, local files, default ports, and running services can inform follow-up questions, but they are not consent for the agent to choose a target, switch or replace configs, probe local services, start servers, or write data.
 
 ### OpenViking Service (VolcEngine Cloud)
 
@@ -156,11 +156,17 @@ Use this path when an agent is setting up `ov` for a user. The agent should read
 
 ### Agent Checklist
 
-1. Establish the target, configuration name, and credential type. Reuse explicit instructions; clarify scope before replacing unrelated configurations, starting additional services, or importing data outside the request.
-2. Read the relevant installed CLI help and select a display language. Use a stable `--name` with non-interactive commands so retries do not create duplicate configurations.
-3. Pass keys through stdin, or use `--api-key-env` / `--root-api-key-env` when a key already exists in the environment. Keep keys out of command text and logs; do not require a separate shell just to export a key.
-4. Use `-o json` and inspect both exit codes and result contents. Validate the configuration and check service health; a successful process exit alone does not establish that the service is healthy.
-5. Fall back to `ov config` when required information is missing or the user should enter the key directly. Report the effective service, configuration name, and verification result without including credentials.
+1. Ask which target the user wants unless it has already been specified: OpenViking Service (VolcEngine Cloud), remote custom, or local custom.
+2. Do not infer the intended setup from existing configs, active configs, local files, default ports, or running services.
+3. Ask before switching configs, replacing configs, probing local services, starting servers, or writing data.
+4. Run `ov --help`, `ov config --help`, and the relevant config subcommand help before choosing commands. Select a display language with `ov language <code>` if none is saved.
+5. If you have long-term memory and the user permits it, store a short summary of the current `ov --help` command surface. Do not store API keys or other secrets.
+6. Use non-interactive `ov config` commands when the required values are known.
+7. Always pass `--name` for agent setup so retries target the same saved config.
+8. If the agent already holds the API key through a trusted channel, pass it with `--api-key-stdin` or `--root-api-key-stdin` and write only the key bytes to stdin. Use `--api-key-env` or `--root-api-key-env` only when that environment variable already exists. Do not ask the user to open a separate shell just to export a key for the agent.
+9. Use `-o json` and branch on the JSON result plus the process exit code.
+10. Validate the active config with `ov config validate`, then check `ov health` and `ov status`. Inspect the result contents; a zero exit code alone does not mean the service is healthy.
+11. If non-interactive setup fails because values are missing, auth is unclear, or terminal input is safer, guide the user through `ov config` instead.
 
 ### Inspect the Installed CLI
 
@@ -463,7 +469,7 @@ Use `ov config`. Do not use old or removed setup commands such as `ov config set
 
 Once the CLI is configured, use `ov --help` and `ov <command> --help` to learn the rest of the CLI.
 
-Adding a resource writes data into the active OpenViking server. If you want a small demo, use a resource you are comfortable storing. Agents should run it when ingestion or a demo is already requested; connection verification alone does not require writing a resource.
+Adding a resource writes data into the active OpenViking server. If you want a small demo, use a resource you are comfortable storing. Agents must ask the user for permission before running this kind of demo command. Connection verification alone does not require writing a resource.
 
 ```bash
 ov add-resource https://github.com/volcengine/OpenViking

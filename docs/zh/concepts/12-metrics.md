@@ -124,7 +124,7 @@ scrape_configs:
 | `context_type` | 检索上下文类型 | `resource` |
 | `provider` | 模型或外部服务提供方 | `volcengine` |
 | `model_name` | 模型名称 | `doubao-seed-1-8-251228` |
-| `stage` | 阶段标签（按指标族定义） | 资源阶段：`parse`；Token 归因阶段：`embed_query` |
+| `stage` | 阶段标签（按指标族定义） | 资源阶段：`parse_artifact`；Token 归因阶段：`embed_query` |
 | `valid` | 当前样本是否为有效新鲜值 | `1` / `0` |
 
 其中：
@@ -132,8 +132,8 @@ scrape_configs:
 - `account_id` 只在受控白名单指标上启用，避免高基数失控
 - `valid=0` 表示该状态/探针的当前样本是失败回退值或 stale fallback，不代表标签本身错误
 - `stage` 的语义依赖指标族：
-  - `openviking_resource_stage_*`：资源导入流水线阶段（如 `parse/target_resolve/content_commit`）
- - `openviking_operation_tokens_total`：Token Attribution 的归因阶段（如 `embed_query/rerank/vlm`）
+  - `openviking_resource_stage_*`：资源导入流水线阶段（如 `parse_artifact/target_resolve/content_commit`）
+  - `openviking_operation_tokens_total`：Token Attribution 的归因阶段（如 `embed_query/rerank/vlm`）
 
 ## 关键指标说明
 
@@ -170,8 +170,8 @@ scrape_configs:
 
 典型 `stage` 包括：
 
-- `request`
-- `parse`
+- `source_prepare`
+- `parse_artifact`
 - `target_resolve`
 - `update_plan`
 - `content_commit`

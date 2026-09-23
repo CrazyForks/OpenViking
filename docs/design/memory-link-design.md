@@ -1906,7 +1906,7 @@ PPR 传播（多种子叠加，按 3.2.7.4 配置表）:
 1. ~~**语义补充的向量计算成本**~~：已去掉 session.commit 时的语义补充和零 LLM 扫描，关联发现统一交给外部 Bot T+1 触发整理
 2. ~~**link_type 词汇表**~~：已确定为枚举，定义 6 种类型（related_to, belongs_to, caused_by, derived_from, contradicts, evolved_from）
 3. ~~**links 字段是否放入 LLM prompt**~~：已确认需要，prefetch 时将已有页面的 links 读入上下文，避免重复建链
-4. **backlink 同步的并发安全**：相关端点应在同一锁范围内更新；还需覆盖并发删除和部分写入失败后的修复
+4. ~~**backlink 同步的并发安全**~~：已确认无并发问题——所有读取的文件都加锁，backlink 只对已读取的文件回链
 5. ~~**target_ranges 行号偏移**~~：实时阶段一步到位——精确匹配 + LLM 语义匹配 + 找不到则删除，无需 pending_repair
 6. ~~**Dream 具体产出**~~：Dream 为通用框架，产出 report memory_type 实例（问题驱动的报告），用户通过 YAML 配置 dream_task
 
@@ -1928,7 +1928,7 @@ PPR 传播（多种子叠加，按 3.2.7.4 配置表）:
 | 链接参与检索 | Backlink boost（简单排序加分，非图传播） | 编译产物参与搜索 | 4 信号图扩展参与排序 | PPR 图增强，链接直接参与检索排序 |
 | 知识可信度 | 无 | Claims + 矛盾检测 + 新鲜度评估 | Lint 检查（结构+语义） | links 已覆盖矛盾/演变/权重/溯源，不引入独立 claims 层 |
 
-**本方案希望提供的能力（实现状态需单独验证）：**
+**OpenViking 的差异化：**
 - 支持链接权重（weight），支持更精细的关联强度
 - 支持行号级链接精度（target_ranges），检索时可只读目标行范围，减少 token 消耗
 - 支持 hook 攒批提取 + 资源目录提取双模式在线写入

@@ -115,9 +115,9 @@ Credentials given in the patch win over the environment. Behavior knobs resolve 
 |-------|---------------|
 | Nothing injected, no OpenViking tools | `dsh --profile web --dump-config` should list `openviking-memory`; re-run the installer or `dsh plugin --profile web add …` |
 | Installed into the wrong profile | The installer defaults to `web`; re-run it with `--dsh-profile <name>` |
-| `ERESOLVE` during install | Check the installed DSH version against the bundle’s declared dependencies. Align the host packages using the bundle README; an old prerelease pin is not a general upgrade fix. |
+| `ERESOLVE` during install | Use a supported `@deepseek-ai/dsh` version: `0.1.0-rc.6`, `0.1.5-rc.1`, `0.1.5-rc.2`, or a stable `0.1.x` (peer range `>=0.1.0-rc.6 <0.2.0 \|\| ^0.1.5-rc.1`), and keep all `@deepseek-ai/dsh-*` host packages on the same version. |
 | Install says the package is "not in the npm registry" | The profile may have a pnpm minimum release age of 24 hours; check its configuration (`minimumReleaseAge`). Wait it out, or add the exact version to `minimumReleaseAgeExclude` in the profile's `pnpm-workspace.yaml` |
-| Recall is empty | `ov health`; check the endpoint and that the prompt is longer than the minimum query length (3 characters) |
+| Recall is empty | `curl "<your OpenViking URL>/health"`; check the endpoint and that the prompt is longer than the minimum query length (3 characters) |
 | 401 / 403 from OpenViking | Verify `OPENVIKING_API_KEY`; for trusted-mode deployments also verify `OPENVIKING_ACCOUNT` and `OPENVIKING_USER` |
 | Memories from other projects leak in | Set `OPENVIKING_RECALL_PEER_SCOPE=actor` to limit peer memories to the active peer; user-level memories remain shared |
 | Nothing committed after a crash | Commit runs on a token threshold and at teardown; queued writes replay at the next session start |

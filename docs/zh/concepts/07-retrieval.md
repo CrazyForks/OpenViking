@@ -169,7 +169,7 @@ else:
 
 ### 后端支持
 
-可配置的 provider 包括 `vikingdb`（Volcengine）、`cohere`、`openai`（兼容接口）、`litellm` 和 `jev`。模型名与认证方式取决于 provider，详见[配置指南](../guides/01-configuration.md)。
+可配置的 provider 包括 `vikingdb`（Volcengine）、`cohere`、`openai`（兼容接口）、`litellm` 和 `jev`（`vikingdb` 的默认模型为 `doubao-seed-rerank`）。模型名与认证方式取决于 provider，详见[配置指南](../guides/01-configuration.md)。
 
 ## 检索结果
 
