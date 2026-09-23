@@ -24,11 +24,34 @@ This work involves three related problems: extracting searchable information fro
 
 ### Academic Collaboration and Industry–Academia Integration
 
+Since its launch, OpenViking has worked with universities and research institutes to explore context database design and engineering practice for AI agents, keeping research work tied to real application needs.
+
 We sincerely thank the following scholars for their contributions and guidance in launching OpenViking:
 
 - Associate Professor Sun Yahui, School of Information, Renmin University of China
 - Professor Gao Yunjun, School of Software, Zhejiang University; Researchers Zhu Yifan and Ge Congcong
 - Associate Professor Dai Guohao, School of Artificial Intelligence, Shanghai Jiao Tong University; Co‑founder and Chief Scientist of Wuwen Xinqiong
+
+Our collaboration models include:
+
+- **Joint research projects**: frontier research in context engineering
+- **Technical workshops**: regular academic exchanges and technical reviews
+- **Talent cultivation**: practice platforms and research topics for graduate students
+- **Technology transfer**: turning research results into engineering practice
+
+### Research Papers
+
+The following papers come from this collaboration. Parts of their core mechanisms are integrated into OpenViking.
+
+- **VikingMem: A Memory Base Management System for Stateful LLM-based Applications**<br>
+  Jiajie Fu, Junwen Chen, Mengzhao Wang, Aoxiang He, Maojia Sheng, Xiangyu Ke, Yifan Zhu, and Yunjun Gao. arXiv:2605.29640, 2026. Presented at VLDB 2026.<br>
+  Event-driven extraction, update, and consolidation of long-term memory for stateful agents. [arXiv](https://arxiv.org/abs/2605.29640) · [PDF](https://arxiv.org/pdf/2605.29640)
+- **Directory-Aware Query and Maintenance in Vector Databases**<br>
+  Mengzhao Wang, Zheng Gong, Jingpei Hu, Jiajie Fu, Maojia Sheng, Junwen Chen, and Yifan Zhu. arXiv:2606.16903, 2026. Accepted by ICDE.<br>
+  Formal foundations and index design (TrieHI) for directory-scoped retrieval, which OpenViking uses to resolve directory scopes before vector ranking. [arXiv](https://arxiv.org/abs/2606.16903) · [PDF](https://arxiv.org/pdf/2606.16903)
+- **VikingRAG: Accurate and Token-efficient Retrieval-augmented Generation over Structured Documents**<br>
+  Peiyuan Gao, Gaoyuan Zhang, Haojie Qin, Yahui Sun, Qianyi Zhang, Yunhao Zhang, Zeyu Wang, and Wei Lu. arXiv:2609.11390, 2026. Submitted.<br>
+  Combines semantic search with document structure, expanding relevant directory segments as evidence gaps arise. [arXiv](https://arxiv.org/abs/2609.11390) · [PDF](https://arxiv.org/pdf/2609.11390)
 
 ## Open-Source Organization
 

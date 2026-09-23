@@ -24,11 +24,34 @@ Viking 团队主要开发向量检索、知识库和记忆管理产品。OpenVik
 
 ### 学术合作与产学研结合
 
+OpenViking 自启动起就与高校和研究机构合作，共同探索面向 AI Agent 的上下文数据库设计与工程实践，让研究工作贴近实际应用需求。
+
 我们诚挚感谢以下学者的宝贵贡献与技术指导，共同发起了 OpenViking 项目：
 
 - 中国人民大学信息学院副教授孙亚辉老师
 - 浙江大学软件学院教授高云君老师，研究员朱轶凡、葛丛丛老师
 - 上海交通大学人工智能学院副教授，无问芯穹联合创始人兼首席科学家戴国浩老师
+
+我们与学术界的合作模式包括：
+
+- **联合研究项目**：共同开展上下文工程的前沿研究
+- **技术研讨会**：定期组织学术交流与技术方案评审
+- **人才培养**：为研究生提供实践平台与研究课题
+- **成果转化**：将学术研究成果转化为工程实践
+
+### 研究论文
+
+以下论文来自上述合作，其中部分核心机制已集成到 OpenViking。
+
+- **VikingMem: A Memory Base Management System for Stateful LLM-based Applications**<br>
+  Jiajie Fu, Junwen Chen, Mengzhao Wang, Aoxiang He, Maojia Sheng, Xiangyu Ke, Yifan Zhu, and Yunjun Gao. arXiv:2605.29640, 2026。已在 VLDB 2026 演讲。<br>
+  以事件驱动长期记忆的提取、更新与整合，服务有状态 Agent。[arXiv](https://arxiv.org/abs/2605.29640) · [PDF](https://arxiv.org/pdf/2605.29640)
+- **Directory-Aware Query and Maintenance in Vector Databases**<br>
+  Mengzhao Wang, Zheng Gong, Jingpei Hu, Jiajie Fu, Maojia Sheng, Junwen Chen, and Yifan Zhu. arXiv:2606.16903, 2026。已被 ICDE 接收。<br>
+  目录范围检索的形式化基础与索引设计（TrieHI），OpenViking 用它在向量排序前确定目录检索范围。[arXiv](https://arxiv.org/abs/2606.16903) · [PDF](https://arxiv.org/pdf/2606.16903)
+- **VikingRAG: Accurate and Token-efficient Retrieval-augmented Generation over Structured Documents**<br>
+  Peiyuan Gao, Gaoyuan Zhang, Haojie Qin, Yahui Sun, Qianyi Zhang, Yunhao Zhang, Zeyu Wang, and Wei Lu. arXiv:2609.11390, 2026。投递中。<br>
+  将语义检索与文档结构结合，按证据缺口展开相关目录片段。[arXiv](https://arxiv.org/abs/2609.11390) · [PDF](https://arxiv.org/pdf/2609.11390)
 
 ## 开源组织建设
 
