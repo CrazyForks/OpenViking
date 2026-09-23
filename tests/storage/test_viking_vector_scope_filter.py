@@ -1,6 +1,9 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from openviking.server.identity import RequestContext, Role
@@ -30,6 +33,7 @@ def _build(
     context_type: str | None = "resource",
     extra_filter=None,
     level: list[int] | None = None,
+    acl_enabled: bool = False,
 ):
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
@@ -39,13 +43,23 @@ def _build(
         target_directories=targets,
         extra_filter=extra_filter,
         level=level,
+        acl_enabled=acl_enabled,
     )
 
 
-def _tenant_filter(ctx: RequestContext):
+def _tenant_filter(ctx: RequestContext, *, acl_enabled: bool = False):
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
-    return backend._tenant_filter(ctx)
+    return backend._tenant_filter(ctx, acl_enabled=acl_enabled)
+
+
+class _AclConfigReader:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    async def get_account(self, account_id: str, field: str):
+        del account_id, field
+        return SimpleNamespace(enabled=self.enabled)
 
 
 class _FailingAsyncAdapter:
@@ -60,6 +74,20 @@ class _RecordingAsyncAdapter:
     async def call(self, method_name, **kwargs):
         self.calls.append((method_name, kwargs))
         return []
+
+
+@pytest.mark.asyncio
+async def test_search_by_random_passes_runtime_acl_state_to_tenant_filter():
+    ctx = _ctx()
+    adapter = SimpleNamespace(search_by_random=AsyncMock(return_value=[]))
+    acl_reader = _AclConfigReader(False)
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = AclManager(backend, acl_reader)
+    backend._get_backend_for_context = lambda _ctx: adapter
+
+    assert await backend.search_by_random(ctx=ctx) == []
+    adapter.search_by_random.assert_awaited_once()
+    assert adapter.search_by_random.await_args.kwargs["filter"] == _tenant_filter(ctx)
 
 
 def test_descendant_target_elides_only_visible_root_path_filter():
@@ -165,6 +193,13 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             "context_type": "resource",
         },
         {
+            **legacy_mode,
+            "id": "default-shared",
+            "uri": "viking://resources/default.md",
+            "account_id": "acct",
+            "context_type": "resource",
+        },
+        {
             "id": "direct-shared",
             "uri": "viking://resources/direct.md",
             "account_id": "acct",
@@ -178,7 +213,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             "account_id": "acct",
             "context_type": "resource",
             "acl_mode": "inherit",
-            "acl_inherited_grants": ["3:user:*"],
+            "acl_inherited_grants": ["7:user:*"],
         },
         {
             "id": "restricted-inherited-shared",
@@ -186,7 +221,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             "account_id": "acct",
             "context_type": "resource",
             "acl_mode": "restricted",
-            "acl_inherited_grants": ["3:user:*"],
+            "acl_inherited_grants": ["7:user:*"],
         },
         {
             "id": "restricted-direct-shared",
@@ -199,11 +234,12 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
         },
         {
             "id": "denied-shared",
-            "uri": "viking://resources/denied.md",
+            "uri": "viking://resources/finance/denied.md",
             "account_id": "acct",
             "context_type": "resource",
             "acl_mode": "inherit",
-            "acl_direct_grants": ["7:user:bob"],
+            "acl_direct_grants": [],
+            "acl_inherited_grants": ["3:group:finance"],
         },
         {
             "id": "foreign-account",
@@ -225,8 +261,8 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             "DefaultValue"
         )
         assert await backend.create_collection("context", schema)
-        backend.acl_manager = AclManager(backend)
-        backend.acl_manager.set_enabled(ctx.account_id, True)
+        acl_config = _AclConfigReader(True)
+        backend.acl_manager = AclManager(backend, acl_config)
         for record in records:
             record_ctx = RequestContext(
                 user=UserIdentifier(record["account_id"], ctx.user.user_id), role=Role.ADMIN
@@ -255,11 +291,19 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             query_vector=[1.0, 0.0, 0.0, 0.0],
             context_type="resource",
         )
+        finance = await backend.search_in_tenant(
+            ctx=RequestContext(user=ctx.user, role=ctx.role, group_ids=("finance",)),
+            query_vector=[1.0, 0.0, 0.0, 0.0],
+            context_type="resource",
+            target_directories=["viking://resources/finance"],
+        )
+        assert [record["id"] for record in finance] == ["denied-shared"]
 
         assert sorted(record["id"] for record in visible) == sorted(
             [
                 "own",
                 "legacy-shared",
+                "default-shared",
                 "direct-shared",
                 "inherited-shared",
                 "restricted-direct-shared",
@@ -271,6 +315,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
                 "own",
                 "cross-user",
                 "legacy-shared",
+                "default-shared",
                 "direct-shared",
                 "inherited-shared",
                 "restricted-inherited-shared",
@@ -279,7 +324,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             ]
         )
 
-        backend.acl_manager.set_enabled(ctx.account_id, False)
+        acl_config.enabled = False
         shared = await backend.search_in_tenant(
             ctx=ctx,
             query_vector=[1.0, 0.0, 0.0, 0.0],
@@ -289,6 +334,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             [
                 "own",
                 "legacy-shared",
+                "default-shared",
                 "direct-shared",
                 "inherited-shared",
                 "restricted-inherited-shared",
