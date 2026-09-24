@@ -70,7 +70,7 @@ discoverable-name behavior applies only to the shared
 existing hiding rules.
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 entries = client.ls(
@@ -178,7 +178,7 @@ Get directory tree structure.
 `tags` uses AND semantics and is applied before `offset` and `limit`. Tags are included for filtered responses; for an unfiltered response, request `include_tags=true` (CLI: `-f tags`). HTTP `simple=true` returns paths only. The CLI fetches entry objects when combining `--simple` with `--fields`.
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 entries = client.tree(uri="viking://resources/", offset=100, limit=100)
@@ -261,7 +261,7 @@ Get file or directory status information. For directories, returns the count of 
 | uri | str | Yes | - | Viking URI (e.g. `viking://resources/docs/api.md`) or a 32-character hex vector record `id` |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 info = client.stat(uri="viking://resources/docs/api.md")
@@ -472,7 +472,7 @@ Create a directory.
 | description | str | No | `null` | Initial directory description. When omitted, the directory name is used as the default L0; when provided, this description is used. Both forms write `.abstract.md` and queue L0 vectorization. |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 client.mkdir(uri="viking://resources/new-project/")
@@ -547,7 +547,7 @@ Invalid URI formats, unsupported schemes, and internal scopes such as `temp` or 
 | recursive | bool | No | False | Remove directory recursively |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 # Remove single file
@@ -726,7 +726,7 @@ Files use two Exact Locks; directories use Tree Locks on the source and destinat
 | to_uri | str | Yes | - | Destination Viking URI |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 client.mv(

@@ -228,7 +228,7 @@ Docker 镜像默认会同时启动：
 }
 ```
 
-上面的示例用于 API Key 认证；不要将无认证的开发模式绑定到非 localhost。其他认证方式见[认证指南](04-authentication.md)。如需自定义绑定地址，可通过 `OPENVIKING_SERVER_HOST` 覆盖。
+未设置 `root_api_key` 时，服务会自动进入 dev 模式，而 dev 模式监听非回环地址会拒绝启动。上面的示例用于 API Key 认证，其他认证方式见[认证指南](04-authentication.md)。如需自定义绑定地址，可通过 `OPENVIKING_SERVER_HOST` 覆盖。
 
 镜像默认启用 Bot。API Key 模式下，Bot 还需要在 `bot.ov_server.api_key` 中配置可用的 User/Admin key，不能把 root key 当数据访问凭据。只部署 OpenViking Server 时使用下文的 `--without-bot`，需要 Bot 时按[VikingBot 配置](17-vikingbot.md)完成身份设置。
 

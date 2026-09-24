@@ -315,7 +315,7 @@ Session 写入阶段会将超过阈值的 tool output 保存到 `ToolResultStore
 2. [test_tool_result_externalization.py](https://github.com/volcengine/OpenViking/blob/main/tests/session/test_tool_result_externalization.py#L1)：覆盖 externalization、stub 替换、阈值边界、aggregate budget、ref 回溯等端到端流程。
 3. [test_api_sessions.py](https://github.com/volcengine/OpenViking/blob/main/tests/server/test_api_sessions.py#L190)：覆盖 HTTP API 层的 tool result externalization、stub 文案、`read/list/search` 回溯，以及 `synopsis_kind` / `synopsis.kind` 元数据透出。
 
-以上为相关测试入口；当前是否通过及用例数量以对应提交的测试结果为准。
+本文撰写时，相关测试共 29 个用例通过，可作为后续继续补齐真实输出回归用例的基础。
 
 ---
 

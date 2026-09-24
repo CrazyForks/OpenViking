@@ -333,4 +333,6 @@ Recommended signals to watch:
 4. Cache summary files and raw `read_dir` first, then expand to more regular small files.
 5. Add lock, control-plane, and permission-sensitive paths to `bypass_prefixes`.
 
+RAGFS cache handles invalidation according to filesystem semantics; the Provider decides where cache objects live. The backend remains the source of truth, and every cache hit must pass envelope and generation validation before it is returned.
+
 After enabling the cache, compare repeated reads and invalidation after a file update against the baseline. A higher hit rate is useful only if the returned contents remain current.

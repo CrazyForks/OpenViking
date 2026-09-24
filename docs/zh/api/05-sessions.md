@@ -1006,7 +1006,7 @@ ov session delete a1b2c3d4
 
 **Part 类型**：
 - `TextPart`: 纯文本内容
-- `ImagePart`: 图片内容或引用
+- `ImagePart`: OpenAI 风格的图片 URL 内容。记忆提取时，OpenViking 可调用配置的 VLM 将图片转为文字描述
 - `ContextPart`: 上下文引用，指向资源或记忆
 - `ToolPart`: 工具调用和结果
 
@@ -1655,7 +1655,7 @@ try:
                 ),
             ],
         )
-    # 提交会话（立即返回，后台执行摘要生成和记忆提取）
+    # 提交会话；摘要生成和记忆提取在后台执行
     commit_result = await client.commit_session(session_id=session_id)
     print(f"Task ID: {commit_result['task_id']}")
 

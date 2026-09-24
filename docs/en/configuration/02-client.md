@@ -47,7 +47,7 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 }
 ```
 
-This example uses API key mode. Omit fields you do not need; a local server in `dev` mode usually needs only `url`. Trusted deployments additionally configure `account`, `user`, and the required credentials as described in [Authentication](../guides/04-authentication.md). Do not send these identity fields in ordinary API key mode.
+This example uses API key mode. Omit fields you do not need; a local server in `dev` mode usually needs only `url`. Trusted deployments additionally configure `account`, `user`, and the required credentials as described in [Authentication](../guides/04-authentication.md). In API key mode, the server takes identity from the key and ignores these fields.
 
 ## Connection and Authentication
 

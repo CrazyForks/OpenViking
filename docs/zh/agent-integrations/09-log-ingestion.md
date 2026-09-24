@@ -2,7 +2,7 @@
 
 `openviking-server ingest` 读取本地 Agent 对话日志，将消息导入 OpenViking 会话并提交，触发记忆提取。它支持一次性导入历史日志，也支持持续监听新增日志，无需修改对应 Agent 或安装记忆插件。
 
-命令运行在日志所在机器，通过 SDK 连接本地或远程 OpenViking 服务。导入默认关闭，需要显式启用总开关和指定 Agent 的配置。
+命令运行在日志所在机器，通过 SDK 连接本地或远程 OpenViking 服务。导入默认关闭，安装 OpenViking 不会扫描本地日志；需要显式启用总开关和指定 Agent 的配置。
 
 源码：[openviking/ingest](https://github.com/volcengine/OpenViking/tree/main/openviking/ingest)
 

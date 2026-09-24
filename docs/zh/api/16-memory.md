@@ -13,7 +13,7 @@
 | identity | `viking://user/{user_id}/memories/identity.md` | 助手身份与自我介绍 |
 | soul | `viking://user/{user_id}/memories/soul.md` | 助手原则、边界、风格和连续性 |
 | cases | `viking://user/{user_id}/memories/cases/` | 可训练、可评估的任务案例 |
-| trajectories | `viking://user/{user_id}/memories/trajectories/` | 执行轨迹与任务结果 |
+| trajectories | `viking://user/{user_id}/memories/trajectories/` | 从 Agent 任务轨迹提炼的可复用操作契约 |
 | experiences | `viking://user/{user_id}/memories/experiences/` | 可复用的执行经验 |
 | tools | `viking://user/{user_id}/memories/tools/` | 工具使用经验与最佳实践 |
 | skills | `viking://user/{user_id}/memories/skills/` | 技能执行经验与工作流策略 |

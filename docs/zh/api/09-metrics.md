@@ -2,7 +2,7 @@
 
 OpenViking 提供 `/metrics` 端点，用于向 Prometheus、Grafana Agent 等监控系统导出运行时指标。
 
-该端点返回供监控系统定时抓取的 Prometheus 文本。需要组件状态的 JSON 快照时，使用 `/api/v1/observer/*`。
+该端点返回供监控系统定时抓取的 Prometheus 文本，内容是系统运行状态和服务质量信号，不用于业务分析。需要组件状态的 JSON 快照时，使用 `/api/v1/observer/*`。
 
 ## API 参考
 

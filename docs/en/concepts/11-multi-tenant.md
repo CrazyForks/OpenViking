@@ -1,6 +1,6 @@
 # Multi-Tenant
 
-A single OpenViking Server uses `account` and `user` identity boundaries to control data sharing and isolation.
+OpenViking multi-tenancy does not mean "deploy one isolated server per team." A single OpenViking Server uses `account` and `user` identity boundaries to control data sharing and isolation.
 
 This model fits two common scenarios:
 

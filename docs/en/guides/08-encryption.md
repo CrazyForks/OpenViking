@@ -99,6 +99,8 @@ File encryption and API key hashing are independent controls:
 
 ### Upgrading from implicit API key hashing
 
+Applies when upgrading from v0.3.12 or earlier to v0.3.13 or later.
+
 **Behavior Change**:
 - **Before**: `encryption.enabled = true` implicitly enabled API key Argon2id hashing
 - **Now**: You must explicitly configure `encryption.api_key_hashing.enabled`

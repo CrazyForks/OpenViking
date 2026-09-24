@@ -68,7 +68,7 @@ OpenViking 提供类 Unix 的文件系统操作来管理上下文。
 `viking://resources` 命名空间；个人和 peer 私有命名空间仍按原有规则隐藏。
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 entries = client.ls(
@@ -203,7 +203,7 @@ CLI 会按所选列请求 `extra_fields`（`locked`、`id`、`count`）；选择
 `tags` 使用 AND 语义，并在 `offset` 和 `limit` 前应用。带 tags 过滤的响应会返回 `tags`；未过滤时需传 `include_tags=true` 才返回它们，否则会省略 tags 以避免额外的向量库读取。
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 entries = client.tree(
@@ -308,7 +308,7 @@ ov tree viking://resources/my-project/ --simple --fields path,tags
 | uri | str | 是 | - | Viking URI（如 `viking://resources/docs/api.md`）或 32 字符十六进制向量记录 `id` |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 info = client.stat(uri="viking://resources/docs/api.md")
@@ -519,7 +519,7 @@ ov attrs set-tags viking://resources/docs --tags team=search --mode append --rec
 | description | str | 否 | `null` | 目录初始说明。未传入时使用目录名作为默认 L0；传入后使用该说明。两种情况都会写入 `.abstract.md` 并进入 L0 向量化队列。 |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 client.mkdir(uri="viking://resources/new-project/")
@@ -594,7 +594,7 @@ URI 格式非法、scheme 不支持，或使用 `temp`、`queue` 等内部作用
 | recursive | bool | 否 | False | 递归删除目录 |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 # 删除单个文件
@@ -773,7 +773,7 @@ ov cp -r viking://resources/docs viking://resources/docs-backup
 | to_uri | str | 是 | - | 目标 Viking URI |
 
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 client.mv(

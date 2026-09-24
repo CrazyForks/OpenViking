@@ -150,7 +150,7 @@ viking://user/default/memories/preferences/editor.md
 
 ### session.commit()
 
-Phase 1 使用会话根目录的 EXACT 锁划定提交边界。模型摘要和记忆提取放在后台，避免在这个边界锁内等待模型：
+Phase 1 使用会话根目录的 EXACT 锁划定提交边界。模型调用耗时不可控（5s~60s+），因此摘要生成和记忆提取放在后台，不在这个边界锁内等待：
 
 ```text
 Phase 1：持锁准备并发布归档
@@ -390,7 +390,7 @@ fencing token 校验通过的一方成功持有 `TreeLock(java-guide)`；失败�
 | add_resource 语义处理中途崩溃 | 生命周期锁过期 + SemanticProcessor 重启时重新获取 | worker 重启后 |
 | session.commit Phase 2 崩溃 | 持久化 `session_commit` 队列 + 重试消费 | 重启时 |
 | enqueue 后 worker 处理前崩溃 | QueueFS SQLite 持久化 | worker 重启后 |
-| 孤儿索引 | 清理相关向量或重建索引 | 核对并执行修复时 |
+| 孤儿索引 | `ov reindex <uri> --mode prune_orphans`（可先加 `--dry-run` 预览） | 手动执行时 |
 
 ## 配置
 

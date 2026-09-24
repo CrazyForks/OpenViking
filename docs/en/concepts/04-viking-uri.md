@@ -253,7 +253,7 @@ ov add-resource --parent-auto-create "viking://resources/reports/{calendar:ym}" 
 
 ```
 viking://
-├── resources/       # Independent resources
+├── resources/       # Account-shared reference material
 │   └── {project}/
 │       ├── .abstract.md
 │       ├── .overview.md
@@ -290,7 +290,7 @@ remain isolated by account.
 
 ## URI Operations
 
-The `VikingURI` helper below comes from the server-side `openviking` package, not the standalone Python SDK public interface.
+The `VikingURI` helper below comes from the `openviking_cli` package installed with the server, not the standalone Python SDK public interface.
 
 ### Parsing
 

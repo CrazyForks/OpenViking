@@ -1,6 +1,6 @@
 # 多版本管理（快照）
 
-快照将指定范围内的文件树保存为不可变版本。使用 `commit` 保存、`log` 查看历史、`show` 读取旧版文件、`restore` 恢复已保存的内容。未提交或被排除的文件不在恢复范围内，ACL 和向量索引也不保存历史版本。
+快照将指定范围内的文件树保存为不可变版本。使用 `commit` 保存、`log` 查看历史、`show` 读取旧版文件、`diff` 对比文件在两个版本间的差异、`restore` 恢复已保存的内容。未提交或被排除的文件不在恢复范围内，ACL 和向量索引也不保存历史版本。
 
 快照能力底层由内嵌在 Rust RAGFS 层的 [gitoxide](https://github.com/Byron/gitoxide) 驱动，按 `account_id` 维护一个逻辑 Git 仓库（每个账号一个仓库），使用快照 API 管理版本即可，无需直接修改底层仓库。
 
@@ -65,7 +65,7 @@ USER 和 ADMIN 调用 `commit`、`log`、`restore` 时必须显式传入 `paths`
 | author_name | str | 否 | null | 覆盖默认的提交者名字（默认 `viking-bot`） |
 | author_email | str | 否 | null | 覆盖默认的提交者邮箱 |
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 result = client.snapshot.commit(
@@ -150,7 +150,7 @@ ov snapshot commit -m "v1 initial import" --paths viking://resources/my_md.md -o
 
 为限制存储开销，过滤请求最多检查 1,000 条提交。如果尚未收集到请求数量的匹配结果，并且仍存在未检查的更早历史，接口将返回 `INVALID_ARGUMENT` 错误，而不是返回不完整的历史列表。非过滤请求不受该扫描预算限制，因为每检查一条提交都会推进返回数量限制。
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 history = client.snapshot.log(
@@ -240,7 +240,7 @@ ov snapshot log --limit 10 \
 | target_ref | str | 是 | - | 提交 OID（支持缩写前缀）、分支名或标签 |
 | path | str | 否 | null | 某个文件的 `viking://` URI；省略时返回提交元数据，但仅限本地 ROOT 模式 |
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 # 查看提交元数据（仅本地 ROOT 模式）
@@ -322,7 +322,7 @@ ov snapshot show 3f2a1b9c --path viking://resources/my_project/guide.md --out-fi
 
 对比一个 UTF-8 文件在两个快照引用中的内容，并返回 unified diff。`to_ref` 必填；省略 `from_ref` 时，旧版本按空文件处理，可用于展示文件的初始版本。
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 result = client.snapshot.diff(
@@ -403,7 +403,7 @@ ov snapshot diff viking://resources/my_project/guide.md \
 | author_name | str | 否 | null | 覆盖默认的提交者名字 |
 | author_email | str | 否 | null | 覆盖默认的提交者邮箱 |
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 # 先预演，确认要改动哪些文件
@@ -537,7 +537,7 @@ ov snapshot restore 3f2a1b9c viking://resources/my_project -m "restore to v1" -o
 
 读取账号 `.ovgitignore` 内容；文件不存在时返回空字符串。
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 content = client.snapshot.get_gitignore()
@@ -587,7 +587,7 @@ ov snapshot ignore-get -o json
 |------|------|------|--------|------|
 | content | str | 是 | - | `.ovgitignore` 文件内容（UTF-8） |
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 client.snapshot.set_gitignore(content="*.log\n")
@@ -633,7 +633,7 @@ ov snapshot ignore-set --file ./my-rules -o json
 
 删除账号 `.ovgitignore`。文件不存在也视为成功（幂等）。
 
-**Python HTTP SDK**
+**Python SDK (HTTP)**
 
 ```python
 client.snapshot.delete_gitignore()

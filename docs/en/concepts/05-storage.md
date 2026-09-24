@@ -27,7 +27,7 @@ OpenViking uses a dual-layer storage architecture that separates content storage
 
 ### Design Benefits
 
-AGFS holds the source files. The vector index stores what retrieval needs, including URI references, vectors, metadata, and abstracts. Some memory records store their complete body in the abstract field, so the vector index can contain readable text.
+AGFS holds the source files. The vector index stores what retrieval needs, including URI references, vectors, metadata, and abstracts. Memory records store their body text in the abstract field, capped at 50,000 bytes, so the vector index can contain readable text.
 
 The two backends can be configured separately. File APIs read from AGFS, while retrieval can return indexed text without rereading every source file. Backups and access controls should account for both stores.
 

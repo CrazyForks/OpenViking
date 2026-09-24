@@ -13,7 +13,7 @@ Memory is produced by session commit or explicit extraction, stored in the user 
 | identity | `viking://user/{user_id}/memories/identity.md` | Assistant identity and self-introduction |
 | soul | `viking://user/{user_id}/memories/soul.md` | Assistant principles, boundaries, style, and continuity |
 | cases | `viking://user/{user_id}/memories/cases/` | Trainable and evaluable task cases |
-| trajectories | `viking://user/{user_id}/memories/trajectories/` | Execution trajectories and task outcomes |
+| trajectories | `viking://user/{user_id}/memories/trajectories/` | Reusable operation contracts distilled from agent task trajectories |
 | experiences | `viking://user/{user_id}/memories/experiences/` | Reusable execution insights |
 | tools | `viking://user/{user_id}/memories/tools/` | Tool usage knowledge and best practices |
 | skills | `viking://user/{user_id}/memories/skills/` | Skill execution knowledge and workflow strategies |

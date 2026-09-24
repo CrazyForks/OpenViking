@@ -38,7 +38,7 @@ Retrieval     Sessions       Resource / Skill import
 
 ## Service Layer
 
-The Service layer decouples business logic from the transport layer, the CLI and SDKs access it through the HTTP Server:
+The Service layer decouples business logic from the transport layer. The CLI and SDKs reach it through the HTTP Server:
 
 | Service | Responsibility | Key Methods |
 |---------|----------------|-------------|
@@ -85,7 +85,7 @@ Query → Query Preparation (optional intent analysis) → Vector Retrieval (opt
 ### Session Commit
 
 ```
-Messages → Compress → Archive → Memory Extraction → Storage
+Messages → Archive Boundary → Archive → Memory Extraction → Storage
 ```
 
 1. **Messages**: Accumulate conversation messages and usage records

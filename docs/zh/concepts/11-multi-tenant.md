@@ -1,6 +1,6 @@
 # 多租户
 
-OpenViking 在同一个 Server 内，通过 `account` 和 `user` 两层身份边界隔离和共享数据。
+OpenViking 的多租户不是“为每个团队部署一套独立服务”，而是在同一个 Server 内，通过 `account` 和 `user` 两层身份边界隔离和共享数据。
 
 它适合两类典型场景：
 

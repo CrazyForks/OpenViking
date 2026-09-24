@@ -47,7 +47,7 @@ OpenViking must have metrics enabled first. Minimal configuration reference:
 }
 ```
 
-After merging the metrics section into the existing configuration to `~/.openviking/ov.conf`, restart OpenViking Server.
+Merge the metrics section into `~/.openviking/ov.conf`, then restart OpenViking Server.
 
 If you have not started the service yet, you can refer to:
 

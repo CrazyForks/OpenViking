@@ -599,7 +599,7 @@ re-export from an environment that can read that version.
 | `source path is incompatible with target path` | Structured scope root depth would change | Import into the correct system parent directory. |
 | `Top-level scope ovpack packages must be imported to viking://` | A top-level scope package was imported to a non-root parent | Import to `viking://`. |
 | `Backup ovpack packages must be restored` | A backup package was imported with regular import | Use `ov restore`. |
-| `Resource already exists` | Target root already exists | Choose a new target parent, skip the existing root, or back it up before explicitly replacing it. |
+| `Resource already exists` | Target root already exists | Choose a new target parent, use `--on-conflict skip` to keep the existing root, or back it up and use `--on-conflict overwrite` to replace it. |
 | `incomplete OpenViking vector index snapshot` | `--include-vectors` found missing index records in the export range | Run `ov system consistency <uri>` to locate the issue, then wait for processing or reindex. |
 | `dense vector snapshot is incompatible` | Package embedding metadata does not match current config | Use `--vector-mode recompute`, or switch to a compatible config. |
 

@@ -1,6 +1,6 @@
 # Example: LLM Wiki
 
-Organize material from different sources into interlinked Markdown pages. Each page covers an entity, concept, or question, leading with a conclusion and citing its sources. An `index.md` page provides navigation.
+Organize material from different sources into a Karpathy-style LLM Wiki of interlinked Markdown pages. Each page covers an entity, concept, or question, leading with a conclusion and citing its sources. An `index.md` page provides navigation.
 
 The Skill picks the smallest page type that matches each page's retrieval purpose:
 

@@ -575,7 +575,7 @@ OpenAI 已于 2026 年 8 月 31 日[停止在 ChatGPT 登录的 Codex 中提供 
 
 #### Sparse Embedding
 
-> 以下示例使用支持 sparse 输出的 `doubao-embedding-vision-251215`。Sparse 向量仅适用于文本输入，模型支持范围见方舟[向量化文档](https://docs.volcengine.com/docs/ark/vectorization?lang=zh&redirect=1)。
+> 以下示例使用 `doubao-embedding-vision-251215`，它支持文本输入的 sparse 输出。模型支持范围见方舟[向量化文档](https://docs.volcengine.com/docs/ark/vectorization?lang=zh&redirect=1)。
 
 ```json
 {
@@ -702,7 +702,7 @@ provider，并设置 `storage.vectordb.sparse_weight > 0`。自托管模型的�
 
 添加资源时，VLM 生成：
 
-1. **L0（摘要）**：目录摘要，默认字符上限为 256
+1. **L0（摘要）**：文件或目录摘要，默认字符上限为 256
 2. **L1（概览）**：目录概览，包含导航信息，默认字符上限为 4000
 
 VLM 不可用时，通用文件摘要会返回空内容，目录概览会退回“尚未就绪”的占位内容；可由本地解析器提取的代码骨架等仍按各自路径处理。这种状态不能视为已完成语义索引，应检查模型配置和对应处理任务。
@@ -844,7 +844,7 @@ ollama pull guoxuter/ov_intent_analysis_sft:v7_q8
 
 对于 `ollama/guoxuter/ov_intent_analysis_sft:v7_q8`（以及 `v4_q8`），OpenViking 会在 search 阶段自动使用对应的内置 prompt（分别为 `retrieval.ov_intent_analysis_sft_v7` 和 `retrieval.ov_intent_analysis_sft_v4`），不需要替换 prompt 文件，也不需要设置 `prompts.templates_dir`。如果使用未映射的模型，OpenViking 会继续使用默认的 `retrieval.intent_analysis` prompt。
 
-这样可单独选择检索规划模型，让 `vlm` 继续处理语义提取、记忆提取和多模态内容。实际延迟取决于模型、硬件和请求负载。
+这样可以用小模型承担检索规划，通常延迟更低，同时保留更强的 `vlm` 处理语义提取、记忆提取和多模态内容。实际延迟取决于模型、硬件和请求负载。
 
 
 ### feishu

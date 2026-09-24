@@ -99,6 +99,8 @@ asyncio.run(test())
 
 ### 从隐式 API Key 哈希配置升级
 
+适用于从 v0.3.12 及更早版本升级到 v0.3.13 及之后版本。
+
 **行为变化**：
 - **之前**：`encryption.enabled = true` 隐式启用 API key Argon2id 哈希
 - **现在**：需要显式配置 `encryption.api_key_hashing.enabled`

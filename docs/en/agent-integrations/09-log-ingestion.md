@@ -2,7 +2,7 @@
 
 `openviking-server ingest` reads local agent conversation logs, imports the messages into OpenViking sessions, and commits them for memory extraction. It supports one-time historical imports and ongoing log monitoring without changing the agent or installing a memory plugin.
 
-Run it on the machine that holds the logs. It connects to a local or remote OpenViking server through the SDK. Ingestion is disabled by default; enable both the main switch and the configuration for each chosen agent.
+Run it on the machine that holds the logs. It connects to a local or remote OpenViking server through the SDK. Ingestion is disabled by default, so installing OpenViking does not scan local logs; enable both the main switch and the configuration for each chosen agent.
 
 Source: [openviking/ingest](https://github.com/volcengine/OpenViking/tree/main/openviking/ingest)
 

@@ -1,6 +1,6 @@
 # OVPack 导入导出
 
-OVPack 是 OpenViking 的可恢复内容包格式，用来迁移或备份 `viking://` 下的支持的内容树。
+OVPack 是 OpenViking 的可恢复内容包格式，用来迁移或备份 `viking://` 下受支持的内容树。
 它保存文件内容、语义侧边文件、可迁移的索引标量，以及可选的 dense 向量快照。
 
 OVPack 不是裸 ZIP 拷贝，也不是可信发布格式。导入会校验 manifest、文件列表、目录列表和
@@ -563,7 +563,7 @@ OVPack v2 包也会被当前 OpenViking 拒绝。导入旧包前，需要先用�
 | `source path is incompatible with target path` | 结构化 scope 的 root 层级会改变 | 导入到正确系统父目录。 |
 | `Top-level scope ovpack packages must be imported to viking://` | 将顶级 scope 包导入了非根父目录 | 改为导入 `viking://`。 |
 | `Backup ovpack packages must be restored` | 用普通 import 导入 backup 包 | 使用 `ov restore`。 |
-| `Resource already exists` | 目标 root 已存在 | 换用新的目标父目录、跳过已有 root，或备份目标后明确选择覆盖。 |
+| `Resource already exists` | 目标 root 已存在 | 换用新的目标父目录；用 `--on-conflict skip` 保留已有 root；或备份目标后用 `--on-conflict overwrite` 替换。 |
 | `incomplete OpenViking vector index snapshot` | 使用 `--include-vectors` 时，导出范围内应索引内容缺少索引记录 | 先执行 `ov system consistency <uri>` 定位问题，再等待处理完成或重新 reindex。 |
 | `dense vector snapshot is incompatible` | 包内 embedding 元数据和当前配置不一致 | 用 `--vector-mode recompute`，或换到兼容配置。 |
 

@@ -428,7 +428,7 @@ active configuration remains unchanged. Structurally valid older overrides using
 unsupported Jinja can still be read, replaced or reset, but extraction refuses to
 execute them unchecked. Corrupt YAML remains an explicit error.
 
-For example, show only an event name and summary, without ChatLog:
+For example, this `events` PUT body shows only the event name and summary, without ChatLog:
 
 ```json
 {"content_template": "# {{ event_name.strip() }}\n\n## Summary\n{{ summary.strip() or 'Pending' }}"}
@@ -1499,7 +1499,7 @@ curl -X POST http://localhost:1933/api/v1/admin/migrate \
   -H "X-API-Key: <root-key>" \
   -d '{"action": "migrate"}'
 
-# Clean old namespaces
+# Clean old namespaces after the migration task finishes and migrated data is verified
 curl -X POST http://localhost:1933/api/v1/admin/migrate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <root-key>" \

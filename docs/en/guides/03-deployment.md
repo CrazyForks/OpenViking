@@ -233,7 +233,7 @@ Since the server binds to `0.0.0.0` inside the container (required for Docker po
 }
 ```
 
-The example above uses API key authentication; do not bind unauthenticated development mode outside localhost. See [Authentication](04-authentication.md) for other modes. Override the bind address with `OPENVIKING_SERVER_HOST` if needed.
+Without a `root_api_key`, the server auto-detects dev mode and refuses to start on a non-loopback address. The example above uses API key authentication; see [Authentication](04-authentication.md) for other modes. Override the bind address with `OPENVIKING_SERVER_HOST` if needed.
 
 The image enables Bot by default. In API key mode, Bot also needs a valid User/Admin key in `bot.ov_server.api_key`; a root key is not a data credential. For a server-only deployment, use `--without-bot` below. To run Bot, complete the identity settings in [VikingBot Configuration](17-vikingbot.md).
 

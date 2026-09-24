@@ -25,8 +25,8 @@ Parser 负责文档格式转换和结构化，在临时目录创建文件结构�
 | HTML | HTMLParser | .html, .htm | 已支持 |
 | 代码 | CodeRepositoryParser | github 代码仓库等 | 遵循 `.gitignore` 并忽略常见非代码目录 |
 | 图片 | ImageParser | .png, .jpg 等 | 已支持；处理依赖媒体配置 |
-| 视频 | VideoParser | .mp4, .avi, .mov, .mkv, .webm, .flv, .wmv | 已支持；处理依赖媒体配置 |
-| 音频 | AudioParser | .mp3, .wav, .ogg, .flac, .aac, .m4a, .opus | 已支持；处理依赖媒体配置 |
+| 视频 | VideoParser | .mp4, .avi, .mov, .mkv, .webm, .flv, .wmv, .ts（仅 MPEG-TS 内容） | 已支持；处理依赖媒体配置 |
+| 音频 | AudioParser | .mp3, .wav, .ogg, .flac, .aac, .m4a, .opus, .ac3 | 已支持；处理依赖媒体配置 |
 
 ### 解析产物
 

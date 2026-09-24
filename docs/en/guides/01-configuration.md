@@ -703,7 +703,7 @@ Vision Language Model for semantic extraction (L0/L1 generation).
 
 When resources are added, VLM generates:
 
-1. **L0 (Abstract)**: directory summary, with a default limit of 256 characters
+1. **L0 (Abstract)**: file or directory summary, with a default limit of 256 characters
 2. **L1 (Overview)**: directory overview with navigation, with a default limit of 4000 characters
 
 When the VLM is unavailable, generic file summaries are empty and directory overviews fall back to a not-ready placeholder. Paths such as local code-skeleton extraction retain their own behavior. Do not treat this as completed semantic indexing; inspect the model configuration and processing task.
@@ -846,7 +846,7 @@ Then add the following to your OpenViking configuration:
 
 For `ollama/guoxuter/ov_intent_analysis_sft:v7_q8` (and `v4_q8`), OpenViking automatically uses the matching bundled prompt during search (`retrieval.ov_intent_analysis_sft_v7` and `retrieval.ov_intent_analysis_sft_v4` respectively). No prompt file replacement or `prompts.templates_dir` override is required. If you use an unmapped model, OpenViking keeps the default `retrieval.intent_analysis` prompt.
 
-This separates retrieval planning from the `vlm` used for semantic extraction, memory extraction, and multimodal processing. Actual latency depends on the model, hardware, and request load.
+This lets a smaller model handle retrieval planning, usually with lower latency, while a stronger `vlm` handles semantic extraction, memory extraction, and multimodal processing. Actual latency depends on the model, hardware, and request load.
 
 ### feishu
 

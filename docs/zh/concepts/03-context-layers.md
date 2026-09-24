@@ -50,7 +50,7 @@ L1 提供更完整的目录摘要和导航信息，用于 Rerank 和决定是否
 overview = client.overview(uri="viking://resources/docs/auth")
 ```
 
-资源目录生成语义摘要时，资源目录生成语义摘要时，L0 从 L1 正文中提取：取 H1 标题之后、第一个 `##` 标题之前的 Brief Description 段落。YAML frontmatter 不参与提取。
+资源目录生成语义摘要时，L0 从 L1 正文中提取：取 H1 标题之后、第一个 `##` 标题之前的 Brief Description 段落。YAML frontmatter 不参与提取。
 
 ## L2：详情
 

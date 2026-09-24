@@ -346,7 +346,7 @@ Events 的默认 embedding 模板引用正文，因此正文变化也可能影�
 失败不修改当前发布配置。此前保存的、结构有效但使用不支持 Jinja 的模板仍可读取、重新发布或恢复默认；
 不会绕过新规则继续执行，抽取加载时提示修复。损坏 YAML 仍明确报错。
 
-示例：只展示事件名称和摘要，不输出 ChatLog：
+示例：以下 `events` 的 PUT 请求体只展示事件名称和摘要，不输出 ChatLog：
 
 ```json
 {"content_template": "# {{ event_name.strip() }}\n\n## 事件摘要\n{{ summary.strip() or '待补充' }}"}

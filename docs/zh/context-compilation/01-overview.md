@@ -10,7 +10,7 @@
 - `--to`：输出目录。
 - `--skill`：已安装的 Skill URI，定义输出内容和结构。
 
-可选的 `--instruction` 用来补充本次任务的范围、受众、语言或日期。
+可选的 `--instruction` 用来补充本次任务的范围、受众、语言、侧重点或日期。
 
 编译由服务端配置的 [Agent Runtime](../api/23-agent-runtime.md) 执行，本地部署可使用内置 [VikingBot](../concepts/15-vikingbot.md)。它以请求用户的身份读取来源和 Skill，在独立的 Agent Loop 中整理并写入内容。任务异步运行，返回 `task_id` 后可查询进度和结果。
 

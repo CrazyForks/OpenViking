@@ -25,8 +25,8 @@ Parser handles document format conversion and structuring, creating file structu
 | HTML | HTMLParser | .html, .htm | Supported |
 | Code | CodeRepositoryParser | .py, .js, .go, etc. | Respects `.gitignore` and ignores common non-code directories |
 | Image | ImageParser | .png, .jpg, etc. | Supported; depends on media configuration |
-| Video | VideoParser | .mp4, .avi, .mov, .mkv, .webm, .flv, .wmv | Supported; depends on media configuration |
-| Audio | AudioParser | .mp3, .wav, .ogg, .flac, .aac, .m4a, .opus | Supported; depends on media configuration |
+| Video | VideoParser | .mp4, .avi, .mov, .mkv, .webm, .flv, .wmv, .ts (MPEG-TS content only) | Supported; depends on media configuration |
+| Audio | AudioParser | .mp3, .wav, .ogg, .flac, .aac, .m4a, .opus, .ac3 | Supported; depends on media configuration |
 
 ### Parse Artifacts
 

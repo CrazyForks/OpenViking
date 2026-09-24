@@ -2,7 +2,7 @@
 
 OpenViking exposes a `/metrics` endpoint for Prometheus, Grafana Agent, and other monitoring systems that scrape Prometheus exposition text.
 
-It returns Prometheus text for scheduled collection. For a component status snapshot in JSON, use `/api/v1/observer/*`.
+It returns Prometheus text for scheduled collection: runtime health and service-quality signals, not business analytics. For a component status snapshot in JSON, use `/api/v1/observer/*`.
 
 ## API Reference
 

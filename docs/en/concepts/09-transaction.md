@@ -153,7 +153,7 @@ hold separate ExactPathLocks for the two source files. Refreshing `preferences/.
 
 ### session.commit()
 
-Phase 1 holds an EXACT lock on the session root to establish the commit boundary. Summary generation and memory extraction run in the background, outside that boundary lock:
+Phase 1 holds an EXACT lock on the session root to establish the commit boundary. Summary generation and memory extraction run in the background, outside that boundary lock, because model calls have unpredictable latency (5s~60s+):
 
 ```text
 Phase 1: prepare and publish the archive under lock
@@ -379,7 +379,7 @@ After startup, QueueManager resumes persisted `session_commit` jobs:
 | Crash during add_resource semantic processing | Lifecycle lock expires + SemanticProcessor re-acquires on restart | Worker restart |
 | Crash during session.commit Phase 2 | Persistent `session_commit` queue + resumed consumption | On restart |
 | Crash after enqueue, before worker | QueueFS SQLite persistence | Worker restart |
-| Orphan index | Clean up vectors or rebuild the index | After inspecting and initiating repair |
+| Orphan index | `ov reindex <uri> --mode prune_orphans` (preview with `--dry-run`) | When run manually |
 
 ## Configuration
 

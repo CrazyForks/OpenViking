@@ -1,6 +1,7 @@
 # OAuth 2.1 接入指南
 
-OpenViking 提供原生 OAuth 授权，供支持其发现、动态注册和 PKCE 流程的客户端接入。用户在 Studio 确认身份和授权，客户端取得 access token 和 refresh token。API Key 认证仍可使用。
+OpenViking 提供原生 OAuth 授权，供支持其发现、动态注册和 PKCE 流程的客户端接入，包括 Claude.ai、Claude Desktop、ChatGPT、Cursor 等 MCP 客户端。协议端点（注册、authorize、token、metadata）由官方 `mcp.server.auth` SDK 提供，非 MCP 的 OAuth 客户端也可以走同一流程。用户在 Studio 确认身份和授权，客户端取得 access token 和 refresh token。API Key 认证仍可使用。
+
 ## 推荐配置
 
 先按[认证指南](04-authentication.md)配置 API Key 模式，创建 account 和 user/admin key。OAuth consent 需要这个已注册身份，开启 OAuth 不会自动创建。下面的片段应合并到已有配置。
@@ -32,7 +33,7 @@ OpenViking 提供原生 OAuth 授权，供支持其发现、动态注册和 PKCE
 
 ## 为什么需要原生 OAuth
 
-客户端需要浏览器授权和 token 刷新时，使用 OAuth。原生流程无需额外部署 API Key 桥接代理。首次登录 Studio 仍需已注册的 user/admin API Key，后续授权可以复用 Studio 身份。
+客户端需要浏览器授权和 token 刷新时，使用 OAuth。在原生支持之前，这类客户端需要部署社区的 [MCP-Key2OAuth](https://github.com/t0saki/MCP-Key2OAuth) Cloudflare Worker 代理，把 OAuth 翻译成 API Key bearer。原生流程省去了这个额外部署，代理运营方也不再能接触上游 API Key。首次登录 Studio 仍需已注册的 user/admin API Key，后续授权可以复用 Studio 身份。
 
 ---
 

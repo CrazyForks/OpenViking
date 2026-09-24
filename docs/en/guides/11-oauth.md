@@ -1,6 +1,7 @@
 # OAuth 2.1 Guide
 
-OpenViking provides native OAuth authorization for clients that support its discovery, dynamic registration, and PKCE flow. Users authorize access through Studio, and clients receive opaque access and refresh tokens. API Key authentication remains available.
+OpenViking provides native OAuth authorization for clients that support its discovery, dynamic registration, and PKCE flow, including MCP clients such as Claude.ai, Claude Desktop, ChatGPT, and Cursor. The protocol endpoints (registration, authorize, token, metadata) come from the official `mcp.server.auth` SDK, so non-MCP OAuth clients can use the same flow. Users authorize access through Studio, and clients receive opaque access and refresh tokens. API Key authentication remains available.
+
 ## Recommended setup
 
 Configure API Key mode and create the account and user/admin key first, as described in [Authentication](04-authentication.md). OAuth consent needs this registered identity; enabling OAuth alone does not create it. Merge the excerpts below into the existing configuration.
@@ -35,7 +36,7 @@ After connecting, confirm the client can discover tools and read a permitted URI
 
 ## Why native OAuth
 
-Use OAuth when a client expects browser authorization and token refresh. Native authorization removes the need for a separate API-key bridge. The first Studio sign-in still needs a registered user/admin API key; later approvals can reuse the Studio identity.
+Use OAuth when a client expects browser authorization and token refresh. Before native support, such clients needed the community [MCP-Key2OAuth](https://github.com/t0saki/MCP-Key2OAuth) Cloudflare Worker proxy, which translates OAuth into an API-key bearer. Native authorization removes that extra deployment and the proxy operator's access to the upstream API key. The first Studio sign-in still needs a registered user/admin API key; later approvals can reuse the Studio identity.
 
 ---
 

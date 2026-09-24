@@ -1,6 +1,6 @@
 # Example: Knowledge Graph
 
-Extract entities and their relationships into a knowledge graph, retaining source references. The output contains entity files and an edge list:
+Extract typed entities and typed, directed relationships into a knowledge graph, keeping source references for each statement and edge. The output contains entity files and an edge list:
 
 ```text
 entities/

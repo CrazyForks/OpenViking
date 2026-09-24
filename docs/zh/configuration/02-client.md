@@ -44,7 +44,7 @@ export OPENVIKING_CLI_CONFIG_FILE=/path/to/ovcli.conf
 }
 ```
 
-示例用于 API key 模式，不需要的字段可以省略。本地 `dev` 模式通常只需要 `url`。trusted 部署按[认证指南](../guides/04-authentication.md)另配 `account`、`user` 和对应凭据；普通 API key 模式不应发送这两个身份字段。
+示例用于 API key 模式，不需要的字段可以省略。本地 `dev` 模式通常只需要 `url`。trusted 部署按[认证指南](../guides/04-authentication.md)另配 `account`、`user` 和对应凭据；API key 模式下，服务端按 key 确定身份，忽略这两个字段。
 
 ## 连接与鉴权
 

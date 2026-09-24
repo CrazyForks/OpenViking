@@ -278,7 +278,7 @@ viking://
 
 ## URI 操作
 
-以下 `VikingURI` 辅助类来自服务端 `openviking` 包，不属于独立 Python SDK 的公开接口。
+以下 `VikingURI` 辅助类来自随服务端安装的 `openviking_cli` 包，不属于独立 Python SDK 的公开接口。
 
 ### 解析
 

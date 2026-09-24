@@ -10,7 +10,7 @@ Each run needs:
 - `--to`: the output directory.
 - `--skill`: the URI of an installed Skill that defines the output's content and structure.
 
-Use the optional `--instruction` to specify this run's scope, audience, language, or date range.
+Use the optional `--instruction` to specify this run's scope, audience, language, emphasis, or date range.
 
 The configured [Agent Runtime](../api/23-agent-runtime.md) runs the compilation; local deployments can use the built-in [VikingBot](../concepts/15-vikingbot.md). It reads the sources and Skill under the requesting user's identity, then organizes and writes content in a dedicated agent loop. The task runs asynchronously and returns a `task_id` for checking progress and results.
 

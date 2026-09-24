@@ -163,8 +163,9 @@ When an operation presents all transports together, prefer this order:
 Example tabs are generated from bold labels. Put each invocation label in its own
 paragraph and use one of these fixed base forms: `**Python SDK**`, `**TypeScript SDK**`,
 `**Go SDK**`, `**HTTP API**`, or `**CLI**`. When a transport qualifier is useful,
-put it inside the same bold label, for example `**Python HTTP SDK**`.
-Do not put the qualifier after the bold label. Show only surfaces that are actually
+put it inside the same bold label with ASCII parentheses, for example
+`**Python SDK (HTTP)**`. Do not put the qualifier after the bold label or use
+full-width parentheses. A label such as `**Python HTTP SDK**` does not render as a tab. Show only surfaces that are actually
 implemented. If an SDK or CLI does not expose the capability, omit that tab and
 briefly identify the available alternative. Do not wrap a handwritten HTTP request
 and present it as a nonexistent SDK method.
