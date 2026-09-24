@@ -576,6 +576,7 @@ class _AccessMixin:
                 offset=raw_offset,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                directories_only=directories_only,
             )
             if not raw_entries:
                 return
@@ -588,8 +589,6 @@ class _AccessMixin:
                     real_ctx,
                     acl_enabled=acl_enabled,
                 ):
-                    continue
-                if directories_only and not entry.get("info", {}).get("isDir", False):
                     continue
                 if not await self._read_path_visible(uri, entry["path"], primary_path, real_ctx):
                     continue

@@ -429,6 +429,47 @@ async def test_iter_visible_tree_entries_offset_and_node_limit_after_acl(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_iter_visible_tree_entries_pushes_directory_filter_to_backend(monkeypatch, fs):
+    entries = [
+        make_entry(
+            f"/local/test_account/resources/{name}",
+            name,
+            is_dir=is_dir,
+        )
+        for name, is_dir in [
+            ("file-a.md", False),
+            ("dir-a", True),
+            ("file-b.md", False),
+            ("dir-b", True),
+            ("dir-c", True),
+        ]
+    ]
+    captured = {}
+
+    async def fake_tree_directory(_path, **kwargs):
+        captured["directories_only"] = kwargs.get("directories_only")
+        directories = [entry for entry in entries if entry["info"]["isDir"]]
+        offset = kwargs.get("offset", 0)
+        limit = kwargs.get("node_limit")
+        return directories[offset : offset + limit]
+
+    patch_tree_env(monkeypatch, fs, fake_tree_directory)
+
+    results = []
+    async for entry, _entry_uri in fs._iter_visible_tree_entries(
+        "viking://resources",
+        directories_only=True,
+        offset=1,
+        node_limit=2,
+        ctx=_default_ctx(),
+    ):
+        results.append(entry)
+
+    assert [entry["info"]["name"] for entry in results] == ["dir-b", "dir-c"]
+    assert captured["directories_only"] is True
+
+
+@pytest.mark.asyncio
 async def test_iter_visible_tree_entries_reads_next_page_when_filtering_is_sparse(monkeypatch, fs):
     """PY-ITER-004: sparse visible results advance the RagFS offset."""
     node_limit = 2
@@ -768,7 +809,17 @@ async def test_tree_filters_and_paginates_before_summary_reads(monkeypatch, fs):
             ("dir-d", True),
         ]
     ]
-    patch_tree_env(monkeypatch, fs, entries)
+
+    async def fake_tree_directory(path, **kwargs):
+        filtered = entries
+        if kwargs.get("directories_only"):
+            filtered = [entry for entry in entries if entry["info"]["isDir"]]
+        offset = kwargs.get("offset", 0)
+        limit = kwargs.get("node_limit")
+        page = filtered[offset : offset + limit if limit is not None else None]
+        return _with_query_relative_paths(page, path)
+
+    patch_tree_env(monkeypatch, fs, fake_tree_directory)
     abstract = AsyncMock(return_value="L0 summary")
     overview = AsyncMock(return_value="L1 overview")
     monkeypatch.setattr(fs, "_read_abstract_for_known_dir", abstract)
