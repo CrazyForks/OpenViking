@@ -1606,7 +1606,7 @@ class _OpsMixin:
             entries,
             field="overview",
             limit=overview_limit,
-            reader=self._read_overview_for_known_dir,
+            reader=self.overview,
             fallback="[.overview.md is not ready]",
             ctx=ctx,
         )

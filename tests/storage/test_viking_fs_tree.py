@@ -954,7 +954,7 @@ async def test_batch_fetch_overviews_only_enriches_directories_and_truncates(mon
         assert uri == "viking://resources/docs"
         return "abcdefgh"
 
-    monkeypatch.setattr(fs, "_read_overview_for_known_dir", fake_read_overview)
+    monkeypatch.setattr(fs, "overview", fake_read_overview)
 
     await fs._batch_fetch_overviews(entries, overview_limit=5, ctx=_default_ctx())
 
