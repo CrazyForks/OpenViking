@@ -3,6 +3,7 @@
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -162,7 +163,6 @@ def patch_tree_env(
     *,
     is_accessible=True,
     uri_to_path="/local/test_account/resources",
-    batch_fetch=None,
 ):
     """Install the standard monkeypatch set for tree traversal tests.
 
@@ -181,18 +181,6 @@ def patch_tree_env(
     monkeypatch.setattr(fs, "_uri_to_path", lambda _uri, **_kwargs: uri_to_path)
     monkeypatch.setattr(fs, "_ctx_or_default", lambda _ctx=None: _default_ctx())
     patch_visibility(monkeypatch, fs, is_accessible=is_accessible)
-    if batch_fetch is not None:
-        monkeypatch.setattr(fs, "_batch_fetch_abstracts", batch_fetch)
-
-
-async def default_batch_fetch(entries, abs_limit, **_kwargs):
-    """Shared abstract enrichment fake: dirs get a mock abstract (truncated to
-    abs_limit), files get an empty abstract."""
-    for entry in entries:
-        abstract = "mock abstract" if entry.get("isDir") else ""
-        if len(abstract) > abs_limit:
-            abstract = abstract[: abs_limit - 3] + "..."
-        entry["abstract"] = abstract
 
 
 # ── _is_name_visible_at_path / _ancestor_is_filtered tests ──
@@ -441,37 +429,6 @@ async def test_iter_visible_tree_entries_offset_and_node_limit_after_acl(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_iter_visible_tree_entries_filters_directories_before_pagination(monkeypatch, fs):
-    entries = [
-        make_entry(
-            f"/local/test_account/resources/{name}",
-            name,
-            is_dir=is_dir,
-        )
-        for name, is_dir in [
-            ("file-a.md", False),
-            ("dir-a", True),
-            ("file-b.md", False),
-            ("dir-b", True),
-            ("dir-c", True),
-        ]
-    ]
-    patch_tree_env(monkeypatch, fs, entries)
-
-    results = []
-    async for entry, _entry_uri in fs._iter_visible_tree_entries(
-        "viking://resources",
-        directories_only=True,
-        offset=1,
-        node_limit=2,
-        ctx=_default_ctx(),
-    ):
-        results.append(entry)
-
-    assert [entry["info"]["name"] for entry in results] == ["dir-b", "dir-c"]
-
-
-@pytest.mark.asyncio
 async def test_iter_visible_tree_entries_reads_next_page_when_filtering_is_sparse(monkeypatch, fs):
     """PY-ITER-004: sparse visible results advance the RagFS offset."""
     node_limit = 2
@@ -544,7 +501,7 @@ async def test_tree_original_structure(monkeypatch, fs):
     ]
     patch_tree_env(monkeypatch, fs, entries)
 
-    result = await fs._tree_original("viking://resources", ctx=_default_ctx())
+    result = await fs.tree("viking://resources", output="original", ctx=_default_ctx())
 
     assert len(result) == 1
     e = result[0]
@@ -555,6 +512,8 @@ async def test_tree_original_structure(monkeypatch, fs):
     assert e["isDir"] is False
     assert e["rel_path"] == "a"
     assert e["uri"] == "viking://resources/a"
+    assert "abstract" not in e
+    assert "overview" not in e
 
 
 @pytest.mark.asyncio
@@ -657,60 +616,53 @@ async def test_tree_original_dfs_order(monkeypatch, fs):
 
 @pytest.mark.asyncio
 async def test_tree_agent_structure(monkeypatch, fs):
-    """PY-AGENT-001: Agent output structure."""
+    """Agent defaults and explicit summary controls preserve the listing contract."""
     entries = [
-        make_entry("/local/test_account/resources/a", "a", size=100, mode=0o644, is_dir=False),
-        make_entry("/local/test_account/resources/sub", "sub", is_dir=True),
+        make_entry("/local/test_account/resources/a", "a", size=100, is_dir=False),
+        make_entry("/local/test_account/resources/sub", "sub", size=999, is_dir=True),
     ]
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
+    patch_tree_env(monkeypatch, fs, entries)
+    abstract = AsyncMock(return_value="L0 summary")
+    overview = AsyncMock(return_value="L1 overview")
+    monkeypatch.setattr(fs, "_read_abstract_for_known_dir", abstract)
+    monkeypatch.setattr(fs, "overview", overview)
 
-    result = await fs.tree(
-        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
-    )
+    result = await fs.tree("viking://resources", output="agent", ctx=_default_ctx())
 
-    assert len(result) == 2
-    assert set(result[0].keys()) == {"uri", "size", "isDir", "modTime", "rel_path", "abstract"}
-    assert "name" not in result[0]
-
-
-@pytest.mark.asyncio
-async def test_tree_agent_dir_size_zero(monkeypatch, fs):
-    """PY-AGENT-002: Directory size is always 0."""
-    entries = [make_entry("/local/test_account/resources/sub", "sub", size=999, is_dir=True)]
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
-
-    result = await fs.tree(
-        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
-    )
-    assert result[0]["size"] == 0
-
-
-@pytest.mark.asyncio
-async def test_tree_agent_non_dir_abstract_empty(monkeypatch, fs):
-    """PY-AGENT-004: Non-directory entries have empty abstract."""
-    entries = [
-        make_entry("/local/test_account/resources/a", "a", size=100, mode=0o644, is_dir=False)
+    assert result == [
+        {
+            "uri": "viking://resources/a",
+            "size": 100,
+            "isDir": False,
+            "modTime": "2026-01-01T00:00:00.000Z",
+            "rel_path": "a",
+            "abstract": "",
+        },
+        {
+            "uri": "viking://resources/sub",
+            "size": 0,
+            "isDir": True,
+            "modTime": "2026-01-01T00:00:00.000Z",
+            "rel_path": "sub",
+            "abstract": "L0 summary",
+        },
     ]
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
+    abstract.assert_awaited_once_with("viking://resources/sub", ctx=_default_ctx())
+    overview.assert_not_awaited()
+    abstract.reset_mock()
 
     result = await fs.tree(
-        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
+        "viking://resources",
+        output="agent",
+        include_abstract=False,
+        include_overview=True,
+        ctx=_default_ctx(),
     )
-    assert result[0]["abstract"] == ""
 
-
-@pytest.mark.asyncio
-async def test_tree_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
-    """PY-AGENT-003: modTime is returned as a raw UTC timestamp."""
-    entries = [
-        make_entry("/local/test_account/resources/a", "a", size=100, mode=0o644, is_dir=False)
-    ]
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
-
-    result = await fs.tree(
-        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
-    )
-    assert result[0]["modTime"] == "2026-01-01T00:00:00.000Z"
+    assert all("abstract" not in entry for entry in result)
+    assert [entry["overview"] for entry in result] == ["", "L1 overview"]
+    abstract.assert_not_awaited()
+    overview.assert_awaited_once_with("viking://resources/sub", ctx=_default_ctx())
 
 
 @pytest.mark.asyncio
@@ -725,7 +677,7 @@ async def test_tree_agent_normalizes_modtime_to_utc(monkeypatch, fs):
             is_dir=False,
         )
     ]
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
+    patch_tree_env(monkeypatch, fs, entries)
     monkeypatch.setattr(viking_fs_module, "datetime", _FixedDatetime)
 
     result = await fs.tree(
@@ -763,7 +715,6 @@ async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
     monkeypatch.setattr(fs, "_ls_entries", fake_ls_entries)
     monkeypatch.setattr(fs, "_path_to_uri", _std_path_to_uri)
     monkeypatch.setattr(fs, "_is_accessible", lambda _uri, _ctx: True)
-    monkeypatch.setattr(fs, "_batch_fetch_abstracts", default_batch_fetch)
     monkeypatch.setattr(viking_fs_module, "datetime", _FixedDatetime)
 
     async def acl_enabled(_account_id):
@@ -802,161 +753,52 @@ async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
 
 
 @pytest.mark.asyncio
-async def test_tree_agent_abs_limit_truncation(monkeypatch, fs):
-    """PY-AGENT-005: abstract is truncated when exceeding abs_limit."""
-    entries = [make_entry("/local/test_account/resources/sub", "sub", is_dir=True)]
-
-    async def fake_batch_fetch(entries_arg, abs_limit, **_kwargs):
-        for entry in entries_arg:
-            abstract = "x" * (abs_limit + 10) if entry.get("isDir") else ""
-            if len(abstract) > abs_limit:
-                abstract = abstract[: abs_limit - 3] + "..."
-            entry["abstract"] = abstract
-
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=fake_batch_fetch)
-
-    result = await fs.tree(
-        "viking://resources", output="agent", abs_limit=10, ctx=_default_ctx()
-    )
-    assert len(result[0]["abstract"]) <= 10
-    assert result[0]["abstract"].endswith("...")
-
-
-@pytest.mark.asyncio
-async def test_tree_agent_batch_fetch_input_order(monkeypatch, fs):
-    """PY-AGENT-006: _batch_fetch_abstracts receives entries in correct order."""
-    captured_entries = None
-
+async def test_tree_filters_and_paginates_before_summary_reads(monkeypatch, fs):
+    """Only selected directories consume node slots and summary reads."""
     entries = [
-        make_entry("/local/test_account/resources/a", "a", size=100, mode=0o644, is_dir=False),
-        make_entry(
-            "/local/test_account/resources/b",
-            "b",
-            size=200,
-            mode=0o644,
-            mod_time="2026-01-02T00:00:00Z",
-            is_dir=False,
-        ),
+        make_entry(f"/local/test_account/resources/{name}", is_dir=is_dir)
+        for name, is_dir in [
+            ("file-a.md", False),
+            ("dir-a", True),
+            ("dir-a/.abstract.md", False),
+            ("dir-a/.overview.md", False),
+            ("file-b.md", False),
+            ("dir-b", True),
+            ("dir-c", True),
+            ("dir-d", True),
+        ]
     ]
-
-    async def fake_batch_fetch(entries_arg, _abs_limit, **_kwargs):
-        nonlocal captured_entries
-        captured_entries = list(entries_arg)
-        for entry in entries_arg:
-            entry["abstract"] = ""
-
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=fake_batch_fetch)
-
-    await fs.tree("viking://resources", output="agent", abs_limit=256, ctx=_default_ctx())
-    assert len(captured_entries) == 2
-    assert captured_entries[0]["uri"] == "viking://resources/a"
-    assert captured_entries[1]["uri"] == "viking://resources/b"
-
-
-@pytest.mark.asyncio
-async def test_tree_agent_node_limit_before_enrichment(monkeypatch, fs):
-    """PY-AGENT-007: node_limit applied before abstract enrichment."""
-    enriched_count = 0
-
-    entries = [
-        make_entry(f"/local/test_account/resources/{name}", name, is_dir=False)
-        for name in ["a", "b", "c", "d", "e"]
-    ]
-
-    async def fake_batch_fetch(entries_arg, _abs_limit, **_kwargs):
-        nonlocal enriched_count
-        enriched_count = len(entries_arg)
-        for entry in entries_arg:
-            entry["abstract"] = ""
-
-    patch_tree_env(monkeypatch, fs, entries, batch_fetch=fake_batch_fetch)
-
-    result = await fs.tree(
-        "viking://resources",
-        output="agent",
-        node_limit=2,
-        abs_limit=256,
-        ctx=_default_ctx(),
-    )
-    assert len(result) == 2
-    assert enriched_count == 2
-
-
-@pytest.mark.asyncio
-async def test_tree_explicit_summary_controls_apply_after_node_limit(monkeypatch, fs):
-    entries = [
-        make_entry(f"/local/test_account/resources/{name}", name, is_dir=True)
-        for name in ["a", "b", "c"]
-    ]
-    abstract_calls = []
-    overview_calls = []
     patch_tree_env(monkeypatch, fs, entries)
-
-    async def fake_abstracts(entries_arg, limit, **_kwargs):
-        abstract_calls.append(([entry["uri"] for entry in entries_arg], limit))
-        for entry in entries_arg:
-            entry["abstract"] = "abstract"
-
-    async def fake_overviews(entries_arg, limit, **_kwargs):
-        overview_calls.append(([entry["uri"] for entry in entries_arg], limit))
-        for entry in entries_arg:
-            entry["overview"] = "overview"
-
-    monkeypatch.setattr(fs, "_batch_fetch_abstracts", fake_abstracts)
-    monkeypatch.setattr(fs, "_batch_fetch_overviews", fake_overviews)
+    abstract = AsyncMock(return_value="L0 summary")
+    overview = AsyncMock(return_value="L1 overview")
+    monkeypatch.setattr(fs, "_read_abstract_for_known_dir", abstract)
+    monkeypatch.setattr(fs, "overview", overview)
 
     result = await fs.tree(
         "viking://resources",
         output="original",
+        directories_only=True,
+        show_all_hidden=True,
+        offset=1,
+        node_limit=2,
         include_abstract=True,
         include_overview=True,
-        abs_limit=64,
-        overview_limit=512,
-        node_limit=2,
+        abs_limit=5,
+        overview_limit=7,
         ctx=_default_ctx(),
     )
 
-    assert len(result) == 2
-    assert abstract_calls == [(["viking://resources/a", "viking://resources/b"], 64)]
-    assert overview_calls == [(["viking://resources/a", "viking://resources/b"], 512)]
-    assert all(entry["abstract"] == "abstract" for entry in result)
-    assert all(entry["overview"] == "overview" for entry in result)
-
-
-@pytest.mark.asyncio
-async def test_tree_explicit_false_disables_agent_abstracts(monkeypatch, fs):
-    entries = [make_entry("/local/test_account/resources/sub", "sub", is_dir=True)]
-    patch_tree_env(monkeypatch, fs, entries)
-
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("abstract enrichment must be disabled")
-
-    monkeypatch.setattr(fs, "_batch_fetch_abstracts", fail_if_called)
-
-    result = await fs.tree(
-        "viking://resources",
-        output="agent",
-        include_abstract=False,
-        ctx=_default_ctx(),
-    )
-
-    assert "abstract" not in result[0]
-
-
-@pytest.mark.asyncio
-async def test_batch_fetch_overviews_only_enriches_directories_and_truncates(monkeypatch, fs):
-    entries = [
-        {"uri": "viking://resources/docs", "isDir": True},
-        {"uri": "viking://resources/readme.md", "isDir": False},
+    assert [entry["uri"] for entry in result] == [
+        "viking://resources/dir-b",
+        "viking://resources/dir-c",
     ]
-
-    async def fake_read_overview(uri, **_kwargs):
-        assert uri == "viking://resources/docs"
-        return "abcdefgh"
-
-    monkeypatch.setattr(fs, "overview", fake_read_overview)
-
-    await fs._batch_fetch_overviews(entries, overview_limit=5, ctx=_default_ctx())
-
-    assert entries[0]["overview"] == "ab..."
-    assert entries[1]["overview"] == ""
+    assert all(entry["isDir"] for entry in result)
+    assert [(entry["abstract"], entry["overview"]) for entry in result] == [
+        ("L0...", "L1 o..."),
+        ("L0...", "L1 o..."),
+    ]
+    for reader in (abstract, overview):
+        assert sorted(call.args[0] for call in reader.await_args_list) == [
+            "viking://resources/dir-b",
+            "viking://resources/dir-c",
+        ]

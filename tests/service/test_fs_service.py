@@ -14,6 +14,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.service.fs_service import FSService
 from openviking.storage.abstract_overview import body_for_preview
 from openviking.storage.errors import LockAcquisitionError
+from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -745,13 +746,30 @@ async def test_ls_tag_filter_keeps_zero_node_limit_unbounded_for_entry_and_simpl
 
 
 @pytest.mark.asyncio
-async def test_tree_projects_directory_tags_from_abstract_and_overview_records(request_context):
+async def test_tree_projects_directory_tags_before_pagination_and_summaries(
+    request_context, monkeypatch
+):
     directory = {"uri": "viking://resources/docs", "isDir": True}
-    viking_fs = SimpleNamespace(tree=AsyncMock(return_value=[directory]))
+    entries = [
+        {"uri": "viking://resources/unmatched", "isDir": True},
+        {"uri": "viking://resources/skipped", "isDir": True},
+        directory,
+    ]
+    viking_fs = VikingFS(agfs=SimpleNamespace())
+    monkeypatch.setattr(viking_fs, "tree", AsyncMock(return_value=entries))
+    abstract = AsyncMock(return_value="L0 summary")
+    overview = AsyncMock(return_value="L1 overview")
+    monkeypatch.setattr(viking_fs, "_read_abstract_for_known_dir", abstract)
+    monkeypatch.setattr(viking_fs, "overview", overview)
 
     class FakeVikingDB:
         async def filter(self, **_kwargs):
             return [
+                {
+                    "uri": "viking://resources/skipped",
+                    "level": 0,
+                    "search_tags": ["team=search", "env=prod"],
+                },
                 {"uri": "viking://resources/docs", "level": 0, "search_tags": ["team=search"]},
                 {
                     "uri": "viking://resources/docs",
@@ -766,12 +784,27 @@ async def test_tree_projects_directory_tags_from_abstract_and_overview_records(r
         "viking://resources",
         ctx=request_context,
         tags=["team=search", "env=prod"],
+        node_limit=1,
+        offset=1,
+        include_abstract=True,
+        include_overview=True,
     )
 
     assert result == [
-        {"uri": "viking://resources/docs", "isDir": True, "tags": ["team=search", "env=prod"]}
+        {
+            **directory,
+            "tags": ["team=search", "env=prod"],
+            "abstract": "L0 summary",
+            "overview": "L1 overview",
+        }
     ]
-    assert viking_fs.tree.await_args.kwargs["node_limit"] == 1000
+    # Intermediate pages must not load summaries before tag filtering selects the final page.
+    fetch_options = viking_fs.tree.await_args.kwargs
+    assert fetch_options["output"] == "original"
+    assert fetch_options["include_abstract"] is None
+    assert fetch_options["include_overview"] is False
+    abstract.assert_awaited_once_with(directory["uri"], ctx=request_context)
+    overview.assert_awaited_once_with(directory["uri"], ctx=request_context)
 
 
 @pytest.mark.asyncio
@@ -798,45 +831,6 @@ async def test_tree_tag_filter_keeps_zero_node_limit_unbounded(request_context):
         "viking://resources/b.md",
     ]
     assert viking_fs.tree.await_args.kwargs["node_limit"] is None
-
-
-@pytest.mark.asyncio
-async def test_tree_combines_directory_filter_tags_and_summary_enrichment(request_context):
-    directory = {"uri": "viking://resources/docs", "isDir": True}
-    finalized = [{**directory, "abstract": "L0", "overview": "L1"}]
-    viking_fs = SimpleNamespace(
-        tree=AsyncMock(return_value=[directory]),
-        _finalize_listing_entries=AsyncMock(return_value=finalized),
-    )
-
-    class FakeVikingDB:
-        async def filter(self, **_kwargs):
-            return [
-                {
-                    "uri": directory["uri"],
-                    "level": 0,
-                    "search_tags": ["team=search"],
-                }
-            ]
-
-    service = FSService(viking_fs=viking_fs, vikingdb=FakeVikingDB())
-    result = await service.tree(
-        "viking://resources",
-        ctx=request_context,
-        tags=["team=search"],
-        directories_only=True,
-        include_abstract=True,
-        include_overview=True,
-        overview_limit=512,
-    )
-
-    assert result == finalized
-    assert viking_fs.tree.await_args.kwargs["directories_only"] is True
-    assert viking_fs.tree.await_args.kwargs["output"] == "original"
-    finalize_kwargs = viking_fs._finalize_listing_entries.await_args.kwargs
-    assert finalize_kwargs["include_abstract"] is True
-    assert finalize_kwargs["include_overview"] is True
-    assert finalize_kwargs["overview_limit"] == 512
 
 
 @pytest.mark.asyncio
