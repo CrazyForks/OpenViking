@@ -652,7 +652,7 @@ async def test_tree_original_dfs_order(monkeypatch, fs):
     assert len(result) == 3
 
 
-# ── _tree_agent tests ──
+# ── tree agent output tests ──
 
 
 @pytest.mark.asyncio
@@ -664,7 +664,9 @@ async def test_tree_agent_structure(monkeypatch, fs):
     ]
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
 
-    result = await fs._tree_agent("viking://resources", abs_limit=256, ctx=_default_ctx())
+    result = await fs.tree(
+        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
+    )
 
     assert len(result) == 2
     assert set(result[0].keys()) == {"uri", "size", "isDir", "modTime", "rel_path", "abstract"}
@@ -677,7 +679,9 @@ async def test_tree_agent_dir_size_zero(monkeypatch, fs):
     entries = [make_entry("/local/test_account/resources/sub", "sub", size=999, is_dir=True)]
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
 
-    result = await fs._tree_agent("viking://resources", abs_limit=256, ctx=_default_ctx())
+    result = await fs.tree(
+        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
+    )
     assert result[0]["size"] == 0
 
 
@@ -689,7 +693,9 @@ async def test_tree_agent_non_dir_abstract_empty(monkeypatch, fs):
     ]
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
 
-    result = await fs._tree_agent("viking://resources", abs_limit=256, ctx=_default_ctx())
+    result = await fs.tree(
+        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
+    )
     assert result[0]["abstract"] == ""
 
 
@@ -701,7 +707,9 @@ async def test_tree_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
     ]
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
 
-    result = await fs._tree_agent("viking://resources", abs_limit=256, ctx=_default_ctx())
+    result = await fs.tree(
+        "viking://resources", output="agent", abs_limit=256, ctx=_default_ctx()
+    )
     assert result[0]["modTime"] == "2026-01-01T00:00:00.000Z"
 
 
@@ -720,8 +728,9 @@ async def test_tree_agent_normalizes_modtime_to_utc(monkeypatch, fs):
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=default_batch_fetch)
     monkeypatch.setattr(viking_fs_module, "datetime", _FixedDatetime)
 
-    result = await fs._tree_agent(
+    result = await fs.tree(
         "viking://resources",
+        output="agent",
         abs_limit=256,
         ctx=_default_ctx(),
     )
@@ -806,7 +815,9 @@ async def test_tree_agent_abs_limit_truncation(monkeypatch, fs):
 
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=fake_batch_fetch)
 
-    result = await fs._tree_agent("viking://resources", abs_limit=10, ctx=_default_ctx())
+    result = await fs.tree(
+        "viking://resources", output="agent", abs_limit=10, ctx=_default_ctx()
+    )
     assert len(result[0]["abstract"]) <= 10
     assert result[0]["abstract"].endswith("...")
 
@@ -836,7 +847,7 @@ async def test_tree_agent_batch_fetch_input_order(monkeypatch, fs):
 
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=fake_batch_fetch)
 
-    await fs._tree_agent("viking://resources", abs_limit=256, ctx=_default_ctx())
+    await fs.tree("viking://resources", output="agent", abs_limit=256, ctx=_default_ctx())
     assert len(captured_entries) == 2
     assert captured_entries[0]["uri"] == "viking://resources/a"
     assert captured_entries[1]["uri"] == "viking://resources/b"
@@ -860,8 +871,12 @@ async def test_tree_agent_node_limit_before_enrichment(monkeypatch, fs):
 
     patch_tree_env(monkeypatch, fs, entries, batch_fetch=fake_batch_fetch)
 
-    result = await fs._tree_agent(
-        "viking://resources", node_limit=2, abs_limit=256, ctx=_default_ctx()
+    result = await fs.tree(
+        "viking://resources",
+        output="agent",
+        node_limit=2,
+        abs_limit=256,
+        ctx=_default_ctx(),
     )
     assert len(result) == 2
     assert enriched_count == 2

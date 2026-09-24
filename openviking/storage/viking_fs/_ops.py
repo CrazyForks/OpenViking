@@ -1861,40 +1861,6 @@ class _OpsMixin:
             result.append(new_entry)
         return result
 
-    async def _tree_agent(
-        self,
-        uri: str,
-        abs_limit: int,
-        show_all_hidden: bool = False,
-        node_limit: Optional[int] = 1000,
-        level_limit: Optional[int] = 3,
-        offset: int = 0,
-        sort_by: Optional[str] = None,
-        sort_order: str = "asc",
-        ctx: Optional[RequestContext] = None,
-        directories_only: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """Recursively list all contents (agent format with abstracts)."""
-        entries = await self._tree_original(
-            uri,
-            show_all_hidden=show_all_hidden,
-            directories_only=directories_only,
-            node_limit=node_limit,
-            level_limit=level_limit,
-            offset=offset,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            ctx=ctx,
-        )
-        return await self._finalize_listing_entries(
-            entries,
-            "agent",
-            abs_limit,
-            None,
-            True,
-            ctx=ctx,
-        )
-
     # ========== Vector Sync Helper Methods ==========
 
     async def _collect_uris(
